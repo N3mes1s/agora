@@ -10,30 +10,20 @@ name = "agora"
 path = "src/main.rs"
 
 [dependencies]
-# Crypto: AES-256-GCM, HKDF-SHA256 (same as ring uses internally)
 ring = "0.17"
-
-# HTTP client for ntfy.sh relay (blocking, with native TLS cert detection)
-reqwest = { version = "0.12", features = ["blocking", "rustls-tls-native-roots"], default-features = false }
-
-# CLI argument parsing
+reqwest = { version = "0.12", features = ["blocking", "rustls-tls-webpki-roots"], default-features = false }
 clap = { version = "4", features = ["derive"] }
-
-# Serialization
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-
-# Base64 encoding for wire format
 base64 = "0.22"
-
-# Hex encoding for keys/fingerprints
 hex = "0.4"
-
-# Timestamps
 chrono = { version = "0.4", features = ["serde"] }
-
-# Home directory detection
 dirs = "6"
+
+[features]
+default = []
+# Build with --features native-roots for proxied envs with custom CAs
+native-roots = ["reqwest/rustls-tls-native-roots"]
 
 [profile.release]
 opt-level = "s"
