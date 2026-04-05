@@ -113,6 +113,19 @@ enum Commands {
         from: Option<String>,
     },
 
+    /// Start background daemon (SSE watcher + flag file for hooks)
+    Daemon,
+
+    /// Check flag file for new messages (for asyncRewake hooks)
+    Notify {
+        /// Exit code 2 on new message (for asyncRewake)
+        #[arg(long)]
+        wake: bool,
+    },
+
+    /// Stop the background daemon
+    Stop,
+
     /// Live tail — stream messages in real-time (always-on)
     Watch,
 
@@ -435,6 +448,33 @@ fn main() {
                     eprintln!("  Error: {e}");
                     process::exit(1);
                 }
+            }
+        }
+
+        Commands::Daemon => {
+            match chat::daemon(None, "/tmp/.agora_notify", "/tmp/.agora_daemon.pid") {
+                Ok(pid) => println!("  Daemon started (PID {pid}). Watching for messages.\n  Hook: agora notify --wake"),
+                Err(e) => {
+                    eprintln!("  Error: {e}");
+                    process::exit(1);
+                }
+            }
+        }
+
+        Commands::Notify { wake } => {
+            let msg = chat::notify("/tmp/.agora_notify");
+            if !msg.is_empty() {
+                println!("  {msg}");
+                if wake {
+                    process::exit(2);
+                }
+            }
+        }
+
+        Commands::Stop => {
+            match chat::stop_daemon("/tmp/.agora_daemon.pid") {
+                Ok(()) => println!("  Daemon stopped."),
+                Err(e) => eprintln!("  {e}"),
             }
         }
 

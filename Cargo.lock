@@ -11,6 +11,7 @@ dependencies = [
  "clap",
  "dirs",
  "hex",
+ "libc",
  "reqwest",
  "ring",
  "serde",
