@@ -12,6 +12,11 @@ use std::fs;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+/// Process-wide mutex for tests that mutate env vars (AGORA_DIR / AGORA_AGENT_ID).
+/// Exported so sibling test modules can share the same lock.
+#[cfg(test)]
+pub static TEST_ENV_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 fn agora_dir() -> PathBuf {
     if let Ok(dir) = std::env::var("AGORA_DIR") {
         if !dir.is_empty() {
@@ -462,21 +467,22 @@ mod tests {
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    fn isolated_dir() -> PathBuf {
+    fn isolated_dir() -> (PathBuf, std::sync::MutexGuard<'static, ()>) {
+        let guard = super::TEST_ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let ts = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let dir = std::env::temp_dir().join(format!("agora-store-test-{ts}"));
+        let tid = std::thread::current().id();
+        let dir = std::env::temp_dir().join(format!("agora-store-test-{ts}-{tid:?}"));
         std::fs::create_dir_all(&dir).unwrap();
-        // Use AGORA_DIR override so we don't touch the real home dir.
         unsafe { std::env::set_var("AGORA_DIR", &dir); }
-        dir
+        (dir, guard)
     }
 
     #[test]
     fn receipt_save_and_load() {
-        let _dir = isolated_dir();
+        let (_dir, _guard) = isolated_dir();
         let room = "ag-test-room";
 
         save_receipt(room, "msg1", "agent-a", 1000);
@@ -491,7 +497,7 @@ mod tests {
 
     #[test]
     fn receipt_deduplicates_same_agent() {
-        let _dir = isolated_dir();
+        let (_dir, _guard) = isolated_dir();
         let room = "ag-dedup-room";
 
         save_receipt(room, "msg2", "agent-a", 1000);
@@ -503,7 +509,7 @@ mod tests {
 
     #[test]
     fn is_receipted_and_mark_receipted() {
-        let _dir = isolated_dir();
+        let (_dir, _guard) = isolated_dir();
         let room = "ag-mark-room";
 
         assert!(!is_receipted(room, "msg3"));
@@ -516,7 +522,7 @@ mod tests {
 
     #[test]
     fn receipts_isolated_per_message() {
-        let _dir = isolated_dir();
+        let (_dir, _guard) = isolated_dir();
         let room = "ag-isolated-room";
 
         save_receipt(room, "msgA", "agent-x", 200);

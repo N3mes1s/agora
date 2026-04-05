@@ -573,24 +573,26 @@ mod tests {
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    fn temp_home() -> PathBuf {
+    fn unique_agora_dir(prefix: &str) -> PathBuf {
         let ts = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        std::env::temp_dir().join(format!("agora-watch-heartbeat-{ts}"))
+        let tid = std::thread::current().id();
+        std::env::temp_dir().join(format!("agora-{prefix}-{ts}-{tid:?}"))
     }
 
-    fn setup_receipt_room() -> PathBuf {
-        let home = temp_home();
-        std::fs::create_dir_all(&home).unwrap();
+    fn setup_receipt_room() -> (PathBuf, std::sync::MutexGuard<'static, ()>) {
+        let guard = crate::store::TEST_ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = unique_agora_dir("receipt");
+        std::fs::create_dir_all(&dir).unwrap();
         unsafe {
-            std::env::set_var("HOME", &home);
+            std::env::set_var("AGORA_DIR", &dir);
             std::env::set_var("AGORA_AGENT_ID", "receipt-test");
         }
         store::add_room("ag-receipt-test", "secret-receipt", "receipts", Role::Admin);
         store::set_active_room("receipts");
-        home
+        (dir, guard)
     }
 
     #[test]
@@ -604,7 +606,7 @@ mod tests {
 
     #[test]
     fn receipt_stored_and_loaded() {
-        let _home = setup_receipt_room();
+        let (_dir, _guard) = setup_receipt_room();
         let room_id = "ag-receipt-test";
 
         store::save_receipt(room_id, "msg001", "alice", 1000);
@@ -619,7 +621,7 @@ mod tests {
 
     #[test]
     fn process_receipt_updates_store() {
-        let _home = setup_receipt_room();
+        let (_dir, _guard) = setup_receipt_room();
         let room_id = "ag-receipt-test";
 
         let env = json!({
@@ -636,7 +638,7 @@ mod tests {
 
     #[test]
     fn mark_receipted_idempotent() {
-        let _home = setup_receipt_room();
+        let (_dir, _guard) = setup_receipt_room();
         let room_id = "ag-receipt-test";
 
         assert!(!store::is_receipted(room_id, "m1"));
@@ -657,17 +659,12 @@ mod tests {
             .unwrap_or(0)
     }
 
-    fn setup_pin_room() -> (PathBuf, String, String) {
-        let home = std::env::temp_dir().join(format!(
-            "agora-pin-test-{}",
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&home).unwrap();
+    fn setup_pin_room() -> (PathBuf, String, String, std::sync::MutexGuard<'static, ()>) {
+        let guard = crate::store::TEST_ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = unique_agora_dir("pin");
+        std::fs::create_dir_all(&dir).unwrap();
         unsafe {
-            std::env::set_var("HOME", &home);
+            std::env::set_var("AGORA_DIR", &dir);
             std::env::set_var("AGORA_AGENT_ID", "pin-test");
         }
 
@@ -691,15 +688,16 @@ mod tests {
             "v": "3.0",
         }));
 
-        (home, first, second)
+        (dir, first, second, guard)
     }
 
     #[test]
     fn resolve_room_reports_missing_explicit_target() {
-        let home = temp_home();
-        std::fs::create_dir_all(&home).unwrap();
+        let _guard = crate::store::TEST_ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = unique_agora_dir("resolve");
+        std::fs::create_dir_all(&dir).unwrap();
         unsafe {
-            std::env::set_var("HOME", &home);
+            std::env::set_var("AGORA_DIR", &dir);
             std::env::set_var("AGORA_AGENT_ID", "watch-test");
         }
 
@@ -709,10 +707,11 @@ mod tests {
 
     #[test]
     fn watch_heartbeat_targets_watched_room_not_active_room() {
-        let home = temp_home();
-        std::fs::create_dir_all(&home).unwrap();
+        let _guard = crate::store::TEST_ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = unique_agora_dir("watch");
+        std::fs::create_dir_all(&dir).unwrap();
         unsafe {
-            std::env::set_var("HOME", &home);
+            std::env::set_var("AGORA_DIR", &dir);
             std::env::set_var("AGORA_AGENT_ID", "watch-test");
         }
 
@@ -736,7 +735,7 @@ mod tests {
 
     #[test]
     fn pin_and_unpin_round_trip() {
-        let (_home, first, _second) = setup_pin_room();
+        let (_dir, first, _second, _guard) = setup_pin_room();
 
         let (resolved, added) = pin("aaaa", None).unwrap();
         assert_eq!(resolved, first);
