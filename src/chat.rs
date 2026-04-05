@@ -16,7 +16,7 @@
 
 use base64::Engine;
 use serde_json::json;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use ring::rand::SecureRandom;
@@ -399,6 +399,103 @@ pub fn search(
         .collect();
     results.sort_by_key(|m| m["ts"].as_u64().unwrap_or(0));
     Ok(results)
+}
+
+#[derive(Clone)]
+pub struct ThreadItem {
+    pub depth: usize,
+    pub env: serde_json::Value,
+}
+
+fn resolve_message_id(msgs: &[serde_json::Value], needle: &str) -> Result<String, String> {
+    if msgs.iter().any(|m| m["id"].as_str() == Some(needle)) {
+        return Ok(needle.to_string());
+    }
+
+    let matches: Vec<String> = msgs
+        .iter()
+        .filter_map(|m| {
+            let id = m["id"].as_str()?;
+            id.starts_with(needle).then(|| id.to_string())
+        })
+        .collect();
+
+    match matches.len() {
+        0 => Err(format!("Message '{needle}' not found in local cache.")),
+        1 => Ok(matches[0].clone()),
+        _ => Err(format!(
+            "Message ID '{needle}' is ambiguous: {}",
+            matches
+                .into_iter()
+                .take(5)
+                .collect::<Vec<_>>()
+                .join(", ")
+        )),
+    }
+}
+
+fn walk_thread(
+    env: &serde_json::Value,
+    depth: usize,
+    children: &HashMap<String, Vec<serde_json::Value>>,
+    out: &mut Vec<ThreadItem>,
+) {
+    out.push(ThreadItem {
+        depth,
+        env: env.clone(),
+    });
+
+    if let Some(id) = env["id"].as_str() {
+        if let Some(replies) = children.get(id) {
+            for reply in replies {
+                walk_thread(reply, depth + 1, children, out);
+            }
+        }
+    }
+}
+
+/// Show a message plus all cached replies beneath it.
+pub fn thread(message_id: &str, room_label: Option<&str>) -> Result<Vec<ThreadItem>, String> {
+    let room = resolve_room(room_label)?;
+    let mut msgs = store::load_messages(&room.room_id, 30 * 24 * 3600);
+    if msgs.is_empty() {
+        return Err("No cached messages for the active room.".to_string());
+    }
+    msgs.sort_by(|a, b| {
+        a["ts"]
+            .as_u64()
+            .unwrap_or(0)
+            .cmp(&b["ts"].as_u64().unwrap_or(0))
+            .then_with(|| {
+                a["id"]
+                    .as_str()
+                    .unwrap_or("?")
+                    .cmp(b["id"].as_str().unwrap_or("?"))
+            })
+    });
+
+    let root_id = resolve_message_id(&msgs, message_id)?;
+    let mut root = None;
+    let mut children: HashMap<String, Vec<serde_json::Value>> = HashMap::new();
+
+    for msg in msgs {
+        let id = msg["id"].as_str().unwrap_or("?").to_string();
+        if id == root_id {
+            root = Some(msg.clone());
+        }
+        if let Some(parent) = msg["reply_to"].as_str() {
+            children.entry(parent.to_string()).or_default().push(msg);
+        }
+    }
+
+    for replies in children.values_mut() {
+        replies.sort_by_key(|m| m["ts"].as_u64().unwrap_or(0));
+    }
+
+    let root = root.ok_or_else(|| format!("Message '{message_id}' not found in local cache."))?;
+    let mut out = Vec::new();
+    walk_thread(&root, 0, &children, &mut out);
+    Ok(out)
 }
 
 /// Start a background daemon that watches the room via SSE.

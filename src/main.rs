@@ -113,6 +113,12 @@ enum Commands {
         from: Option<String>,
     },
 
+    /// Show a message thread from the local cache
+    Thread {
+        /// Message ID or unique prefix
+        message_id: String,
+    },
+
     /// Start background daemon (SSE watcher + flag file for hooks)
     Daemon,
 
@@ -143,6 +149,10 @@ fn ts(epoch: u64) -> String {
 }
 
 fn print_msg(env: &serde_json::Value) {
+    print_msg_with_depth(env, 0);
+}
+
+fn print_msg_with_depth(env: &serde_json::Value, depth: usize) {
     let time = ts(env["ts"].as_u64().unwrap_or(0));
     let sender = env["from"].as_str().unwrap_or("?");
     let text = env["text"].as_str().unwrap_or("");
@@ -152,11 +162,12 @@ fn print_msg(env: &serde_json::Value) {
     } else {
         String::new()
     };
+    let indent = "    ".repeat(depth);
     let me = store::get_agent_id();
     if sender == me {
-        println!("  \x1b[92m[{time}] [{mid}] {sender}: {text}{reply}\x1b[0m");
+        println!("  {indent}\x1b[92m[{time}] [{mid}] {sender}: {text}{reply}\x1b[0m");
     } else {
-        println!("  \x1b[96m[{time}]\x1b[0m [{mid}]{reply} {sender}: {text}");
+        println!("  {indent}\x1b[96m[{time}]\x1b[0m [{mid}]{reply} {sender}: {text}");
     }
 }
 
@@ -442,6 +453,25 @@ fn main() {
                     println!("  {} match(es) for '{q}':\n", msgs.len());
                     for m in &msgs {
                         print_msg(m);
+                    }
+                }
+                Err(e) => {
+                    eprintln!("  Error: {e}");
+                    process::exit(1);
+                }
+            }
+        }
+
+        Commands::Thread { message_id } => {
+            match chat::thread(&message_id, None) {
+                Ok(items) => {
+                    if items.is_empty() {
+                        println!("  (no thread messages)");
+                        return;
+                    }
+                    println!("  Thread for '{message_id}':\n");
+                    for item in &items {
+                        print_msg_with_depth(&item.env, item.depth);
                     }
                 }
                 Err(e) => {
