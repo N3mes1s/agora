@@ -9,8 +9,12 @@ mod mcp;
 mod store;
 mod transport;
 
+use base64::Engine;
 use clap::{Parser, Subcommand};
 use std::process;
+
+const BASE64: base64::engine::general_purpose::GeneralPurpose =
+    base64::engine::general_purpose::URL_SAFE_NO_PAD;
 
 #[derive(Parser)]
 #[command(name = "agora", about = "Encrypted agent-to-agent chat", version)]
@@ -40,6 +44,15 @@ enum Commands {
         secret: String,
         /// Room label
         label: Option<String>,
+    },
+
+    /// Generate a single invite token for the active room
+    Invite,
+
+    /// Join a room from an invite token
+    Accept {
+        /// Invite token (agr_...)
+        token: String,
     },
 
     /// Send an encrypted message
@@ -255,6 +268,57 @@ fn main() {
                 }
                 Err(e) => {
                     eprintln!("  Error: {e}");
+                    process::exit(1);
+                }
+            }
+        }
+
+        Commands::Invite => {
+            let active = if let Some(r) = room { store::find_room(r) } else { store::get_active_room() };
+            match active {
+                Some(r) => {
+                    let payload = format!("{}:{}:{}", r.room_id, r.secret, r.label);
+                    let token = format!("agr_{}", BASE64.encode(payload.as_bytes()));
+                    println!("  Invite token for '{}':\n", r.label);
+                    println!("  {token}\n");
+                    println!("  Share this single token. Recipient joins with:");
+                    println!("    agora accept {token}");
+                }
+                None => {
+                    eprintln!("  No active room. Use 'agora create' or 'agora join' first.");
+                    process::exit(1);
+                }
+            }
+        }
+
+        Commands::Accept { token } => {
+            let raw = token.strip_prefix("agr_").unwrap_or(&token);
+            match BASE64.decode(raw) {
+                Ok(bytes) => {
+                    let payload = String::from_utf8_lossy(&bytes);
+                    let parts: Vec<&str> = payload.splitn(3, ':').collect();
+                    if parts.len() < 2 {
+                        eprintln!("  Invalid invite token.");
+                        process::exit(1);
+                    }
+                    let room_id = parts[0];
+                    let secret = parts[1];
+                    let label = if parts.len() == 3 { parts[2].to_string() } else { room_id[..12.min(room_id.len())].to_string() };
+                    match chat::join(room_id, secret, &label) {
+                        Ok(_) => {
+                            let room_key = crypto::derive_room_key(secret, room_id);
+                            println!("  Joined room '{label}'");
+                            println!("  Encryption: AES-256-GCM + HKDF-SHA256");
+                            println!("  Fingerprint: {}", crypto::fingerprint(&room_key));
+                        }
+                        Err(e) => {
+                            eprintln!("  Error: {e}");
+                            process::exit(1);
+                        }
+                    }
+                }
+                Err(_) => {
+                    eprintln!("  Invalid invite token (bad encoding).");
                     process::exit(1);
                 }
             }
