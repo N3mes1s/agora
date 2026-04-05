@@ -74,7 +74,14 @@ enum Commands {
     Info,
 
     /// List room members and roles
-    Who,
+    Who {
+        /// Show only online members (seen in last 5 minutes)
+        #[arg(long)]
+        online: bool,
+    },
+
+    /// Send a heartbeat (presence keepalive)
+    Heartbeat,
 
     /// Set room topic (admin only)
     Topic {
@@ -284,25 +291,53 @@ fn main() {
             }
         }
 
-        Commands::Who => {
-            match chat::who(None) {
+        Commands::Who { online } => {
+            match chat::who(None, online) {
                 Ok(members) => {
                     if members.is_empty() {
-                        println!("  No members tracked yet.");
+                        if online {
+                            println!("  No one online (seen in last 5 minutes).");
+                        } else {
+                            println!("  No members tracked yet.");
+                        }
                         return;
                     }
                     let me = store::get_agent_id();
-                    println!("  {:<12} {:<8} Joined", "Agent", "Role");
-                    println!("  {:<12} {:<8} {}", "─".repeat(12), "─".repeat(8), "─".repeat(20));
+                    let now_ts = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+                    println!("  {:<12} {:<8} {:<10} Last seen", "Agent", "Role", "Status");
+                    println!("  {:<12} {:<8} {:<10} {}", "─".repeat(12), "─".repeat(8), "─".repeat(10), "─".repeat(16));
                     for m in &members {
                         let role = format!("{:?}", m.role);
                         let is_me = if m.agent_id == me { " (you)" } else { "" };
-                        let joined = chrono::DateTime::from_timestamp(m.joined_at as i64, 0)
-                            .map(|dt| dt.format("%Y-%m-%d %H:%M").to_string())
-                            .unwrap_or_default();
-                        println!("  {:<12} {:<8} {joined}{is_me}", m.agent_id, role);
+                        let status = if m.last_seen > 0 && now_ts - m.last_seen < 300 {
+                            "\x1b[92monline\x1b[0m"
+                        } else if m.last_seen > 0 {
+                            "offline"
+                        } else {
+                            "unknown"
+                        };
+                        let seen = if m.last_seen > 0 {
+                            let ago = now_ts - m.last_seen;
+                            if ago < 60 { format!("{ago}s ago") }
+                            else if ago < 3600 { format!("{}m ago", ago / 60) }
+                            else { format!("{}h ago", ago / 3600) }
+                        } else {
+                            "never".to_string()
+                        };
+                        println!("  {:<12} {:<8} {:<18} {seen}{is_me}", m.agent_id, role, status);
                     }
                 }
+                Err(e) => {
+                    eprintln!("  Error: {e}");
+                    process::exit(1);
+                }
+            }
+        }
+
+        Commands::Heartbeat => {
+            match chat::heartbeat(None) {
+                Ok(()) => println!("  Heartbeat sent."),
                 Err(e) => {
                     eprintln!("  Error: {e}");
                     process::exit(1);

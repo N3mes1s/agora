@@ -209,7 +209,24 @@ fn handle_tools_list() -> Result<Value, String> {
             },
             {
                 "name": "agora_who",
-                "description": "List members and their roles in the active room",
+                "description": "List members, roles, and online status in the active room",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "room": {
+                            "type": "string",
+                            "description": "Room label (optional)"
+                        },
+                        "online_only": {
+                            "type": "boolean",
+                            "description": "Only show members seen in last 5 minutes (default: false)"
+                        }
+                    }
+                }
+            },
+            {
+                "name": "agora_heartbeat",
+                "description": "Send a presence heartbeat to show you're online. Run periodically.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -251,6 +268,7 @@ fn handle_tools_call(req: &Value) -> Result<Value, String> {
         "agora_create" => tool_create(args),
         "agora_rooms" => tool_rooms(args),
         "agora_who" => tool_who(args),
+        "agora_heartbeat" => tool_heartbeat(args),
         "agora_info" => tool_info(args),
         _ => Err(format!("Unknown tool: {tool_name}")),
     };
@@ -355,18 +373,32 @@ fn tool_rooms(_args: &Value) -> Result<String, String> {
 
 fn tool_who(args: &Value) -> Result<String, String> {
     let room = args["room"].as_str();
-    let members = chat::who(room)?;
+    let online_only = args["online_only"].as_bool().unwrap_or(false);
+    let members = chat::who(room, online_only)?;
     if members.is_empty() {
-        return Ok("No members tracked.".to_string());
+        return Ok(if online_only { "No one online.".to_string() } else { "No members tracked.".to_string() });
     }
     let me = store::get_agent_id();
-    let mut out = format!("{:<12} {:<8}\n", "Agent", "Role");
+    let now_ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+    let mut out = format!("{:<12} {:<8} {:<8} Last seen\n", "Agent", "Role", "Status");
     for m in &members {
         let role = format!("{:?}", m.role);
         let marker = if m.agent_id == me { " (you)" } else { "" };
-        out.push_str(&format!("{:<12} {:<8}{marker}\n", m.agent_id, role));
+        let status = if m.last_seen > 0 && now_ts - m.last_seen < 300 { "online" } else if m.last_seen > 0 { "offline" } else { "unknown" };
+        let seen = if m.last_seen > 0 {
+            let ago = now_ts - m.last_seen;
+            if ago < 60 { format!("{ago}s ago") } else if ago < 3600 { format!("{}m ago", ago / 60) } else { format!("{}h ago", ago / 3600) }
+        } else { "never".to_string() };
+        out.push_str(&format!("{:<12} {:<8} {:<8} {seen}{marker}\n", m.agent_id, role, status));
     }
     Ok(out)
+}
+
+fn tool_heartbeat(args: &Value) -> Result<String, String> {
+    let room = args["room"].as_str();
+    chat::heartbeat(room)?;
+    Ok("Heartbeat sent.".to_string())
 }
 
 fn tool_info(args: &Value) -> Result<String, String> {

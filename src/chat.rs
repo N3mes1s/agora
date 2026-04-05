@@ -58,6 +58,28 @@ fn make_envelope(text: &str, reply_to: Option<&str>) -> serde_json::Value {
     env
 }
 
+fn make_heartbeat() -> serde_json::Value {
+    json!({
+        "v": VERSION,
+        "id": msg_id(),
+        "from": store::get_agent_id(),
+        "ts": now(),
+        "type": "heartbeat",
+        "text": "",
+    })
+}
+
+fn is_heartbeat(env: &serde_json::Value) -> bool {
+    env["type"].as_str() == Some("heartbeat")
+}
+
+/// Update last_seen for the sender of a message.
+fn track_presence(room_id: &str, env: &serde_json::Value) {
+    if let Some(from) = env["from"].as_str() {
+        store::update_last_seen(room_id, from);
+    }
+}
+
 fn parse_envelope(raw: &str) -> Option<serde_json::Value> {
     if let Ok(env) = serde_json::from_str::<serde_json::Value>(raw) {
         if env["v"].is_string() && env["text"].is_string() {
@@ -136,6 +158,17 @@ pub fn join(room_id: &str, secret: &str, label: &str) -> Result<store::RoomEntry
     Ok(entry)
 }
 
+pub fn heartbeat(room_label: Option<&str>) -> Result<(), String> {
+    let room = resolve_room(room_label)?;
+    let room_key = crypto::derive_room_key(&room.secret, &room.room_id);
+    let env = make_heartbeat();
+    let encrypted = encrypt_envelope(&env, &room_key, &room.room_id);
+    transport::publish(&room.room_id, &encrypted);
+    // Update our own last_seen
+    store::update_last_seen(&room.room_id, &store::get_agent_id());
+    Ok(())
+}
+
 pub fn send(message: &str, reply_to: Option<&str>, room_label: Option<&str>) -> Result<String, String> {
     let room = resolve_room(room_label)?;
     let room_key = crypto::derive_room_key(&room.secret, &room.room_id);
@@ -178,8 +211,13 @@ pub fn read(since: &str, limit: usize, room_label: Option<&str>) -> Result<Vec<s
             continue;
         }
         seen_ids.insert(mid);
-        store::save_message(&room.room_id, &msg);
-        merged.push(msg);
+        // Track presence from all messages (including heartbeats)
+        track_presence(&room.room_id, &msg);
+        // Only persist and display non-heartbeat messages
+        if !is_heartbeat(&msg) {
+            store::save_message(&room.room_id, &msg);
+            merged.push(msg);
+        }
     }
 
     merged.sort_by_key(|m| m["ts"].as_u64().unwrap_or(0));
@@ -199,12 +237,18 @@ pub fn check(since: &str, room_label: Option<&str>) -> Result<Vec<serde_json::Va
     let mut new_msgs = Vec::new();
     for (_, payload) in &remote_events {
         if let Some(env) = decrypt_payload(payload, &room_key, &room.room_id) {
+            // Track presence from all messages
+            track_presence(&room.room_id, &env);
             let mid = env["id"].as_str().unwrap_or("?").to_string();
             let from = env["from"].as_str().unwrap_or("");
             if from == me || seen.contains(&mid) {
                 continue;
             }
             store::mark_seen(&room.room_id, &mid);
+            // Skip heartbeats from display
+            if is_heartbeat(&env) {
+                continue;
+            }
             store::save_message(&room.room_id, &env);
             new_msgs.push(env);
         }
@@ -236,9 +280,14 @@ pub fn info(room_label: Option<&str>) -> Result<serde_json::Value, String> {
     }))
 }
 
-pub fn who(room_label: Option<&str>) -> Result<Vec<store::RoomMember>, String> {
+pub fn who(room_label: Option<&str>, online_only: bool) -> Result<Vec<store::RoomMember>, String> {
     let room = resolve_room(room_label)?;
-    Ok(room.members)
+    if online_only {
+        let cutoff = now() - 300; // 5 minutes
+        Ok(room.members.into_iter().filter(|m| m.last_seen >= cutoff).collect())
+    } else {
+        Ok(room.members)
+    }
 }
 
 pub fn topic(new_topic: &str, room_label: Option<&str>) -> Result<(), String> {

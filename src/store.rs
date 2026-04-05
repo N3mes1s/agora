@@ -76,6 +76,8 @@ pub struct RoomMember {
     pub role: Role,
     pub joined_at: u64,
     pub nickname: Option<String>,
+    #[serde(default)]
+    pub last_seen: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -123,6 +125,7 @@ pub fn add_room(room_id: &str, secret: &str, label: &str, role: Role) -> RoomEnt
             role,
             joined_at: now(),
             nickname: None,
+            last_seen: now(),
         }],
     };
     rooms.push(entry.clone());
@@ -147,6 +150,7 @@ pub fn add_member_to_room(room_id: &str, agent_id: &str, role: Role) {
                 role,
                 joined_at: now(),
                 nickname: None,
+                last_seen: now(),
             });
         }
     }
@@ -167,6 +171,25 @@ pub fn is_admin(room_id: &str, agent_id: &str) -> bool {
         .find(|r| r.room_id == room_id)
         .and_then(|r| r.members.iter().find(|m| m.agent_id == agent_id))
         .is_some_and(|m| m.role == Role::Admin)
+}
+
+pub fn update_last_seen(room_id: &str, agent_id: &str) {
+    let mut rooms = load_registry();
+    if let Some(room) = rooms.iter_mut().find(|r| r.room_id == room_id) {
+        if let Some(member) = room.members.iter_mut().find(|m| m.agent_id == agent_id) {
+            member.last_seen = now();
+        } else {
+            // First time seeing this agent — add as member
+            room.members.push(RoomMember {
+                agent_id: agent_id.to_string(),
+                role: Role::Member,
+                joined_at: now(),
+                nickname: None,
+                last_seen: now(),
+            });
+        }
+    }
+    save_registry(&rooms);
 }
 
 pub fn set_member_role(room_id: &str, agent_id: &str, role: Role) {
