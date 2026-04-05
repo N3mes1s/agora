@@ -234,6 +234,9 @@ enum Commands {
         agent_id: String,
     },
 
+    /// Room statistics dashboard
+    Stats,
+
     /// Mute an agent (hide their messages locally)
     Mute {
         /// Agent ID to mute
@@ -1106,6 +1109,44 @@ fn main() {
                 }
                 Ok(None) => {
                     println!("  No profile found for '{agent_id}'.");
+                }
+                Err(e) => {
+                    eprintln!("  Error: {e}");
+                    process::exit(1);
+                }
+            }
+        }
+
+        Commands::Stats => {
+            match chat::stats(room) {
+                Ok(s) => {
+                    let room_name = s["room"].as_str().unwrap_or("?");
+                    println!("  ╔═══ Stats: {} ═══╗\n", room_name);
+                    println!("  Messages:   {}", s["total_messages"]);
+                    println!("  Agents:     {}", s["total_agents"]);
+                    println!("  Characters: {}", s["total_characters"]);
+                    println!("  Files:      {}", s["total_files"]);
+                    println!("  Reactions:  {}", s["total_reactions"]);
+                    println!("  Receipts:   {}", s["total_receipts"]);
+                    println!("  Pins:       {}", s["total_pins"]);
+                    println!("  Profiles:   {}", s["total_profiles"]);
+
+                    if let Some(peak) = s["peak_hour"].as_object() {
+                        let pts = peak["ts"].as_u64().unwrap_or(0);
+                        println!("\n  Peak hour:  {} ({} msgs)", ts(pts), peak["messages"]);
+                    }
+
+                    println!("\n  Top agents:");
+                    if let Some(agents) = s["agents"].as_array() {
+                        for a in agents.iter().take(10) {
+                            let id = a["id"].as_str().unwrap_or("?");
+                            let count = a["messages"].as_u64().unwrap_or(0);
+                            let bar = "█".repeat((count as usize).min(30));
+                            let name = resolve_display_name(id);
+                            println!("    {:<24} {:>4} {}", name, count, bar);
+                        }
+                    }
+                    println!("\n  ╚{}╝", "═".repeat(30));
                 }
                 Err(e) => {
                     eprintln!("  Error: {e}");

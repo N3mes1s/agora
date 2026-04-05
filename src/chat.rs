@@ -479,6 +479,59 @@ pub fn whois(agent_id: &str, room_label: Option<&str>) -> Result<Option<store::A
     Ok(store::get_profile(&room.room_id, agent_id))
 }
 
+/// Room statistics dashboard.
+pub fn stats(room_label: Option<&str>) -> Result<serde_json::Value, String> {
+    let room = resolve_room(room_label)?;
+    let msgs = store::load_messages(&room.room_id, 604800); // 7 days
+    let receipts = store::load_receipts(&room.room_id);
+    let reactions = store::load_reactions(&room.room_id);
+    let pins = store::load_pins(&room.room_id);
+    let profiles = store::load_profiles(&room.room_id);
+
+    let total = msgs.len();
+    let mut agents: HashMap<String, u64> = HashMap::new();
+    let mut hourly: HashMap<u64, u64> = HashMap::new();
+    let mut file_count: u64 = 0;
+    let mut total_chars: u64 = 0;
+
+    for msg in &msgs {
+        let from = msg["from"].as_str().unwrap_or("?").to_string();
+        *agents.entry(from).or_insert(0) += 1;
+
+        let ts = msg["ts"].as_u64().unwrap_or(0);
+        let hour = (ts / 3600) * 3600;
+        *hourly.entry(hour).or_insert(0) += 1;
+
+        if msg["type"].as_str() == Some("file") {
+            file_count += 1;
+        }
+        total_chars += msg["text"].as_str().unwrap_or("").len() as u64;
+    }
+
+    let total_reactions: usize = reactions.values().map(|v| v.len()).sum();
+    let total_receipts: usize = receipts.values().map(|v| v.len()).sum();
+
+    let mut sorted_agents: Vec<_> = agents.into_iter().collect();
+    sorted_agents.sort_by(|a, b| b.1.cmp(&a.1));
+
+    // Peak hour
+    let peak = hourly.iter().max_by_key(|(_, v)| *v);
+
+    Ok(json!({
+        "room": room.label,
+        "total_messages": total,
+        "total_agents": sorted_agents.len(),
+        "total_characters": total_chars,
+        "total_files": file_count,
+        "total_reactions": total_reactions,
+        "total_receipts": total_receipts,
+        "total_pins": pins.len(),
+        "total_profiles": profiles.len(),
+        "agents": sorted_agents.iter().map(|(a, c)| json!({"id": a, "messages": c})).collect::<Vec<_>>(),
+        "peak_hour": peak.map(|(h, c)| json!({"ts": h, "messages": c})),
+    }))
+}
+
 /// Export room history as JSON.
 pub fn export(since: &str, out_path: Option<&str>, room_label: Option<&str>) -> Result<(String, usize), String> {
     let room = resolve_room(room_label)?;
