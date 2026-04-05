@@ -73,6 +73,45 @@ fn is_heartbeat(env: &serde_json::Value) -> bool {
     env["type"].as_str() == Some("heartbeat")
 }
 
+fn make_receipt(receipt_for: &str) -> serde_json::Value {
+    json!({
+        "v": VERSION,
+        "id": msg_id(),
+        "from": store::get_agent_id(),
+        "ts": now(),
+        "type": "receipt",
+        "receipt_for": receipt_for,
+        "text": "",
+    })
+}
+
+fn is_receipt(env: &serde_json::Value) -> bool {
+    env["type"].as_str() == Some("receipt")
+}
+
+/// Send a delivery receipt for a message from another agent.
+fn send_receipt(msg_id: &str, room: &store::RoomEntry) {
+    if store::is_receipted(&room.room_id, msg_id) {
+        return;
+    }
+    let room_key = crypto::derive_room_key(&room.secret, &room.room_id);
+    let env = make_receipt(msg_id);
+    let encrypted = encrypt_envelope(&env, &room_key, &room.room_id);
+    let _ = transport::publish(&room.room_id, &encrypted);
+    store::mark_receipted(&room.room_id, msg_id);
+}
+
+/// Process an incoming receipt envelope: store it locally.
+fn process_receipt(room_id: &str, env: &serde_json::Value) {
+    if let (Some(receipt_for), Some(from)) = (
+        env["receipt_for"].as_str(),
+        env["from"].as_str(),
+    ) {
+        let ts = env["ts"].as_u64().unwrap_or_else(now);
+        store::save_receipt(room_id, receipt_for, from, ts);
+    }
+}
+
 /// Update last_seen for the sender of a message.
 fn track_presence(room_id: &str, env: &serde_json::Value) {
     if let Some(from) = env["from"].as_str() {
@@ -234,6 +273,7 @@ pub fn read(since: &str, limit: usize, room_label: Option<&str>) -> Result<Vec<s
     let since_secs = parse_since(since);
     let local_msgs = store::load_messages(&room.room_id, since_secs);
 
+    let me = store::get_agent_id();
     let mut seen_ids: HashSet<String> = HashSet::new();
     let mut merged = Vec::new();
     for msg in remote_msgs.into_iter().chain(local_msgs) {
@@ -241,12 +281,21 @@ pub fn read(since: &str, limit: usize, room_label: Option<&str>) -> Result<Vec<s
         if mid != "?" && seen_ids.contains(&mid) {
             continue;
         }
-        seen_ids.insert(mid);
+        seen_ids.insert(mid.clone());
         // Track presence from all messages (including heartbeats)
         track_presence(&room.room_id, &msg);
-        // Only persist and display non-heartbeat messages
+        if is_receipt(&msg) {
+            // Process incoming receipt, don't display
+            process_receipt(&room.room_id, &msg);
+            continue;
+        }
         if !is_heartbeat(&msg) {
             store::save_message(&room.room_id, &msg);
+            // Auto-send receipt for messages from others
+            let from = msg["from"].as_str().unwrap_or("");
+            if from != me && mid != "?" {
+                send_receipt(&mid, &room);
+            }
             merged.push(msg);
         }
     }
@@ -280,11 +329,41 @@ pub fn check(since: &str, room_label: Option<&str>) -> Result<Vec<serde_json::Va
             if is_heartbeat(&env) {
                 continue;
             }
+            // Process incoming receipts silently
+            if is_receipt(&env) {
+                process_receipt(&room.room_id, &env);
+                continue;
+            }
             store::save_message(&room.room_id, &env);
+            // Auto-send receipt for messages from others
+            if mid != "?" {
+                send_receipt(&mid, &room);
+            }
             new_msgs.push(env);
         }
     }
     Ok(new_msgs)
+}
+
+/// List delivery receipts for a given message ID (or prefix).
+pub fn receipts(msg_id_prefix: &str, room_label: Option<&str>) -> Result<Vec<serde_json::Value>, String> {
+    let room = resolve_room(room_label)?;
+
+    // Resolve full message ID from prefix
+    let msgs = store::load_messages(&room.room_id, 86400 * 30);
+    let full_id = msgs
+        .iter()
+        .find_map(|m| {
+            let mid = m["id"].as_str()?;
+            if mid.starts_with(msg_id_prefix) { Some(mid.to_string()) } else { None }
+        })
+        .unwrap_or_else(|| msg_id_prefix.to_string());
+
+    let entries = store::load_receipts(&room.room_id, &full_id);
+    Ok(entries
+        .into_iter()
+        .map(|(from, ts)| json!({"from": from, "ts": ts}))
+        .collect())
 }
 
 pub fn info(room_label: Option<&str>) -> Result<serde_json::Value, String> {
@@ -487,7 +566,8 @@ fn is_stopword(w: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{pin, pins, resolve_room, send_watch_heartbeat, unpin};
+    use super::{is_receipt, make_receipt, pin, pins, process_receipt, resolve_room,
+                send_watch_heartbeat, unpin};
     use crate::store::{self, Role};
     use serde_json::json;
     use std::path::PathBuf;
@@ -499,6 +579,72 @@ mod tests {
             .unwrap()
             .as_nanos();
         std::env::temp_dir().join(format!("agora-watch-heartbeat-{ts}"))
+    }
+
+    fn setup_receipt_room() -> PathBuf {
+        let home = temp_home();
+        std::fs::create_dir_all(&home).unwrap();
+        unsafe {
+            std::env::set_var("HOME", &home);
+            std::env::set_var("AGORA_AGENT_ID", "receipt-test");
+        }
+        store::add_room("ag-receipt-test", "secret-receipt", "receipts", Role::Admin);
+        store::set_active_room("receipts");
+        home
+    }
+
+    #[test]
+    fn receipt_envelope_type() {
+        let env = make_receipt("abcd1234");
+        assert!(is_receipt(&env));
+        assert_eq!(env["type"].as_str(), Some("receipt"));
+        assert_eq!(env["receipt_for"].as_str(), Some("abcd1234"));
+        assert_eq!(env["text"].as_str(), Some(""));
+    }
+
+    #[test]
+    fn receipt_stored_and_loaded() {
+        let _home = setup_receipt_room();
+        let room_id = "ag-receipt-test";
+
+        store::save_receipt(room_id, "msg001", "alice", 1000);
+        store::save_receipt(room_id, "msg001", "bob", 2000);
+        store::save_receipt(room_id, "msg001", "alice", 3000); // duplicate — ignored
+
+        let receipts = store::load_receipts(room_id, "msg001");
+        assert_eq!(receipts.len(), 2);
+        assert!(receipts.iter().any(|(f, _)| f == "alice"));
+        assert!(receipts.iter().any(|(f, _)| f == "bob"));
+    }
+
+    #[test]
+    fn process_receipt_updates_store() {
+        let _home = setup_receipt_room();
+        let room_id = "ag-receipt-test";
+
+        let env = json!({
+            "v": "3.0", "id": "deadbeef", "from": "alice",
+            "ts": 1700, "type": "receipt", "receipt_for": "msg999", "text": ""
+        });
+        process_receipt(room_id, &env);
+
+        let receipts = store::load_receipts(room_id, "msg999");
+        assert_eq!(receipts.len(), 1);
+        assert_eq!(receipts[0].0, "alice");
+        assert_eq!(receipts[0].1, 1700);
+    }
+
+    #[test]
+    fn mark_receipted_idempotent() {
+        let _home = setup_receipt_room();
+        let room_id = "ag-receipt-test";
+
+        assert!(!store::is_receipted(room_id, "m1"));
+        store::mark_receipted(room_id, "m1");
+        assert!(store::is_receipted(room_id, "m1"));
+        // Marking again is a no-op
+        store::mark_receipted(room_id, "m1");
+        assert!(store::is_receipted(room_id, "m1"));
     }
 
     fn member_last_seen(room_label: &str) -> u64 {

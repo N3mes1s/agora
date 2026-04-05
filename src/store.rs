@@ -7,7 +7,7 @@
 //!   identity.json             — agent identity
 
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -378,4 +378,76 @@ pub fn mark_seen(room_id: &str, msg_id: &str) {
         ids = ids[ids.len() - 1000..].to_vec();
     }
     let _ = fs::write(&path, ids.join("\n"));
+}
+
+// ── Delivery Receipts ───────────────────────────────────────────
+
+fn receipts_path(room_id: &str) -> PathBuf {
+    let dir = agora_dir().join("rooms").join(room_id);
+    ensure_dir(&dir);
+    dir.join("receipts.json")
+}
+
+fn receipted_path(room_id: &str) -> PathBuf {
+    let dir = agora_dir().join("rooms").join(room_id);
+    ensure_dir(&dir);
+    dir.join("receipted.txt")
+}
+
+/// Load all receipts for a room: map of msg_id -> [(from, ts), ...]
+pub fn load_all_receipts(room_id: &str) -> HashMap<String, Vec<(String, u64)>> {
+    let path = receipts_path(room_id);
+    if let Ok(data) = fs::read_to_string(&path) {
+        serde_json::from_str(&data).unwrap_or_default()
+    } else {
+        HashMap::new()
+    }
+}
+
+/// Load receipts for a specific message.
+pub fn load_receipts(room_id: &str, msg_id: &str) -> Vec<(String, u64)> {
+    load_all_receipts(room_id)
+        .remove(msg_id)
+        .unwrap_or_default()
+}
+
+/// Save a receipt (another agent acknowledged receipt of msg_id).
+pub fn save_receipt(room_id: &str, receipt_for: &str, from: &str, ts: u64) {
+    let path = receipts_path(room_id);
+    let mut all = load_all_receipts(room_id);
+    let entry = all.entry(receipt_for.to_string()).or_default();
+    // Avoid duplicates
+    if !entry.iter().any(|(f, _)| f == from) {
+        entry.push((from.to_string(), ts));
+    }
+    let _ = fs::write(&path, serde_json::to_string(&all).unwrap());
+}
+
+/// Check if we've already sent a receipt for this message.
+pub fn is_receipted(room_id: &str, msg_id: &str) -> bool {
+    let path = receipted_path(room_id);
+    if let Ok(data) = fs::read_to_string(&path) {
+        data.lines().any(|l| l == msg_id)
+    } else {
+        false
+    }
+}
+
+/// Mark that we've sent a receipt for this message.
+pub fn mark_receipted(room_id: &str, msg_id: &str) {
+    let dir = agora_dir().join("rooms").join(room_id);
+    ensure_dir(&dir);
+    let path = receipted_path(room_id);
+    let mut ids: Vec<String> = if let Ok(data) = fs::read_to_string(&path) {
+        data.lines().map(|s| s.to_string()).collect()
+    } else {
+        vec![]
+    };
+    if !ids.iter().any(|id| id == msg_id) {
+        ids.push(msg_id.to_string());
+        if ids.len() > 1000 {
+            ids = ids[ids.len() - 1000..].to_vec();
+        }
+        let _ = fs::write(&path, ids.join("\n"));
+    }
 }

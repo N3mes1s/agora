@@ -193,6 +193,12 @@ enum Commands {
         log: Option<String>,
     },
 
+    /// Show delivery receipts for a message
+    Receipts {
+        /// Message ID or unique prefix
+        message_id: String,
+    },
+
     /// Start MCP stdio server (for Claude Code integration)
     Mcp,
 
@@ -245,11 +251,27 @@ fn print_msg(env: &serde_json::Value) {
     print_msg_with_depth(env, 0);
 }
 
+fn receipt_indicator(room: Option<&store::RoomEntry>, msg_id: &str) -> &'static str {
+    let room = match room {
+        Some(r) => r,
+        None => return "",
+    };
+    let count = store::load_receipts(&room.room_id, msg_id).len();
+    if count >= 2 {
+        " \x1b[94m✓✓\x1b[0m"  // blue double-check = read by 2+
+    } else if count == 1 {
+        " \x1b[92m✓\x1b[0m"   // green single-check = delivered to 1
+    } else {
+        ""
+    }
+}
+
 fn print_msg_with_depth(env: &serde_json::Value, depth: usize) {
     let time = ts(env["ts"].as_u64().unwrap_or(0));
     let sender = env["from"].as_str().unwrap_or("?");
     let text = env["text"].as_str().unwrap_or("");
-    let mid = &env["id"].as_str().unwrap_or("?")[..6.min(env["id"].as_str().unwrap_or("?").len())];
+    let raw_mid = env["id"].as_str().unwrap_or("?");
+    let mid = &raw_mid[..6.min(raw_mid.len())];
     let reply = if let Some(rt) = env["reply_to"].as_str() {
         format!(" ↩{}", &rt[..6.min(rt.len())])
     } else {
@@ -258,7 +280,9 @@ fn print_msg_with_depth(env: &serde_json::Value, depth: usize) {
     let indent = "    ".repeat(depth);
     let me = store::get_agent_id();
     if sender == me {
-        println!("  {indent}\x1b[92m[{time}] [{mid}] {sender}: {text}{reply}\x1b[0m");
+        let room = store::get_active_room();
+        let receipts = receipt_indicator(room.as_ref(), raw_mid);
+        println!("  {indent}\x1b[92m[{time}] [{mid}] {sender}: {text}{reply}\x1b[0m{receipts}");
     } else {
         println!("  {indent}\x1b[96m[{time}]\x1b[0m [{mid}]{reply} {sender}: {text}");
     }
@@ -905,6 +929,28 @@ fn main() {
                 // SSE disconnected — reconnect
                 eprintln!("  \x1b[33m[hub] Connection lost. Reconnecting in 5s... ({msg_count} messages received so far)\x1b[0m");
                 std::thread::sleep(std::time::Duration::from_secs(5));
+            }
+        }
+
+        Commands::Receipts { message_id } => {
+            match chat::receipts(&message_id, room) {
+                Ok(entries) => {
+                    if entries.is_empty() {
+                        println!("  No delivery receipts for '{message_id}'.");
+                    } else {
+                        println!("  Delivery receipts for '{message_id}':");
+                        for e in &entries {
+                            let from = e["from"].as_str().unwrap_or("?");
+                            let t = ts(e["ts"].as_u64().unwrap_or(0));
+                            println!("    \x1b[92m✓\x1b[0m  {from} at {t}");
+                        }
+                        println!("  {} agent(s) received this message.", entries.len());
+                    }
+                }
+                Err(e) => {
+                    eprintln!("  Error: {e}");
+                    process::exit(1);
+                }
             }
         }
 
