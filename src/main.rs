@@ -72,6 +72,27 @@ enum Commands {
     /// Show room info + key fingerprint
     Info,
 
+    /// List room members and roles
+    Who,
+
+    /// Set room topic (admin only)
+    Topic {
+        /// New topic text
+        text: Vec<String>,
+    },
+
+    /// Promote a member to admin
+    Promote {
+        /// Agent ID to promote
+        agent_id: String,
+    },
+
+    /// Kick a member from the room (admin only)
+    Kick {
+        /// Agent ID to kick
+        agent_id: String,
+    },
+
     /// ZKP membership proof
     Verify,
 
@@ -242,11 +263,77 @@ fn main() {
                 Ok(info) => {
                     println!("  Room:        {}", info["label"].as_str().unwrap_or("?"));
                     println!("  ID:          {}", info["room_id"].as_str().unwrap_or("?"));
+                    if let Some(topic) = info["topic"].as_str() {
+                        println!("  Topic:       {topic}");
+                    }
                     println!("  Encryption:  {}", info["encryption"].as_str().unwrap_or("?"));
                     println!("  KDF:         {}", info["key_derivation"].as_str().unwrap_or("?"));
                     println!("  Messages:    {}", info["messages"].as_u64().unwrap_or(0));
+                    let member_count = info["members"].as_array().map(|a| a.len()).unwrap_or(0);
+                    println!("  Members:     {member_count}");
                     println!("  Fingerprint: {}", info["fingerprint"].as_str().unwrap_or("?"));
                 }
+                Err(e) => {
+                    eprintln!("  Error: {e}");
+                    process::exit(1);
+                }
+            }
+        }
+
+        Commands::Who => {
+            match chat::who(None) {
+                Ok(members) => {
+                    if members.is_empty() {
+                        println!("  No members tracked yet.");
+                        return;
+                    }
+                    let me = store::get_agent_id();
+                    println!("  {:<12} {:<8} Joined", "Agent", "Role");
+                    println!("  {:<12} {:<8} {}", "─".repeat(12), "─".repeat(8), "─".repeat(20));
+                    for m in &members {
+                        let role = format!("{:?}", m.role);
+                        let is_me = if m.agent_id == me { " (you)" } else { "" };
+                        let joined = chrono::DateTime::from_timestamp(m.joined_at as i64, 0)
+                            .map(|dt| dt.format("%Y-%m-%d %H:%M").to_string())
+                            .unwrap_or_default();
+                        println!("  {:<12} {:<8} {joined}{is_me}", m.agent_id, role);
+                    }
+                }
+                Err(e) => {
+                    eprintln!("  Error: {e}");
+                    process::exit(1);
+                }
+            }
+        }
+
+        Commands::Topic { text } => {
+            let topic = text.join(" ");
+            if topic.is_empty() {
+                eprintln!("Usage: agora topic <text>");
+                process::exit(1);
+            }
+            match chat::topic(&topic, None) {
+                Ok(()) => println!("  Topic set: {topic}"),
+                Err(e) => {
+                    eprintln!("  Error: {e}");
+                    process::exit(1);
+                }
+            }
+        }
+
+        Commands::Promote { agent_id } => {
+            match chat::promote(&agent_id, None) {
+                Ok(()) => println!("  Promoted {agent_id} to admin."),
+                Err(e) => {
+                    eprintln!("  Error: {e}");
+                    process::exit(1);
+                }
+            }
+        }
+
+        Commands::Kick { agent_id } => {
+            match chat::kick(&agent_id, None) {
+                Ok(()) => println!("  Kicked {agent_id}."),
                 Err(e) => {
                     eprintln!("  Error: {e}");
                     process::exit(1);

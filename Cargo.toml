@@ -1,6 +1,6 @@
 [package]
 name = "agora"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 description = "Encrypted agent-to-agent chat — Slack for AI agents"
 license = "MIT"
@@ -11,7 +11,8 @@ path = "src/main.rs"
 
 [dependencies]
 ring = "0.17"
-reqwest = { version = "0.12", features = ["blocking", "rustls-tls-webpki-roots"], default-features = false }
+# Native TLS roots by default — works in proxied envs with custom CAs
+reqwest = { version = "0.12", features = ["blocking", "rustls-tls-native-roots"], default-features = false }
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -19,11 +20,6 @@ base64 = "0.22"
 hex = "0.4"
 chrono = { version = "0.4", features = ["serde"] }
 dirs = "6"
-
-[features]
-default = []
-# Build with --features native-roots for proxied envs with custom CAs
-native-roots = ["reqwest/rustls-tls-native-roots"]
 
 [profile.release]
 opt-level = "s"

@@ -112,7 +112,7 @@ pub fn create(label: &str) -> Result<(String, String), String> {
     let secret = crypto::generate_secret();
     let room_key = crypto::derive_room_key(&secret, &room_id);
 
-    store::add_room(&room_id, &secret, label);
+    store::add_room(&room_id, &secret, label, store::Role::Admin);
     store::set_active_room(label);
 
     let env = make_envelope("Room created (agora v3, AES-256-GCM).", None);
@@ -125,7 +125,7 @@ pub fn create(label: &str) -> Result<(String, String), String> {
 
 pub fn join(room_id: &str, secret: &str, label: &str) -> Result<store::RoomEntry, String> {
     let room_key = crypto::derive_room_key(secret, room_id);
-    let entry = store::add_room(room_id, secret, label);
+    let entry = store::add_room(room_id, secret, label, store::Role::Member);
     store::set_active_room(label);
 
     let env = make_envelope("Joined (agora v3).", None);
@@ -216,15 +216,81 @@ pub fn info(room_label: Option<&str>) -> Result<serde_json::Value, String> {
     let room = resolve_room(room_label)?;
     let room_key = crypto::derive_room_key(&room.secret, &room.room_id);
     let msgs = store::load_messages(&room.room_id, 7200);
+    let members: Vec<_> = room.members.iter().map(|m| {
+        json!({
+            "agent_id": m.agent_id,
+            "role": format!("{:?}", m.role),
+            "nickname": m.nickname,
+        })
+    }).collect();
     Ok(json!({
         "room_id": room.room_id,
         "label": room.label,
+        "topic": room.topic,
         "encryption": "AES-256-GCM",
         "key_derivation": "HKDF-SHA256",
         "fingerprint": crypto::fingerprint(&room_key),
         "messages": msgs.len(),
+        "members": members,
         "joined_at": room.joined_at,
     }))
+}
+
+pub fn who(room_label: Option<&str>) -> Result<Vec<store::RoomMember>, String> {
+    let room = resolve_room(room_label)?;
+    Ok(room.members)
+}
+
+pub fn topic(new_topic: &str, room_label: Option<&str>) -> Result<(), String> {
+    let mut room = resolve_room(room_label)?;
+    let me = store::get_agent_id();
+    if !store::is_admin(&room.room_id, &me) {
+        return Err("Only admins can set the topic.".to_string());
+    }
+    room.topic = Some(new_topic.to_string());
+    store::update_room(&room);
+
+    let room_key = crypto::derive_room_key(&room.secret, &room.room_id);
+    let env = make_envelope(&format!("Topic set: {new_topic}"), None);
+    let encrypted = encrypt_envelope(&env, &room_key, &room.room_id);
+    transport::publish(&room.room_id, &encrypted);
+    store::save_message(&room.room_id, &env);
+    Ok(())
+}
+
+pub fn promote(agent_id: &str, room_label: Option<&str>) -> Result<(), String> {
+    let room = resolve_room(room_label)?;
+    let me = store::get_agent_id();
+    if !store::is_admin(&room.room_id, &me) {
+        return Err("Only admins can promote members.".to_string());
+    }
+    store::set_member_role(&room.room_id, agent_id, store::Role::Admin);
+
+    let room_key = crypto::derive_room_key(&room.secret, &room.room_id);
+    let env = make_envelope(&format!("Promoted {agent_id} to admin."), None);
+    let encrypted = encrypt_envelope(&env, &room_key, &room.room_id);
+    transport::publish(&room.room_id, &encrypted);
+    store::save_message(&room.room_id, &env);
+    Ok(())
+}
+
+pub fn kick(agent_id: &str, room_label: Option<&str>) -> Result<(), String> {
+    let room = resolve_room(room_label)?;
+    let me = store::get_agent_id();
+    if !store::is_admin(&room.room_id, &me) {
+        return Err("Only admins can kick members.".to_string());
+    }
+    if store::is_admin(&room.room_id, agent_id) {
+        return Err("Cannot kick another admin.".to_string());
+    }
+    store::remove_member_from_room(&room.room_id, agent_id);
+
+    let room_key = crypto::derive_room_key(&room.secret, &room.room_id);
+    let env = make_envelope(&format!("Kicked {agent_id} from the room."), None);
+    let encrypted = encrypt_envelope(&env, &room_key, &room.room_id);
+    transport::publish(&room.room_id, &encrypted);
+    store::save_message(&room.room_id, &env);
+    Ok(())
 }
 
 pub fn verify(room_label: Option<&str>) -> Result<serde_json::Value, String> {

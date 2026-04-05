@@ -64,12 +64,30 @@ pub fn get_agent_id() -> String {
 
 // ── Room Registry ───────────────────────────────────────────────
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub enum Role {
+    Admin,
+    Member,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RoomMember {
+    pub agent_id: String,
+    pub role: Role,
+    pub joined_at: u64,
+    pub nickname: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RoomEntry {
     pub room_id: String,
     pub secret: String,
     pub label: String,
     pub joined_at: u64,
+    #[serde(default)]
+    pub topic: Option<String>,
+    #[serde(default)]
+    pub members: Vec<RoomMember>,
 }
 
 pub fn load_registry() -> Vec<RoomEntry> {
@@ -88,20 +106,77 @@ pub fn save_registry(rooms: &[RoomEntry]) {
     let _ = fs::write(dir.join("rooms.json"), data);
 }
 
-pub fn add_room(room_id: &str, secret: &str, label: &str) -> RoomEntry {
+pub fn add_room(room_id: &str, secret: &str, label: &str, role: Role) -> RoomEntry {
     let mut rooms = load_registry();
     if let Some(existing) = rooms.iter().find(|r| r.room_id == room_id) {
         return existing.clone();
     }
+    let agent_id = get_agent_id();
     let entry = RoomEntry {
         room_id: room_id.to_string(),
         secret: secret.to_string(),
         label: label.to_string(),
         joined_at: now(),
+        topic: None,
+        members: vec![RoomMember {
+            agent_id,
+            role,
+            joined_at: now(),
+            nickname: None,
+        }],
     };
     rooms.push(entry.clone());
     save_registry(&rooms);
     entry
+}
+
+pub fn update_room(room: &RoomEntry) {
+    let mut rooms = load_registry();
+    if let Some(r) = rooms.iter_mut().find(|r| r.room_id == room.room_id) {
+        *r = room.clone();
+    }
+    save_registry(&rooms);
+}
+
+pub fn add_member_to_room(room_id: &str, agent_id: &str, role: Role) {
+    let mut rooms = load_registry();
+    if let Some(room) = rooms.iter_mut().find(|r| r.room_id == room_id) {
+        if !room.members.iter().any(|m| m.agent_id == agent_id) {
+            room.members.push(RoomMember {
+                agent_id: agent_id.to_string(),
+                role,
+                joined_at: now(),
+                nickname: None,
+            });
+        }
+    }
+    save_registry(&rooms);
+}
+
+pub fn remove_member_from_room(room_id: &str, agent_id: &str) {
+    let mut rooms = load_registry();
+    if let Some(room) = rooms.iter_mut().find(|r| r.room_id == room_id) {
+        room.members.retain(|m| m.agent_id != agent_id);
+    }
+    save_registry(&rooms);
+}
+
+pub fn is_admin(room_id: &str, agent_id: &str) -> bool {
+    load_registry()
+        .iter()
+        .find(|r| r.room_id == room_id)
+        .and_then(|r| r.members.iter().find(|m| m.agent_id == agent_id))
+        .is_some_and(|m| m.role == Role::Admin)
+}
+
+pub fn set_member_role(room_id: &str, agent_id: &str, role: Role) {
+    let mut rooms = load_registry();
+    if let Some(room) = rooms.iter_mut().find(|r| r.room_id == room_id) {
+        if let Some(member) = room.members.iter_mut().find(|m| m.agent_id == agent_id) {
+            member.role = role;
+        }
+    }
+    save_registry(&rooms);
 }
 
 pub fn find_room(label_or_id: &str) -> Option<RoomEntry> {
