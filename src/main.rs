@@ -215,6 +215,9 @@ enum Commands {
     /// Start MCP stdio server (for Claude Code integration)
     Mcp,
 
+    /// Show read receipts for your messages
+    Status,
+
     /// Start local web UI for viewing room history
     Serve {
         /// HTTP port (default: 8080)
@@ -984,6 +987,34 @@ fn main() {
 
         Commands::Mcp => {
             mcp::run();
+        }
+
+        Commands::Status => {
+            match chat::read_status(room) {
+                Ok(items) => {
+                    if items.is_empty() {
+                        println!("  (no messages with receipts)");
+                        return;
+                    }
+                    for item in &items {
+                        let mid = &item["id"].as_str().unwrap_or("?")[..6.min(item["id"].as_str().unwrap_or("?").len())];
+                        let text = item["text"].as_str().unwrap_or("");
+                        let time = ts(item["ts"].as_u64().unwrap_or(0));
+                        let readers = item["read_by"].as_array()
+                            .map(|a| a.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>().join(", "))
+                            .unwrap_or_default();
+                        let check = if readers.is_empty() { "  " } else { "\u{2713}\u{2713}" };
+                        println!("  [{mid}] {time} {check} {text}");
+                        if !readers.is_empty() {
+                            println!("         Read by: {readers}");
+                        }
+                    }
+                }
+                Err(e) => {
+                    eprintln!("  Error: {e}");
+                    process::exit(1);
+                }
+            }
         }
 
         Commands::Serve { port } => {
