@@ -516,6 +516,27 @@ fn resolve_message_id(msgs: &[serde_json::Value], needle: &str) -> Result<String
     }
 }
 
+fn resolve_saved_id(ids: &[String], needle: &str) -> Result<String, String> {
+    if ids.iter().any(|id| id == needle) {
+        return Ok(needle.to_string());
+    }
+
+    let matches: Vec<String> = ids
+        .iter()
+        .filter(|id| id.starts_with(needle))
+        .cloned()
+        .collect();
+
+    match matches.len() {
+        0 => Err(format!("Message '{needle}' is not pinned.")),
+        1 => Ok(matches[0].clone()),
+        _ => Err(format!(
+            "Message ID '{needle}' is ambiguous: {}",
+            matches.into_iter().take(5).collect::<Vec<_>>().join(", ")
+        )),
+    }
+}
+
 fn walk_thread(
     env: &serde_json::Value,
     depth: usize,
@@ -577,6 +598,55 @@ pub fn thread(message_id: &str, room_label: Option<&str>) -> Result<Vec<ThreadIt
     let root = root.ok_or_else(|| format!("Message '{message_id}' not found in local cache."))?;
     let mut out = Vec::new();
     walk_thread(&root, 0, &children, &mut out);
+    Ok(out)
+}
+
+pub fn pin(message_id: &str, room_label: Option<&str>) -> Result<(String, bool), String> {
+    let room = resolve_room(room_label)?;
+    let msgs = store::load_messages(&room.room_id, u64::MAX);
+    if msgs.is_empty() {
+        return Err("No cached messages for the active room.".to_string());
+    }
+
+    let resolved_id = resolve_message_id(&msgs, message_id)?;
+    let added = store::add_pin(&room.room_id, &resolved_id);
+    Ok((resolved_id, added))
+}
+
+pub fn unpin(message_id: &str, room_label: Option<&str>) -> Result<(String, bool), String> {
+    let room = resolve_room(room_label)?;
+    let pins = store::load_pins(&room.room_id);
+    if pins.is_empty() {
+        return Err("No pinned messages for the active room.".to_string());
+    }
+
+    let resolved_id = resolve_saved_id(&pins, message_id)?;
+    let removed = store::remove_pin(&room.room_id, &resolved_id);
+    Ok((resolved_id, removed))
+}
+
+pub fn pins(room_label: Option<&str>) -> Result<Vec<serde_json::Value>, String> {
+    let room = resolve_room(room_label)?;
+    let pinned_ids = store::load_pins(&room.room_id);
+    if pinned_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let msgs = store::load_messages(&room.room_id, u64::MAX);
+    let by_id: HashMap<String, serde_json::Value> = msgs
+        .into_iter()
+        .filter_map(|msg| {
+            let id = msg["id"].as_str()?.to_string();
+            Some((id, msg))
+        })
+        .collect();
+
+    let mut out = Vec::new();
+    for id in pinned_ids {
+        if let Some(msg) = by_id.get(&id) {
+            out.push(msg.clone());
+        }
+    }
     Ok(out)
 }
 

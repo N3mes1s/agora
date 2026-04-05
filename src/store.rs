@@ -307,6 +307,47 @@ pub fn notify_flag_path(room_id: &str) -> PathBuf {
     dir.join("notify.flag")
 }
 
+pub fn pins_path(room_id: &str) -> PathBuf {
+    let dir = agora_dir().join("rooms").join(room_id);
+    ensure_dir(&dir);
+    dir.join("pins.json")
+}
+
+pub fn load_pins(room_id: &str) -> Vec<String> {
+    let path = pins_path(room_id);
+    if let Ok(data) = fs::read_to_string(&path) {
+        serde_json::from_str(&data).unwrap_or_default()
+    } else {
+        Vec::new()
+    }
+}
+
+pub fn save_pins(room_id: &str, pins: &[String]) {
+    let path = pins_path(room_id);
+    let _ = fs::write(path, serde_json::to_string_pretty(pins).unwrap());
+}
+
+pub fn add_pin(room_id: &str, message_id: &str) -> bool {
+    let mut pins = load_pins(room_id);
+    if pins.iter().any(|id| id == message_id) {
+        return false;
+    }
+    pins.push(message_id.to_string());
+    save_pins(room_id, &pins);
+    true
+}
+
+pub fn remove_pin(room_id: &str, message_id: &str) -> bool {
+    let mut pins = load_pins(room_id);
+    let before = pins.len();
+    pins.retain(|id| id != message_id);
+    if pins.len() == before {
+        return false;
+    }
+    save_pins(room_id, &pins);
+    true
+}
+
 pub fn daemon_pid_path(room_id: &str) -> PathBuf {
     let dir = agora_dir().join("rooms").join(room_id);
     ensure_dir(&dir);

@@ -120,6 +120,21 @@ enum Commands {
         from: Option<String>,
     },
 
+    /// Pin a cached message locally in this room
+    Pin {
+        /// Message ID or unique prefix
+        message_id: String,
+    },
+
+    /// Remove a local pin from this room
+    Unpin {
+        /// Message ID or unique prefix
+        message_id: String,
+    },
+
+    /// List pinned messages for this room
+    Pins,
+
     /// Show a message thread from the local cache
     Thread {
         /// Message ID or unique prefix
@@ -262,6 +277,15 @@ fn main() {
                     };
                     if let Some(header_room) = header_room {
                         println!("  --- {} ({} messages, AES-256-GCM) ---\n", header_room.label, msgs.len());
+                    }
+                    if let Ok(pinned) = chat::pins(room) {
+                        if !pinned.is_empty() {
+                            println!("  --- pinned ({}) ---\n", pinned.len());
+                            for p in &pinned {
+                                print_msg(p);
+                            }
+                            println!();
+                        }
                     }
                     for m in msgs {
                         print_msg(m);
@@ -493,6 +517,59 @@ fn main() {
                     println!("  {} match(es) for '{q}':\n", msgs.len());
                     for m in &msgs {
                         print_msg(m);
+                    }
+                }
+                Err(e) => {
+                    eprintln!("  Error: {e}");
+                    process::exit(1);
+                }
+            }
+        }
+
+        Commands::Pin { message_id } => {
+            match chat::pin(&message_id, room) {
+                Ok((resolved_id, added)) => {
+                    let short = &resolved_id[..6.min(resolved_id.len())];
+                    if added {
+                        println!("  Pinned [{short}].");
+                    } else {
+                        println!("  Already pinned [{short}].");
+                    }
+                }
+                Err(e) => {
+                    eprintln!("  Error: {e}");
+                    process::exit(1);
+                }
+            }
+        }
+
+        Commands::Unpin { message_id } => {
+            match chat::unpin(&message_id, room) {
+                Ok((resolved_id, removed)) => {
+                    let short = &resolved_id[..6.min(resolved_id.len())];
+                    if removed {
+                        println!("  Unpinned [{short}].");
+                    } else {
+                        println!("  [{short}] was not pinned.");
+                    }
+                }
+                Err(e) => {
+                    eprintln!("  Error: {e}");
+                    process::exit(1);
+                }
+            }
+        }
+
+        Commands::Pins => {
+            match chat::pins(room) {
+                Ok(pinned) => {
+                    if pinned.is_empty() {
+                        println!("  (no pinned messages)");
+                        return;
+                    }
+                    println!("  {} pinned message(s):\n", pinned.len());
+                    for p in &pinned {
+                        print_msg(p);
                     }
                 }
                 Err(e) => {
