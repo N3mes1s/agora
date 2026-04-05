@@ -177,6 +177,16 @@ fn ts(epoch: u64) -> String {
     dt.format("%H:%M:%S").to_string()
 }
 
+fn selected_room(room: Option<&str>) -> Result<store::RoomEntry, String> {
+    if let Some(target) = room {
+        store::find_room(target)
+            .ok_or_else(|| format!("Room '{target}' not found. Run: agora rooms"))
+    } else {
+        store::get_active_room()
+            .ok_or_else(|| "No active room. Use 'agora join' first.".to_string())
+    }
+}
+
 fn print_msg(env: &serde_json::Value) {
     print_msg_with_depth(env, 0);
 }
@@ -650,39 +660,39 @@ fn main() {
         }
 
         Commands::Watch => {
-            let watch_room = if let Some(target) = room {
-                store::find_room(target)
-            } else {
-                store::get_active_room()
-            };
-            if let Some(watch_room) = watch_room {
-                println!("  Watching '{}' (AES-256-GCM, Ctrl+C to stop)", watch_room.label);
-                println!("  Auto-heartbeat every 2 minutes\n");
-                if let Ok(msgs) = chat::read("30m", 20, room) {
-                    for m in &msgs {
-                        print_msg(m);
+            match selected_room(room) {
+                Ok(watch_room) => {
+                    println!("  Watching '{}' (AES-256-GCM, Ctrl+C to stop)", watch_room.label);
+                    println!("  Auto-heartbeat every 2 minutes\n");
+                    if let Ok(msgs) = chat::read("30m", 20, room) {
+                        for m in &msgs {
+                            print_msg(m);
+                        }
+                        if !msgs.is_empty() {
+                            println!("  ─── live ───\n");
+                        }
                     }
-                    if !msgs.is_empty() {
-                        println!("  ─── live ───\n");
+                    if let Err(e) = chat::watch(room, 120, |env| {
+                        print_msg(env);
+                    }) {
+                        eprintln!("  Error: {e}");
+                        process::exit(1);
                     }
                 }
-                if let Err(e) = chat::watch(room, 120, |env| {
-                    print_msg(env);
-                }) {
-                    eprintln!("  Error: {e}");
+                Err(e) => {
+                    eprintln!("  {e}");
                     process::exit(1);
                 }
-            } else {
-                eprintln!("  No active room. Use 'agora join' first.");
-                process::exit(1);
             }
         }
 
         Commands::Hub { log } => {
-            let active = if let Some(r) = room { store::find_room(r) } else { store::get_active_room() };
-            let Some(active_room) = active else {
-                eprintln!("  No active room. Use 'agora join' first.");
-                process::exit(1);
+            let active_room = match selected_room(room) {
+                Ok(room) => room,
+                Err(e) => {
+                    eprintln!("  {e}");
+                    process::exit(1);
+                }
             };
             let room_key = crypto::derive_room_key(&active_room.secret, &active_room.room_id);
 
