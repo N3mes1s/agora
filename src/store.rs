@@ -266,6 +266,35 @@ pub fn load_messages(room_id: &str, since_secs: u64) -> Vec<serde_json::Value> {
     msgs
 }
 
+pub fn notify_flag_path(room_id: &str) -> PathBuf {
+    let dir = agora_dir().join("rooms").join(room_id);
+    ensure_dir(&dir);
+    dir.join("notify.flag")
+}
+
+pub fn daemon_pid_path(room_id: &str) -> PathBuf {
+    let dir = agora_dir().join("rooms").join(room_id);
+    ensure_dir(&dir);
+    dir.join("daemon.pid")
+}
+
+pub fn set_notify_flag(room_id: &str, envelope: &serde_json::Value) {
+    let path = notify_flag_path(room_id);
+    let mid = envelope["id"].as_str().unwrap_or("?");
+    let ts = envelope["ts"].as_u64().unwrap_or_else(now);
+    let payload = format!("{ts}\t{mid}\n");
+    let _ = fs::write(path, payload);
+}
+
+pub fn take_notify_flag(room_id: &str) -> bool {
+    let path = notify_flag_path(room_id);
+    let exists = path.exists();
+    if exists {
+        let _ = fs::remove_file(path);
+    }
+    exists
+}
+
 // ── Seen Tracking ───────────────────────────────────────────────
 
 pub fn load_seen(room_id: &str) -> HashSet<String> {
