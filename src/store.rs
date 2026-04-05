@@ -7,9 +7,11 @@
 //!   identity.json             — agent identity
 
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::PathBuf;
+#[cfg(test)]
+use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 fn agora_dir() -> PathBuf {
@@ -27,6 +29,14 @@ fn now() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_secs()
+}
+
+#[cfg(test)]
+static TEST_ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+#[cfg(test)]
+pub fn test_env_lock() -> &'static Mutex<()> {
+    TEST_ENV_LOCK.get_or_init(|| Mutex::new(()))
 }
 
 // ── Identity ────────────────────────────────────────────────────
@@ -97,6 +107,24 @@ pub struct RoomEntry {
     pub topic: Option<String>,
     #[serde(default)]
     pub members: Vec<RoomMember>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct PeerRatchetState {
+    #[serde(default)]
+    pub next_n: u64,
+    #[serde(default)]
+    pub chain_key: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct RoomRatchetState {
+    #[serde(default)]
+    pub send_next_n: u64,
+    #[serde(default)]
+    pub send_chain_key: Option<String>,
+    #[serde(default)]
+    pub recv: HashMap<String, PeerRatchetState>,
 }
 
 pub fn load_registry() -> Vec<RoomEntry> {
@@ -297,6 +325,26 @@ pub fn pins_path(room_id: &str) -> PathBuf {
     dir.join("pins.json")
 }
 
+pub fn ratchet_state_path(room_id: &str) -> PathBuf {
+    let dir = agora_dir().join("rooms").join(room_id);
+    ensure_dir(&dir);
+    dir.join("ratchet.json")
+}
+
+pub fn load_ratchet_state(room_id: &str) -> RoomRatchetState {
+    let path = ratchet_state_path(room_id);
+    if let Ok(data) = fs::read_to_string(&path) {
+        serde_json::from_str(&data).unwrap_or_default()
+    } else {
+        RoomRatchetState::default()
+    }
+}
+
+pub fn save_ratchet_state(room_id: &str, state: &RoomRatchetState) {
+    let path = ratchet_state_path(room_id);
+    let _ = fs::write(path, serde_json::to_string_pretty(state).unwrap());
+}
+
 pub fn load_pins(room_id: &str) -> Vec<String> {
     let path = pins_path(room_id);
     if let Ok(data) = fs::read_to_string(&path) {
@@ -378,4 +426,44 @@ pub fn mark_seen(room_id: &str, msg_id: &str) {
         ids = ids[ids.len() - 1000..].to_vec();
     }
     let _ = fs::write(&path, ids.join("\n"));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_home() -> PathBuf {
+        let ts = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("agora-store-test-{ts}"))
+    }
+
+    #[test]
+    fn ratchet_state_round_trip() {
+        let _guard = test_env_lock().lock().unwrap();
+        let home = temp_home();
+        std::fs::create_dir_all(&home).unwrap();
+        unsafe {
+            std::env::set_var("HOME", &home);
+        }
+
+        let mut state = RoomRatchetState {
+            send_next_n: 3,
+            send_chain_key: Some("abcd".to_string()),
+            recv: HashMap::new(),
+        };
+        state.recv.insert(
+            "peer-a".to_string(),
+            PeerRatchetState {
+                next_n: 7,
+                chain_key: Some("deadbeef".to_string()),
+            },
+        );
+
+        save_ratchet_state("ag-room", &state);
+        let loaded = load_ratchet_state("ag-room");
+        assert_eq!(loaded, state);
+    }
 }

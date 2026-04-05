@@ -15,6 +15,7 @@
 //! ```
 
 use base64::Engine;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::{HashMap, HashSet};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -26,6 +27,8 @@ use crate::{crypto, store, transport};
 const VERSION: &str = "3.0";
 const BASE64: base64::engine::general_purpose::GeneralPurpose =
     base64::engine::general_purpose::STANDARD;
+
+const WIRE_VERSION_RATCHET: &str = "4.0";
 
 fn now() -> u64 {
     SystemTime::now()
@@ -99,6 +102,49 @@ fn parse_envelope(raw: &str) -> Option<serde_json::Value> {
     None
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct WirePayload {
+    v: String,
+    from: String,
+    ratchet_n: u64,
+    ct: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PayloadFrame {
+    from: Option<String>,
+    ratchet_n: Option<u64>,
+    ciphertext: String,
+}
+
+fn wrap_ratchet_payload(from: &str, ratchet_n: u64, ciphertext: &str) -> String {
+    serde_json::to_string(&WirePayload {
+        v: WIRE_VERSION_RATCHET.to_string(),
+        from: from.to_string(),
+        ratchet_n,
+        ct: ciphertext.to_string(),
+    })
+    .expect("serialize wire payload")
+}
+
+fn parse_payload_frame(payload: &str) -> PayloadFrame {
+    if let Ok(frame) = serde_json::from_str::<WirePayload>(payload) {
+        if frame.v == WIRE_VERSION_RATCHET {
+            return PayloadFrame {
+                from: Some(frame.from),
+                ratchet_n: Some(frame.ratchet_n),
+                ciphertext: frame.ct,
+            };
+        }
+    }
+
+    PayloadFrame {
+        from: None,
+        ratchet_n: None,
+        ciphertext: payload.to_string(),
+    }
+}
+
 // ── Encrypt / Decrypt ───────────────────────────────────────────
 
 fn encrypt_envelope(env: &serde_json::Value, room_key: &[u8; 32], room_id: &str) -> String {
@@ -110,8 +156,9 @@ fn encrypt_envelope(env: &serde_json::Value, room_key: &[u8; 32], room_id: &str)
 }
 
 fn decrypt_payload(payload: &str, room_key: &[u8; 32], room_id: &str) -> Option<serde_json::Value> {
+    let frame = parse_payload_frame(payload);
     let (enc_key, _) = crypto::derive_message_keys(room_key);
-    let blob = BASE64.decode(payload).ok()?;
+    let blob = BASE64.decode(frame.ciphertext).ok()?;
     let aad = room_id.as_bytes();
     let plaintext = crypto::decrypt(&blob, &enc_key, aad).ok()?;
     let raw = String::from_utf8(plaintext).ok()?;
@@ -414,7 +461,10 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{pin, pins, resolve_room, send_watch_heartbeat, unpin};
+    use super::{
+        parse_payload_frame, pin, pins, resolve_room, send_watch_heartbeat, unpin,
+        wrap_ratchet_payload,
+    };
     use crate::store::{self, Role};
     use serde_json::json;
     use std::path::PathBuf;
@@ -477,6 +527,7 @@ mod tests {
 
     #[test]
     fn resolve_room_reports_missing_explicit_target() {
+        let _guard = store::test_env_lock().lock().unwrap();
         let home = temp_home();
         std::fs::create_dir_all(&home).unwrap();
         unsafe {
@@ -490,6 +541,7 @@ mod tests {
 
     #[test]
     fn watch_heartbeat_targets_watched_room_not_active_room() {
+        let _guard = store::test_env_lock().lock().unwrap();
         let home = temp_home();
         std::fs::create_dir_all(&home).unwrap();
         unsafe {
@@ -517,6 +569,7 @@ mod tests {
 
     #[test]
     fn pin_and_unpin_round_trip() {
+        let _guard = store::test_env_lock().lock().unwrap();
         let (_home, first, _second) = setup_pin_room();
 
         let (resolved, added) = pin("aaaa", None).unwrap();
@@ -534,6 +587,33 @@ mod tests {
         assert_eq!(unpinned, first);
         assert!(removed);
         assert!(pins(None).unwrap().is_empty());
+    }
+
+    #[test]
+    fn ratchet_wire_payload_round_trip() {
+        let payload = wrap_ratchet_payload("alice", 7, "ciphertext");
+        let frame = parse_payload_frame(&payload);
+        assert_eq!(
+            frame,
+            super::PayloadFrame {
+                from: Some("alice".to_string()),
+                ratchet_n: Some(7),
+                ciphertext: "ciphertext".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn legacy_payload_frame_falls_back_to_raw_ciphertext() {
+        let frame = parse_payload_frame("legacy-ciphertext");
+        assert_eq!(
+            frame,
+            super::PayloadFrame {
+                from: None,
+                ratchet_n: None,
+                ciphertext: "legacy-ciphertext".to_string(),
+            }
+        );
     }
 }
 
