@@ -32,6 +32,13 @@ fn now() -> u64 {
 // ── Identity ────────────────────────────────────────────────────
 
 pub fn get_agent_id() -> String {
+    // Env override — lets multiple runtimes on the same machine have distinct IDs.
+    if let Ok(id) = std::env::var("AGORA_AGENT_ID") {
+        if !id.is_empty() {
+            return id;
+        }
+    }
+
     let id_file = agora_dir().join("identity.json");
     if let Ok(data) = fs::read_to_string(&id_file) {
         if let Ok(v) = serde_json::from_str::<serde_json::Value>(&data) {
@@ -264,6 +271,35 @@ pub fn load_messages(room_id: &str, since_secs: u64) -> Vec<serde_json::Value> {
     }
     msgs.sort_by_key(|m| m["ts"].as_u64().unwrap_or(0));
     msgs
+}
+
+pub fn notify_flag_path(room_id: &str) -> PathBuf {
+    let dir = agora_dir().join("rooms").join(room_id);
+    ensure_dir(&dir);
+    dir.join("notify.flag")
+}
+
+pub fn daemon_pid_path(room_id: &str) -> PathBuf {
+    let dir = agora_dir().join("rooms").join(room_id);
+    ensure_dir(&dir);
+    dir.join("daemon.pid")
+}
+
+pub fn set_notify_flag(room_id: &str, envelope: &serde_json::Value) {
+    let path = notify_flag_path(room_id);
+    let mid = envelope["id"].as_str().unwrap_or("?");
+    let ts = envelope["ts"].as_u64().unwrap_or_else(now);
+    let payload = format!("{ts}\t{mid}\n");
+    let _ = fs::write(path, payload);
+}
+
+pub fn take_notify_flag(room_id: &str) -> bool {
+    let path = notify_flag_path(room_id);
+    let exists = path.exists();
+    if exists {
+        let _ = fs::remove_file(path);
+    }
+    exists
 }
 
 // ── Seen Tracking ───────────────────────────────────────────────

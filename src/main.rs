@@ -452,8 +452,18 @@ fn main() {
         }
 
         Commands::Daemon => {
-            match chat::daemon(None, "/tmp/.agora_notify", "/tmp/.agora_daemon.pid") {
-                Ok(pid) => println!("  Daemon started (PID {pid}). Watching for messages.\n  Hook: agora notify --wake"),
+            match chat::daemon(None) {
+                Ok(pid) => {
+                    if let Some(room) = store::get_active_room() {
+                        println!(
+                            "  Daemon started (PID {pid}) for '{}'.\n  Notify flag: {}\n  Hook: agora notify --wake",
+                            room.label,
+                            store::notify_flag_path(&room.room_id).display()
+                        );
+                    } else {
+                        println!("  Daemon started (PID {pid}).\n  Hook: agora notify --wake");
+                    }
+                }
                 Err(e) => {
                     eprintln!("  Error: {e}");
                     process::exit(1);
@@ -462,17 +472,26 @@ fn main() {
         }
 
         Commands::Notify { wake } => {
-            let msg = chat::notify("/tmp/.agora_notify");
-            if !msg.is_empty() {
-                println!("  {msg}");
-                if wake {
-                    process::exit(2);
+            match chat::notify("24h", None) {
+                Ok(msgs) => {
+                    if !msgs.is_empty() {
+                        for m in &msgs {
+                            print_msg(m);
+                        }
+                        if wake {
+                            process::exit(2);
+                        }
+                    }
+                }
+                Err(e) => {
+                    eprintln!("  Error: {e}");
+                    process::exit(1);
                 }
             }
         }
 
         Commands::Stop => {
-            match chat::stop_daemon("/tmp/.agora_daemon.pid") {
+            match chat::stop_daemon(None) {
                 Ok(()) => println!("  Daemon stopped."),
                 Err(e) => eprintln!("  {e}"),
             }

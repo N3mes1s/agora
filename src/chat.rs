@@ -404,22 +404,21 @@ pub fn search(
 /// Start a background daemon that watches the room via SSE.
 /// Writes a JSON flag file on new messages for hook consumption.
 /// Returns the child PID.
-pub fn daemon(room_label: Option<&str>, flag_path: &str, pid_path: &str) -> Result<u32, String> {
+pub fn daemon(room_label: Option<&str>) -> Result<u32, String> {
     let room = resolve_room(room_label)?;
+    let pid_path = store::daemon_pid_path(&room.room_id);
 
     // Kill existing daemon if running
-    if let Ok(pid_str) = std::fs::read_to_string(pid_path) {
+    if let Ok(pid_str) = std::fs::read_to_string(&pid_path) {
         if let Ok(pid) = pid_str.trim().parse::<i32>() {
             unsafe { libc::kill(pid, libc::SIGTERM); }
         }
-        let _ = std::fs::remove_file(pid_path);
+        let _ = std::fs::remove_file(&pid_path);
     }
 
     let room_id = room.room_id.clone();
     let secret = room.secret.clone();
-    let label = room.label.clone();
-    let flag = flag_path.to_string();
-    let pidfile = pid_path.to_string();
+    let pidfile = pid_path;
 
     // Fork
     let pid = unsafe { libc::fork() };
@@ -438,21 +437,16 @@ pub fn daemon(room_label: Option<&str>, flag_path: &str, pid_path: &str) -> Resu
     let room_key = crypto::derive_room_key(&secret, &room_id);
     let me = store::get_agent_id();
 
-    transport::stream(&room_id, |ts, payload| {
+    transport::stream(&room_id, |_ts, payload| {
         if let Some(env) = decrypt_payload(payload, &room_key, &room_id) {
+            track_presence(&room_id, &env);
             let from = env["from"].as_str().unwrap_or("");
             // Skip own messages and heartbeats
             if from == me || is_heartbeat(&env) {
                 return;
             }
-            let text = env["text"].as_str().unwrap_or("").to_string();
-            let flag_data = serde_json::json!({
-                "room": label,
-                "from": from,
-                "text": if text.len() > 200 { &text[..200] } else { &text },
-                "time": ts,
-            });
-            let _ = std::fs::write(&flag, serde_json::to_string(&flag_data).unwrap());
+            store::save_message(&room_id, &env);
+            store::set_notify_flag(&room_id, &env);
         }
     });
 
@@ -460,30 +454,35 @@ pub fn daemon(room_label: Option<&str>, flag_path: &str, pid_path: &str) -> Resu
 }
 
 /// Check the flag file for new messages (for hooks). Clears the flag.
-/// Returns the notification text, or empty if no new messages.
-pub fn notify(flag_path: &str) -> String {
-    let path = std::path::Path::new(flag_path);
-    if !path.exists() {
-        return String::new();
+/// Returns cached unseen messages, or empty if no new messages.
+pub fn notify(since: &str, room_label: Option<&str>) -> Result<Vec<serde_json::Value>, String> {
+    let room = resolve_room(room_label)?;
+    if !store::take_notify_flag(&room.room_id) {
+        return Ok(vec![]);
     }
-    let data = match std::fs::read_to_string(path) {
-        Ok(d) => d,
-        Err(_) => return String::new(),
-    };
-    let _ = std::fs::remove_file(path);
-    if let Ok(flag) = serde_json::from_str::<serde_json::Value>(&data) {
-        let room = flag["room"].as_str().unwrap_or("?");
-        let from = flag["from"].as_str().unwrap_or("?");
-        let text = flag["text"].as_str().unwrap_or("");
-        format!("[{room}] {from}: {text}")
-    } else {
-        String::new()
+
+    let me = store::get_agent_id();
+    let seen = store::load_seen(&room.room_id);
+    let since_secs = parse_since(since);
+    let mut new_msgs = Vec::new();
+
+    for env in store::load_messages(&room.room_id, since_secs) {
+        let mid = env["id"].as_str().unwrap_or("?").to_string();
+        let from = env["from"].as_str().unwrap_or("");
+        if from == me || seen.contains(&mid) || is_heartbeat(&env) {
+            continue;
+        }
+        store::mark_seen(&room.room_id, &mid);
+        new_msgs.push(env);
     }
+    Ok(new_msgs)
 }
 
 /// Stop the daemon process.
-pub fn stop_daemon(pid_path: &str) -> Result<(), String> {
-    if let Ok(pid_str) = std::fs::read_to_string(pid_path) {
+pub fn stop_daemon(room_label: Option<&str>) -> Result<(), String> {
+    let room = resolve_room(room_label)?;
+    let pid_path = store::daemon_pid_path(&room.room_id);
+    if let Ok(pid_str) = std::fs::read_to_string(&pid_path) {
         if let Ok(pid) = pid_str.trim().parse::<i32>() {
             unsafe { libc::kill(pid, libc::SIGTERM); }
             let _ = std::fs::remove_file(pid_path);
