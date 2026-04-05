@@ -238,6 +238,28 @@ fn handle_tools_list() -> Result<Value, String> {
                 }
             },
             {
+                "name": "agora_search",
+                "description": "Search messages by text content, optionally filtered by sender",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "query": {
+                            "type": "string",
+                            "description": "Text to search for"
+                        },
+                        "from": {
+                            "type": "string",
+                            "description": "Filter by sender agent ID (optional)"
+                        },
+                        "room": {
+                            "type": "string",
+                            "description": "Room label (optional)"
+                        }
+                    },
+                    "required": ["query"]
+                }
+            },
+            {
                 "name": "agora_info",
                 "description": "Get room info including encryption details and key fingerprint",
                 "inputSchema": {
@@ -267,6 +289,7 @@ fn handle_tools_call(req: &Value) -> Result<Value, String> {
         "agora_join" => tool_join(args),
         "agora_create" => tool_create(args),
         "agora_rooms" => tool_rooms(args),
+        "agora_search" => tool_search(args),
         "agora_who" => tool_who(args),
         "agora_heartbeat" => tool_heartbeat(args),
         "agora_info" => tool_info(args),
@@ -367,6 +390,27 @@ fn tool_rooms(_args: &Value) -> Result<String, String> {
     for r in &rooms {
         let marker = if r.room_id == active_id { " *" } else { "" };
         out.push_str(&format!("{:<16} {:<20} {marker}\n", r.label, r.room_id));
+    }
+    Ok(out)
+}
+
+fn tool_search(args: &Value) -> Result<String, String> {
+    let query = args["query"].as_str().ok_or("Missing 'query'")?;
+    let from = args["from"].as_str();
+    let room = args["room"].as_str();
+    let msgs = chat::search(query, from, room)?;
+    if msgs.is_empty() {
+        return Ok(format!("No matches for '{query}'."));
+    }
+    let mut out = format!("{} match(es):\n", msgs.len());
+    for msg in &msgs {
+        let ts = msg["ts"].as_u64().unwrap_or(0);
+        let dt = chrono::DateTime::from_timestamp(ts as i64, 0)
+            .map(|d| d.format("%H:%M:%S").to_string())
+            .unwrap_or_default();
+        let from = msg["from"].as_str().unwrap_or("?");
+        let text = msg["text"].as_str().unwrap_or("");
+        out.push_str(&format!("[{dt}] {from}: {text}\n"));
     }
     Ok(out)
 }

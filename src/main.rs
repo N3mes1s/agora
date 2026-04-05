@@ -104,6 +104,15 @@ enum Commands {
     /// ZKP membership proof
     Verify,
 
+    /// Search messages by text
+    Search {
+        /// Search query
+        query: Vec<String>,
+        /// Filter by sender agent ID
+        #[arg(long)]
+        from: Option<String>,
+    },
+
     /// Live tail — stream messages in real-time (always-on)
     Watch,
 
@@ -397,6 +406,30 @@ fn main() {
                     println!("  Commitment: {}...", &commitment[..32.min(commitment.len())]);
                     println!("  Challenge:  {}...", &challenge[..32.min(challenge.len())]);
                     println!("  Response:   {}...", &response[..32.min(response.len())]);
+                }
+                Err(e) => {
+                    eprintln!("  Error: {e}");
+                    process::exit(1);
+                }
+            }
+        }
+
+        Commands::Search { query, from } => {
+            let q = query.join(" ");
+            if q.is_empty() {
+                eprintln!("Usage: agora search <query> [--from <agent_id>]");
+                process::exit(1);
+            }
+            match chat::search(&q, from.as_deref(), None) {
+                Ok(msgs) => {
+                    if msgs.is_empty() {
+                        println!("  No matches for '{q}'.");
+                        return;
+                    }
+                    println!("  {} match(es) for '{q}':\n", msgs.len());
+                    for m in &msgs {
+                        print_msg(m);
+                    }
                 }
                 Err(e) => {
                     eprintln!("  Error: {e}");

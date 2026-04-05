@@ -377,6 +377,30 @@ where
     Ok(())
 }
 
+/// Search messages by text, optionally filtered by sender.
+pub fn search(
+    query: &str,
+    from: Option<&str>,
+    room_label: Option<&str>,
+) -> Result<Vec<serde_json::Value>, String> {
+    let room = resolve_room(room_label)?;
+    let query_lower = query.to_lowercase();
+    // Search all local messages (up to 24h)
+    let msgs = store::load_messages(&room.room_id, 86400);
+    let mut results: Vec<serde_json::Value> = msgs
+        .into_iter()
+        .filter(|m| {
+            let text = m["text"].as_str().unwrap_or("");
+            let sender = m["from"].as_str().unwrap_or("");
+            let matches_query = text.to_lowercase().contains(&query_lower);
+            let matches_from = from.map_or(true, |f| sender == f);
+            matches_query && matches_from
+        })
+        .collect();
+    results.sort_by_key(|m| m["ts"].as_u64().unwrap_or(0));
+    Ok(results)
+}
+
 pub fn verify(room_label: Option<&str>) -> Result<serde_json::Value, String> {
     let room = resolve_room(room_label)?;
     let room_key = crypto::derive_room_key(&room.secret, &room.room_id);
