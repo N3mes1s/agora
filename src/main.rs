@@ -715,7 +715,7 @@ fn main() {
             let log_file = log.clone();
 
             loop {
-                let result = chat::watch(room, 120, |env| {
+                let _ = chat::watch(room, 120, |env| {
                     msg_count += 1;
                     print_msg(env);
 
