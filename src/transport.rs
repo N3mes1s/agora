@@ -24,6 +24,13 @@ fn client() -> reqwest::blocking::Client {
         .expect("failed to build HTTP client")
 }
 
+fn streaming_client() -> reqwest::blocking::Client {
+    reqwest::blocking::Client::builder()
+        .timeout(None)
+        .build()
+        .expect("failed to build streaming HTTP client")
+}
+
 /// Publish an encrypted payload to a ntfy.sh topic.
 pub fn publish(topic: &str, payload: &str) -> bool {
     let url = format!("{NTFY_BASE}/{topic}");
@@ -63,4 +70,41 @@ pub fn fetch(topic: &str, since: &str) -> Vec<(u64, String)> {
         }
     }
     events
+}
+
+/// Open a streaming SSE connection to a ntfy.sh topic.
+/// Calls `on_message(timestamp, raw_payload)` for each message.
+/// Blocks forever. Returns on connection error.
+pub fn stream<F>(topic: &str, mut on_message: F)
+where
+    F: FnMut(u64, &str),
+{
+    let url = format!("{NTFY_BASE}/{topic}/json");
+    let resp = match streaming_client().get(&url).send() {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("  [error] stream connect failed: {e}");
+            return;
+        }
+    };
+
+    let reader = std::io::BufReader::new(resp);
+    use std::io::BufRead;
+    for line in reader.lines() {
+        let line = match line {
+            Ok(l) => l,
+            Err(_) => break,
+        };
+        let line = line.trim().to_string();
+        if line.is_empty() {
+            continue;
+        }
+        if let Ok(evt) = serde_json::from_str::<NtfyEvent>(&line) {
+            if evt.event.as_deref() == Some("message") {
+                if let Some(ref msg) = evt.message {
+                    on_message(evt.time.unwrap_or(0), msg);
+                }
+            }
+        }
+    }
 }

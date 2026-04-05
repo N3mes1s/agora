@@ -342,6 +342,41 @@ pub fn kick(agent_id: &str, room_label: Option<&str>) -> Result<(), String> {
     Ok(())
 }
 
+/// Watch a room in real-time. Calls `on_message` for each new message.
+/// Sends a heartbeat every `heartbeat_secs` seconds.
+/// Blocks forever.
+pub fn watch<F>(room_label: Option<&str>, heartbeat_secs: u64, mut on_message: F) -> Result<(), String>
+where
+    F: FnMut(&serde_json::Value),
+{
+    let room = resolve_room(room_label)?;
+    let room_key = crypto::derive_room_key(&room.secret, &room.room_id);
+    let room_id = room.room_id.clone();
+
+    // Track last heartbeat time
+    let mut last_heartbeat = now();
+    // Send initial heartbeat
+    let _ = heartbeat(None);
+
+    transport::stream(&room_id, |_ts, payload| {
+        if let Some(env) = decrypt_payload(payload, &room_key, &room_id) {
+            track_presence(&room_id, &env);
+            if !is_heartbeat(&env) {
+                store::save_message(&room_id, &env);
+                on_message(&env);
+            }
+        }
+        // Periodic heartbeat
+        let elapsed = now() - last_heartbeat;
+        if elapsed >= heartbeat_secs {
+            let _ = heartbeat(None);
+            last_heartbeat = now();
+        }
+    });
+
+    Ok(())
+}
+
 pub fn verify(room_label: Option<&str>) -> Result<serde_json::Value, String> {
     let room = resolve_room(room_label)?;
     let room_key = crypto::derive_room_key(&room.secret, &room.room_id);

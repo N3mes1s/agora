@@ -104,6 +104,9 @@ enum Commands {
     /// ZKP membership proof
     Verify,
 
+    /// Live tail — stream messages in real-time (always-on)
+    Watch,
+
     /// Start MCP stdio server (for Claude Code integration)
     Mcp,
 
@@ -399,6 +402,31 @@ fn main() {
                     eprintln!("  Error: {e}");
                     process::exit(1);
                 }
+            }
+        }
+
+        Commands::Watch => {
+            if let Some(room) = store::get_active_room() {
+                println!("  Watching '{}' (AES-256-GCM, Ctrl+C to stop)", room.label);
+                println!("  Auto-heartbeat every 2 minutes\n");
+                // Print recent history first
+                if let Ok(msgs) = chat::read("30m", 20, None) {
+                    for m in &msgs {
+                        print_msg(m);
+                    }
+                    if !msgs.is_empty() {
+                        println!("  ─── live ───\n");
+                    }
+                }
+                if let Err(e) = chat::watch(None, 120, |env| {
+                    print_msg(env);
+                }) {
+                    eprintln!("  Error: {e}");
+                    process::exit(1);
+                }
+            } else {
+                eprintln!("  No active room. Use 'agora join' first.");
+                process::exit(1);
             }
         }
 
