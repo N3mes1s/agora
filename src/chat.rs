@@ -375,6 +375,32 @@ pub fn check(since: &str, room_label: Option<&str>) -> Result<Vec<serde_json::Va
     Ok(new_msgs)
 }
 
+/// Get delivery receipts for a specific message (by ID or unique prefix).
+///
+/// Returns a list of `{ from, ts }` objects — one per agent that has acknowledged
+/// receipt of the message.
+pub fn delivery_receipts(
+    msg_id_prefix: &str,
+    room_label: Option<&str>,
+) -> Result<Vec<serde_json::Value>, String> {
+    let room = resolve_room(room_label)?;
+    let receipts = store::load_receipts(&room.room_id);
+
+    // Find the full message ID that matches the prefix
+    let full_id = receipts
+        .keys()
+        .find(|k| k.starts_with(msg_id_prefix))
+        .cloned()
+        .unwrap_or_else(|| msg_id_prefix.to_string());
+
+    let readers = receipts.get(&full_id).cloned().unwrap_or_default();
+    let out = readers
+        .into_iter()
+        .map(|from| json!({ "from": from }))
+        .collect();
+    Ok(out)
+}
+
 /// Get read receipt status for recent messages.
 pub fn read_status(room_label: Option<&str>) -> Result<Vec<serde_json::Value>, String> {
     let room = resolve_room(room_label)?;
@@ -922,7 +948,7 @@ pub fn download_file(file_id: &str, out_path: Option<&str>, room_label: Option<&
 
 #[cfg(test)]
 mod tests {
-    use super::{pin, pins, resolve_room, send_watch_heartbeat, unpin};
+    use super::{delivery_receipts, pin, pins, resolve_room, send_watch_heartbeat, unpin};
     use crate::store::{self, Role};
     use serde_json::json;
     use std::path::PathBuf;
@@ -1042,6 +1068,77 @@ mod tests {
         assert_eq!(unpinned, first);
         assert!(removed);
         assert!(pins(None).unwrap().is_empty());
+    }
+
+    // ── delivery_receipts tests ───────────────────────────────────
+
+    fn setup_receipts_room() -> PathBuf {
+        let ts = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let home = std::env::temp_dir().join(format!("agora-receipts-test-{ts}"));
+        std::fs::create_dir_all(&home).unwrap();
+        unsafe {
+            std::env::set_var("HOME", &home);
+            std::env::set_var("AGORA_AGENT_ID", "receipts-tester");
+        }
+        store::add_room("ag-rcpt-test", "secret-rcpt", "rcpt-room", Role::Admin);
+        store::set_active_room("rcpt-room");
+        home
+    }
+
+    #[test]
+    fn delivery_receipts_empty_for_unknown_message() {
+        let _home = setup_receipts_room();
+        let result = delivery_receipts("nonexistent", None).unwrap();
+        assert!(result.is_empty(), "should be empty for unknown message ID");
+    }
+
+    #[test]
+    fn delivery_receipts_returns_readers_by_prefix() {
+        let _home = setup_receipts_room();
+        let room = store::find_room("rcpt-room").unwrap();
+        let msg_id = "aabbccdd1122";
+
+        // Simulate two agents acknowledging the message
+        store::record_receipts(&room.room_id, &[msg_id.to_string()], "agent-alice");
+        store::record_receipts(&room.room_id, &[msg_id.to_string()], "agent-bob");
+
+        // Lookup by full ID
+        let entries = delivery_receipts(msg_id, None).unwrap();
+        assert_eq!(entries.len(), 2);
+        let froms: Vec<&str> = entries.iter().filter_map(|e| e["from"].as_str()).collect();
+        assert!(froms.contains(&"agent-alice"));
+        assert!(froms.contains(&"agent-bob"));
+    }
+
+    #[test]
+    fn delivery_receipts_prefix_lookup() {
+        let _home = setup_receipts_room();
+        let room = store::find_room("rcpt-room").unwrap();
+        let msg_id = "ff001122334455";
+
+        store::record_receipts(&room.room_id, &[msg_id.to_string()], "agent-carol");
+
+        // Lookup by 6-char prefix
+        let entries = delivery_receipts("ff0011", None).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0]["from"].as_str(), Some("agent-carol"));
+    }
+
+    #[test]
+    fn delivery_receipts_deduplicates_same_reader() {
+        let _home = setup_receipts_room();
+        let room = store::find_room("rcpt-room").unwrap();
+        let msg_id = "dedupe-test-id";
+
+        // Same agent reads it twice
+        store::record_receipts(&room.room_id, &[msg_id.to_string()], "agent-dave");
+        store::record_receipts(&room.room_id, &[msg_id.to_string()], "agent-dave");
+
+        let entries = delivery_receipts(msg_id, None).unwrap();
+        assert_eq!(entries.len(), 1, "duplicate receipts should be deduplicated");
     }
 }
 
