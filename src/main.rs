@@ -126,11 +126,20 @@ enum Commands {
 
     /// Search messages by text
     Search {
-        /// Search query
+        /// Search query (text or regex with --regex)
         query: Vec<String>,
         /// Filter by sender agent ID
         #[arg(long)]
         from: Option<String>,
+        /// Only messages after this time (HH:MM or unix timestamp)
+        #[arg(long)]
+        after: Option<String>,
+        /// Only messages before this time (HH:MM or unix timestamp)
+        #[arg(long)]
+        before: Option<String>,
+        /// Treat query as regex pattern
+        #[arg(long, short = 'e')]
+        regex: bool,
     },
 
     /// Pin a cached message locally in this room
@@ -189,6 +198,31 @@ enum Commands {
 
     /// Show agent identity
     Id,
+}
+
+/// Parse a time argument: "HH:MM" (today), "1h" (relative), or unix timestamp.
+fn parse_time_arg(s: &str) -> Option<u64> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH).ok()?.as_secs();
+    // Relative: "1h", "30m", "2d"
+    if let Some(h) = s.strip_suffix('h') {
+        return Some(now - h.parse::<u64>().ok()? * 3600);
+    }
+    if let Some(m) = s.strip_suffix('m') {
+        return Some(now - m.parse::<u64>().ok()? * 60);
+    }
+    if let Some(d) = s.strip_suffix('d') {
+        return Some(now - d.parse::<u64>().ok()? * 86400);
+    }
+    // HH:MM — assume today
+    if let Some((hh, mm)) = s.split_once(':') {
+        let h: u64 = hh.parse().ok()?;
+        let m: u64 = mm.parse().ok()?;
+        let today_start = now - (now % 86400); // UTC midnight
+        return Some(today_start + h * 3600 + m * 60);
+    }
+    // Raw unix timestamp
+    s.parse::<u64>().ok()
 }
 
 fn ts(epoch: u64) -> String {
@@ -583,13 +617,15 @@ fn main() {
             }
         }
 
-        Commands::Search { query, from } => {
+        Commands::Search { query, from, after, before, regex: use_regex } => {
             let q = query.join(" ");
             if q.is_empty() {
-                eprintln!("Usage: agora search <query> [--from <agent_id>]");
+                eprintln!("Usage: agora search <query> [--from <id>] [--after HH:MM] [--before HH:MM] [--regex]");
                 process::exit(1);
             }
-            match chat::search(&q, from.as_deref(), room) {
+            let after_ts = after.and_then(|t| parse_time_arg(&t));
+            let before_ts = before.and_then(|t| parse_time_arg(&t));
+            match chat::search(&q, from.as_deref(), after_ts, before_ts, use_regex, room) {
                 Ok(msgs) => {
                     if msgs.is_empty() {
                         println!("  No matches for '{q}'.");

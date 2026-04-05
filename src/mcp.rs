@@ -398,7 +398,7 @@ fn tool_search(args: &Value) -> Result<String, String> {
     let query = args["query"].as_str().ok_or("Missing 'query'")?;
     let from = args["from"].as_str();
     let room = args["room"].as_str();
-    let msgs = chat::search(query, from, room)?;
+    let msgs = chat::search(query, from, None, None, false, room)?;
     if msgs.is_empty() {
         return Ok(format!("No matches for '{query}'."));
     }

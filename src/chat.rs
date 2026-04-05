@@ -614,20 +614,44 @@ mod tests {
 pub fn search(
     query: &str,
     from: Option<&str>,
+    after: Option<u64>,
+    before: Option<u64>,
+    use_regex: bool,
     room_label: Option<&str>,
 ) -> Result<Vec<serde_json::Value>, String> {
     let room = resolve_room(room_label)?;
+    // Search all local messages (up to 7 days)
+    let msgs = store::load_messages(&room.room_id, 604800);
+
+    let re = if use_regex {
+        Some(regex::RegexBuilder::new(query)
+            .case_insensitive(true)
+            .build()
+            .map_err(|e| format!("Invalid regex: {e}"))?)
+    } else {
+        None
+    };
     let query_lower = query.to_lowercase();
-    // Search all local messages (up to 24h)
-    let msgs = store::load_messages(&room.room_id, 86400);
+
     let mut results: Vec<serde_json::Value> = msgs
         .into_iter()
         .filter(|m| {
             let text = m["text"].as_str().unwrap_or("");
             let sender = m["from"].as_str().unwrap_or("");
-            let matches_query = text.to_lowercase().contains(&query_lower);
+            let ts = m["ts"].as_u64().unwrap_or(0);
+
+            // Text match: regex or plain
+            let matches_query = if let Some(ref re) = re {
+                re.is_match(text)
+            } else {
+                text.to_lowercase().contains(&query_lower)
+            };
+
             let matches_from = from.map_or(true, |f| sender == f);
-            matches_query && matches_from
+            let matches_after = after.map_or(true, |a| ts >= a);
+            let matches_before = before.map_or(true, |b| ts <= b);
+
+            matches_query && matches_from && matches_after && matches_before
         })
         .collect();
     results.sort_by_key(|m| m["ts"].as_u64().unwrap_or(0));
