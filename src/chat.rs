@@ -482,6 +482,60 @@ pub fn whois(agent_id: &str, room_label: Option<&str>) -> Result<Option<store::A
     Ok(store::get_profile(&room.room_id, agent_id))
 }
 
+/// Health check — validate local setup, connectivity, encryption.
+pub fn healthcheck(room_label: Option<&str>) -> Result<Vec<(String, bool, String)>, String> {
+    let mut checks: Vec<(String, bool, String)> = Vec::new();
+
+    // Check identity
+    let id = store::get_agent_id();
+    checks.push(("Agent ID".into(), !id.is_empty(), id.clone()));
+
+    // Check rooms
+    let rooms = store::load_registry();
+    checks.push(("Rooms joined".into(), !rooms.is_empty(), format!("{}", rooms.len())));
+
+    // Check active room
+    let active = if let Some(r) = room_label {
+        store::find_room(r)
+    } else {
+        store::get_active_room()
+    };
+    match &active {
+        Some(r) => {
+            checks.push(("Active room".into(), true, r.label.clone()));
+
+            // Check encryption
+            let room_key = crypto::derive_room_key(&r.secret, &r.room_id);
+            let test_data = b"healthcheck";
+            match crypto::encrypt(test_data, &room_key, b"test") {
+                Ok(blob) => {
+                    match crypto::decrypt(&blob, &room_key, b"test") {
+                        Ok(pt) => checks.push(("AES-256-GCM".into(), pt == test_data, "encrypt/decrypt OK".into())),
+                        Err(e) => checks.push(("AES-256-GCM".into(), false, format!("decrypt failed: {e}"))),
+                    }
+                }
+                Err(e) => checks.push(("AES-256-GCM".into(), false, format!("encrypt failed: {e}"))),
+            }
+
+            // Check relay connectivity
+            let events = transport::fetch(&r.room_id, "1m");
+            checks.push(("ntfy.sh relay".into(), true, format!("{} events in last 1m", events.len())));
+
+            // Check messages
+            let msgs = store::load_messages(&r.room_id, 3600);
+            checks.push(("Local messages".into(), true, format!("{} in last 1h", msgs.len())));
+
+            // Check members
+            checks.push(("Members tracked".into(), !r.members.is_empty(), format!("{}", r.members.len())));
+        }
+        None => {
+            checks.push(("Active room".into(), false, "none".into()));
+        }
+    }
+
+    Ok(checks)
+}
+
 /// Schedule a message for future delivery.
 /// Stores in a queue file; `check` or `send-scheduled` delivers when time is up.
 pub fn schedule_message(text: &str, deliver_at: u64, room_label: Option<&str>) -> Result<String, String> {

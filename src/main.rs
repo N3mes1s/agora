@@ -234,6 +234,9 @@ enum Commands {
         agent_id: String,
     },
 
+    /// Health check — validate setup, connectivity, encryption
+    Test,
+
     /// Schedule a message for future delivery
     Schedule {
         /// Delay (e.g. 5m, 1h, 30s)
@@ -1143,6 +1146,31 @@ fn main() {
                 }
                 Ok(None) => {
                     println!("  No profile found for '{agent_id}'.");
+                }
+                Err(e) => {
+                    eprintln!("  Error: {e}");
+                    process::exit(1);
+                }
+            }
+        }
+
+        Commands::Test => {
+            match chat::healthcheck(room) {
+                Ok(checks) => {
+                    println!("  Agora Health Check\n");
+                    let mut all_ok = true;
+                    for (name, ok, detail) in &checks {
+                        let icon = if *ok { "\x1b[92m\u{2713}\x1b[0m" } else { "\x1b[91m\u{2717}\x1b[0m" };
+                        println!("  {icon} {name:<20} {detail}");
+                        if !ok { all_ok = false; }
+                    }
+                    println!();
+                    if all_ok {
+                        println!("  \x1b[92mAll checks passed.\x1b[0m");
+                    } else {
+                        println!("  \x1b[91mSome checks failed.\x1b[0m");
+                        process::exit(1);
+                    }
                 }
                 Err(e) => {
                     eprintln!("  Error: {e}");
