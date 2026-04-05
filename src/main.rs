@@ -15,6 +15,10 @@ use std::process;
 #[derive(Parser)]
 #[command(name = "agora", about = "Encrypted agent-to-agent chat", version)]
 struct Cli {
+    /// Target room (label or ID) — overrides active room
+    #[arg(long, global = true)]
+    room: Option<String>,
+
     #[command(subcommand)]
     command: Commands,
 }
@@ -173,6 +177,7 @@ fn print_msg_with_depth(env: &serde_json::Value, depth: usize) {
 
 fn main() {
     let cli = Cli::parse();
+    let room = cli.room.as_deref();
 
     match cli.command {
         Commands::Create { label } => {
@@ -219,7 +224,7 @@ fn main() {
                 eprintln!("Usage: agora send <message>");
                 process::exit(1);
             }
-            match chat::send(&text, reply.as_deref(), None) {
+            match chat::send(&text, reply.as_deref(), room) {
                 Ok(mid) => println!("  Sent [{}] (AES-256-GCM encrypted)", &mid[..6.min(mid.len())]),
                 Err(e) => {
                     eprintln!("  Error: {e}");
@@ -229,7 +234,7 @@ fn main() {
         }
 
         Commands::Read { tail } => {
-            match chat::read("2h", 50, None) {
+            match chat::read("2h", 50, room) {
                 Ok(msgs) => {
                     let msgs = if let Some(n) = tail {
                         if msgs.len() > n { &msgs[msgs.len() - n..] } else { &msgs }
@@ -240,8 +245,9 @@ fn main() {
                         println!("  (no messages)");
                         return;
                     }
-                    if let Some(room) = store::get_active_room() {
-                        println!("  --- {} ({} messages, AES-256-GCM) ---\n", room.label, msgs.len());
+                    let header_room = if let Some(r) = room { store::find_room(r) } else { store::get_active_room() };
+                    if let Some(hr) = header_room {
+                        println!("  --- {} ({} messages, AES-256-GCM) ---\n", hr.label, msgs.len());
                     }
                     for m in msgs {
                         print_msg(m);
@@ -255,7 +261,7 @@ fn main() {
         }
 
         Commands::Check { wake } => {
-            match chat::check("5m", None) {
+            match chat::check("5m", room) {
                 Ok(msgs) => {
                     if !msgs.is_empty() {
                         for m in &msgs {
@@ -306,7 +312,7 @@ fn main() {
         }
 
         Commands::Info => {
-            match chat::info(None) {
+            match chat::info(room) {
                 Ok(info) => {
                     println!("  Room:        {}", info["label"].as_str().unwrap_or("?"));
                     println!("  ID:          {}", info["room_id"].as_str().unwrap_or("?"));
@@ -328,7 +334,7 @@ fn main() {
         }
 
         Commands::Who { online } => {
-            match chat::who(None, online) {
+            match chat::who(room, online) {
                 Ok(members) => {
                     if members.is_empty() {
                         if online {
@@ -372,7 +378,7 @@ fn main() {
         }
 
         Commands::Heartbeat => {
-            match chat::heartbeat(None) {
+            match chat::heartbeat(room) {
                 Ok(()) => println!("  Heartbeat sent."),
                 Err(e) => {
                     eprintln!("  Error: {e}");
@@ -387,7 +393,7 @@ fn main() {
                 eprintln!("Usage: agora topic <text>");
                 process::exit(1);
             }
-            match chat::topic(&topic, None) {
+            match chat::topic(&topic, room) {
                 Ok(()) => println!("  Topic set: {topic}"),
                 Err(e) => {
                     eprintln!("  Error: {e}");
@@ -397,7 +403,7 @@ fn main() {
         }
 
         Commands::Promote { agent_id } => {
-            match chat::promote(&agent_id, None) {
+            match chat::promote(&agent_id, room) {
                 Ok(()) => println!("  Promoted {agent_id} to admin."),
                 Err(e) => {
                     eprintln!("  Error: {e}");
@@ -407,7 +413,7 @@ fn main() {
         }
 
         Commands::Kick { agent_id } => {
-            match chat::kick(&agent_id, None) {
+            match chat::kick(&agent_id, room) {
                 Ok(()) => println!("  Kicked {agent_id}."),
                 Err(e) => {
                     eprintln!("  Error: {e}");
@@ -417,7 +423,7 @@ fn main() {
         }
 
         Commands::Verify => {
-            match chat::verify(None) {
+            match chat::verify(room) {
                 Ok(proof) => {
                     let valid = proof["proof_valid"].as_bool().unwrap_or(false);
                     println!("  Room: {}", proof["room_id"].as_str().unwrap_or("?"));
@@ -444,7 +450,7 @@ fn main() {
                 eprintln!("Usage: agora search <query> [--from <agent_id>]");
                 process::exit(1);
             }
-            match chat::search(&q, from.as_deref(), None) {
+            match chat::search(&q, from.as_deref(), room) {
                 Ok(msgs) => {
                     if msgs.is_empty() {
                         println!("  No matches for '{q}'.");
@@ -482,7 +488,7 @@ fn main() {
         }
 
         Commands::Daemon => {
-            match chat::daemon(None) {
+            match chat::daemon(room) {
                 Ok(pid) => {
                     if let Some(room) = store::get_active_room() {
                         println!(
@@ -502,7 +508,7 @@ fn main() {
         }
 
         Commands::Notify { wake } => {
-            match chat::notify("24h", None) {
+            match chat::notify("24h", room) {
                 Ok(msgs) => {
                     if !msgs.is_empty() {
                         for m in &msgs {
@@ -521,18 +527,22 @@ fn main() {
         }
 
         Commands::Stop => {
-            match chat::stop_daemon(None) {
+            match chat::stop_daemon(room) {
                 Ok(()) => println!("  Daemon stopped."),
                 Err(e) => eprintln!("  {e}"),
             }
         }
 
         Commands::Watch => {
-            if let Some(room) = store::get_active_room() {
-                println!("  Watching '{}' (AES-256-GCM, Ctrl+C to stop)", room.label);
+            let target = if let Some(r) = room {
+                store::find_room(r)
+            } else {
+                store::get_active_room()
+            };
+            if let Some(r) = target {
+                println!("  Watching '{}' (AES-256-GCM, Ctrl+C to stop)", r.label);
                 println!("  Auto-heartbeat every 2 minutes\n");
-                // Print recent history first
-                if let Ok(msgs) = chat::read("30m", 20, None) {
+                if let Ok(msgs) = chat::read("30m", 20, room) {
                     for m in &msgs {
                         print_msg(m);
                     }
@@ -540,7 +550,7 @@ fn main() {
                         println!("  ─── live ───\n");
                     }
                 }
-                if let Err(e) = chat::watch(None, 120, |env| {
+                if let Err(e) = chat::watch(room, 120, |env| {
                     print_msg(env);
                 }) {
                     eprintln!("  Error: {e}");
