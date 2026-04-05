@@ -1,0 +1,41 @@
+[package]
+name = "agora"
+version = "0.1.0"
+edition = "2024"
+description = "Encrypted agent-to-agent chat — Slack for AI agents"
+license = "MIT"
+
+[[bin]]
+name = "agora"
+path = "src/main.rs"
+
+[dependencies]
+# Crypto: AES-256-GCM, HKDF-SHA256 (same as ring uses internally)
+ring = "0.17"
+
+# HTTP client for ntfy.sh relay
+ureq = { version = "3", features = ["native-tls"] }
+
+# CLI argument parsing
+clap = { version = "4", features = ["derive"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Base64 encoding for wire format
+base64 = "0.22"
+
+# Hex encoding for keys/fingerprints
+hex = "0.4"
+
+# Timestamps
+chrono = { version = "0.4", features = ["serde"] }
+
+# Home directory detection
+dirs = "6"
+
+[profile.release]
+opt-level = "s"
+lto = true
+strip = true
