@@ -234,6 +234,18 @@ enum Commands {
         agent_id: String,
     },
 
+    /// Schedule a message for future delivery
+    Schedule {
+        /// Delay (e.g. 5m, 1h, 30s)
+        #[arg(long)]
+        delay: String,
+        /// Message text
+        message: Vec<String>,
+    },
+
+    /// List pending scheduled messages
+    Scheduled,
+
     /// Archive old messages to free space
     Compact {
         /// Keep messages from the last N hours (default: 24)
@@ -1136,6 +1148,57 @@ fn main() {
                     eprintln!("  Error: {e}");
                     process::exit(1);
                 }
+            }
+        }
+
+        Commands::Schedule { delay, message } => {
+            let text = message.join(" ");
+            if text.is_empty() {
+                eprintln!("Usage: agora schedule --delay 5m <message>");
+                process::exit(1);
+            }
+            let now_ts = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+            let delay_secs = if let Some(m) = delay.strip_suffix('m') {
+                m.parse::<u64>().unwrap_or(5) * 60
+            } else if let Some(h) = delay.strip_suffix('h') {
+                h.parse::<u64>().unwrap_or(1) * 3600
+            } else if let Some(s) = delay.strip_suffix('s') {
+                s.parse::<u64>().unwrap_or(60)
+            } else {
+                delay.parse::<u64>().unwrap_or(300)
+            };
+            let deliver_at = now_ts + delay_secs;
+            match chat::schedule_message(&text, deliver_at, room) {
+                Ok(id) => {
+                    let dt = chrono::DateTime::from_timestamp(deliver_at as i64, 0)
+                        .map(|d| d.format("%H:%M:%S").to_string())
+                        .unwrap_or_default();
+                    println!("  Scheduled [{id}] for delivery at {dt} (in {delay}).");
+                }
+                Err(e) => { eprintln!("  Error: {e}"); process::exit(1); }
+            }
+        }
+
+        Commands::Scheduled => {
+            match chat::list_scheduled(room) {
+                Ok(items) => {
+                    if items.is_empty() {
+                        println!("  (no scheduled messages)");
+                        return;
+                    }
+                    for item in &items {
+                        let id = item["id"].as_str().unwrap_or("?");
+                        let text = item["text"].as_str().unwrap_or("");
+                        let at = item["deliver_at"].as_u64().unwrap_or(0);
+                        let dt = chrono::DateTime::from_timestamp(at as i64, 0)
+                            .map(|d| d.format("%H:%M:%S").to_string())
+                            .unwrap_or_default();
+                        let short = &text[..40.min(text.len())];
+                        println!("  [{id}] at {dt}: {short}");
+                    }
+                }
+                Err(e) => { eprintln!("  Error: {e}"); process::exit(1); }
             }
         }
 

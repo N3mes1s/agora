@@ -484,6 +484,24 @@ pub fn take_notify_flag(room_id: &str) -> bool {
     exists
 }
 
+// ── Scheduled Messages ─────────────────────────────────────────
+
+pub fn load_scheduled(room_id: &str) -> Vec<serde_json::Value> {
+    let path = agora_dir().join("rooms").join(room_id).join("scheduled.json");
+    if let Ok(data) = fs::read_to_string(&path) {
+        serde_json::from_str(&data).unwrap_or_default()
+    } else {
+        Vec::new()
+    }
+}
+
+pub fn save_scheduled(room_id: &str, queue: &[serde_json::Value]) {
+    let dir = agora_dir().join("rooms").join(room_id);
+    ensure_dir(&dir);
+    let data = serde_json::to_string_pretty(queue).unwrap();
+    let _ = fs::write(dir.join("scheduled.json"), data);
+}
+
 pub fn archive_path(room_id: &str) -> PathBuf {
     let dir = agora_dir().join("rooms").join(room_id);
     ensure_dir(&dir);

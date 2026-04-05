@@ -372,6 +372,9 @@ pub fn check(since: &str, room_label: Option<&str>) -> Result<Vec<serde_json::Va
         transport::publish(&room.room_id, &encrypted);
     }
 
+    // Deliver any due scheduled messages
+    let _ = deliver_scheduled(room_label);
+
     Ok(new_msgs)
 }
 
@@ -477,6 +480,57 @@ pub fn set_profile(name: Option<&str>, role: Option<&str>, room_label: Option<&s
 pub fn whois(agent_id: &str, room_label: Option<&str>) -> Result<Option<store::AgentProfile>, String> {
     let room = resolve_room(room_label)?;
     Ok(store::get_profile(&room.room_id, agent_id))
+}
+
+/// Schedule a message for future delivery.
+/// Stores in a queue file; `check` or `send-scheduled` delivers when time is up.
+pub fn schedule_message(text: &str, deliver_at: u64, room_label: Option<&str>) -> Result<String, String> {
+    let room = resolve_room(room_label)?;
+    let id = msg_id();
+    let entry = json!({
+        "id": id,
+        "text": text,
+        "deliver_at": deliver_at,
+        "room_id": room.room_id,
+        "room_label": room.label,
+        "created_at": now(),
+    });
+
+    let mut queue = store::load_scheduled(&room.room_id);
+    queue.push(entry);
+    store::save_scheduled(&room.room_id, &queue);
+    Ok(id)
+}
+
+/// Deliver any scheduled messages whose time has come.
+pub fn deliver_scheduled(room_label: Option<&str>) -> Result<Vec<String>, String> {
+    let room = resolve_room(room_label)?;
+    let mut queue = store::load_scheduled(&room.room_id);
+    let current = now();
+
+    let mut delivered = Vec::new();
+    let mut remaining = Vec::new();
+
+    for entry in queue.drain(..) {
+        let deliver_at = entry["deliver_at"].as_u64().unwrap_or(u64::MAX);
+        if deliver_at <= current {
+            let text = entry["text"].as_str().unwrap_or("").to_string();
+            if let Ok(mid) = send(&format!("[scheduled] {text}"), None, Some(&room.label)) {
+                delivered.push(mid);
+            }
+        } else {
+            remaining.push(entry);
+        }
+    }
+
+    store::save_scheduled(&room.room_id, &remaining);
+    Ok(delivered)
+}
+
+/// List pending scheduled messages.
+pub fn list_scheduled(room_label: Option<&str>) -> Result<Vec<serde_json::Value>, String> {
+    let room = resolve_room(room_label)?;
+    Ok(store::load_scheduled(&room.room_id))
 }
 
 /// Compact old messages: move to archive, keep recent.
