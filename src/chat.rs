@@ -367,6 +367,10 @@ pub fn kick(agent_id: &str, room_label: Option<&str>) -> Result<(), String> {
     Ok(())
 }
 
+fn send_watch_heartbeat(room_id: &str) -> Result<(), String> {
+    heartbeat(Some(room_id))
+}
+
 /// Watch a room in real-time. Calls `on_message` for each new message.
 /// Sends a heartbeat every `heartbeat_secs` seconds.
 /// Blocks forever.
@@ -381,7 +385,7 @@ where
     // Track last heartbeat time
     let mut last_heartbeat = now();
     // Send initial heartbeat
-    let _ = heartbeat(None);
+    let _ = send_watch_heartbeat(&room_id);
 
     transport::stream(&room_id, |_ts, payload| {
         if let Some(env) = decrypt_payload(payload, &room_key, &room_id) {
@@ -394,12 +398,65 @@ where
         // Periodic heartbeat
         let elapsed = now() - last_heartbeat;
         if elapsed >= heartbeat_secs {
-            let _ = heartbeat(None);
+            let _ = send_watch_heartbeat(&room_id);
             last_heartbeat = now();
         }
     });
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::send_watch_heartbeat;
+    use crate::store::{self, Role};
+    use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temp_home() -> PathBuf {
+        let ts = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("agora-watch-heartbeat-{ts}"))
+    }
+
+    fn member_last_seen(room_label: &str) -> u64 {
+        let me = store::get_agent_id();
+        let room = store::find_room(room_label).expect("room exists");
+        room.members
+            .into_iter()
+            .find(|m| m.agent_id == me)
+            .map(|m| m.last_seen)
+            .unwrap_or(0)
+    }
+
+    #[test]
+    fn watch_heartbeat_targets_watched_room_not_active_room() {
+        let home = temp_home();
+        std::fs::create_dir_all(&home).unwrap();
+        unsafe {
+            std::env::set_var("HOME", &home);
+            std::env::set_var("AGORA_AGENT_ID", "watch-test");
+        }
+
+        let alpha = store::add_room("ag-alpha", "secret-alpha", "alpha", Role::Admin);
+        let beta = store::add_room("ag-beta", "secret-beta", "beta", Role::Admin);
+        store::set_active_room("alpha");
+
+        let mut rooms = store::load_registry();
+        for room in &mut rooms {
+            for member in &mut room.members {
+                member.last_seen = 0;
+            }
+        }
+        store::save_registry(&rooms);
+
+        send_watch_heartbeat(&beta.room_id).unwrap();
+
+        assert_eq!(member_last_seen(&alpha.label), 0);
+        assert!(member_last_seen(&beta.label) > 0);
+    }
 }
 
 /// Search messages by text, optionally filtered by sender.
