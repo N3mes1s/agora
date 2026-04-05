@@ -148,22 +148,6 @@ pub fn update_room(room: &RoomEntry) {
     save_registry(&rooms);
 }
 
-pub fn add_member_to_room(room_id: &str, agent_id: &str, role: Role) {
-    let mut rooms = load_registry();
-    if let Some(room) = rooms.iter_mut().find(|r| r.room_id == room_id) {
-        if !room.members.iter().any(|m| m.agent_id == agent_id) {
-            room.members.push(RoomMember {
-                agent_id: agent_id.to_string(),
-                role,
-                joined_at: now(),
-                nickname: None,
-                last_seen: now(),
-            });
-        }
-    }
-    save_registry(&rooms);
-}
-
 pub fn remove_member_from_room(room_id: &str, agent_id: &str) {
     let mut rooms = load_registry();
     if let Some(room) = rooms.iter_mut().find(|r| r.room_id == room_id) {
