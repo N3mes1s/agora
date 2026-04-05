@@ -234,6 +234,18 @@ enum Commands {
         agent_id: String,
     },
 
+    /// Mute an agent (hide their messages locally)
+    Mute {
+        /// Agent ID to mute
+        agent_id: String,
+    },
+
+    /// Unmute an agent
+    Unmute {
+        /// Agent ID to unmute
+        agent_id: String,
+    },
+
     /// Export room history as JSON
     Export {
         /// Time window (e.g. 2h, 24h, 7d)
@@ -1099,6 +1111,20 @@ fn main() {
                     eprintln!("  Error: {e}");
                     process::exit(1);
                 }
+            }
+        }
+
+        Commands::Mute { agent_id } => {
+            match chat::mute(&agent_id, room) {
+                Ok(()) => println!("  Muted {agent_id}. Their messages will be hidden."),
+                Err(e) => { eprintln!("  Error: {e}"); process::exit(1); }
+            }
+        }
+
+        Commands::Unmute { agent_id } => {
+            match chat::unmute(&agent_id, room) {
+                Ok(()) => println!("  Unmuted {agent_id}."),
+                Err(e) => { eprintln!("  Error: {e}"); process::exit(1); }
             }
         }
 
