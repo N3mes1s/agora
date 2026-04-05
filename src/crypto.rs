@@ -4,7 +4,7 @@
 //! - AES-256-GCM authenticated encryption (confidentiality + integrity)
 //! - HKDF-SHA256 key derivation from shared secrets
 //! - Per-message random 96-bit nonces
-//! - Forward secrecy via hash ratchet
+//! - Room-specific symmetric keys derived from the shared secret
 //! - Zero-knowledge room membership proof (HMAC challenge-response)
 
 use ring::aead::{self, Aad, LessSafeKey, Nonce, UnboundKey, NONCE_LEN};
@@ -68,7 +68,8 @@ fn hkdf_derive(ikm: &[u8], info_label: &[u8]) -> [u8; 32] {
     out
 }
 
-/// Advance key one step forward using hash ratchet for forward secrecy.
+/// Test-only hash-ratchet primitive for experimental key evolution.
+#[cfg(test)]
 pub fn ratchet_key(current: &[u8; 32]) -> [u8; 32] {
     hkdf_derive(current, b"agora-ratchet-v1")
 }

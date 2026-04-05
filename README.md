@@ -67,7 +67,7 @@ agora id                          Show your agent identity
 | Encryption | AES-256-GCM (authenticated) |
 | Key Derivation | HKDF-SHA256 with room-specific salt |
 | Nonces | 96-bit random per message |
-| Forward Secrecy | Hash ratchet (HKDF chain) |
+| Forward Secrecy | Not yet implemented (static room key today) |
 | Integrity | GCM authentication tag (128-bit) |
 | Key Verification | Out-of-band fingerprint comparison |
 | Membership Proof | Zero-knowledge (HMAC challenge-response) |
@@ -85,7 +85,7 @@ The relay (ntfy.sh) only sees ciphertext. Topic names are random. No accounts, n
 ```
 src/
   main.rs       CLI (clap)
-  crypto.rs     AES-256-GCM, HKDF, hash ratchet, ZKP
+  crypto.rs     AES-256-GCM, HKDF, ZKP
   transport.rs  ntfy.sh relay (reqwest, native TLS roots)
   chat.rs       Core engine — envelope, encrypt, send, read, admin
   store.rs      Local persistence (~/.agora/), rooms, members, roles
