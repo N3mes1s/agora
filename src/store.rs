@@ -332,6 +332,46 @@ pub fn remove_pin(room_id: &str, message_id: &str) -> bool {
     true
 }
 
+// ── Agent Profiles ─────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct AgentProfile {
+    pub agent_id: String,
+    pub name: Option<String>,
+    pub role: Option<String>,
+    pub updated_at: u64,
+}
+
+pub fn load_profiles(room_id: &str) -> Vec<AgentProfile> {
+    let path = agora_dir().join("rooms").join(room_id).join("profiles.json");
+    if let Ok(data) = fs::read_to_string(&path) {
+        serde_json::from_str(&data).unwrap_or_default()
+    } else {
+        Vec::new()
+    }
+}
+
+pub fn save_profiles(room_id: &str, profiles: &[AgentProfile]) {
+    let dir = agora_dir().join("rooms").join(room_id);
+    ensure_dir(&dir);
+    let data = serde_json::to_string_pretty(profiles).unwrap();
+    let _ = fs::write(dir.join("profiles.json"), data);
+}
+
+pub fn upsert_profile(room_id: &str, profile: &AgentProfile) {
+    let mut profiles = load_profiles(room_id);
+    if let Some(p) = profiles.iter_mut().find(|p| p.agent_id == profile.agent_id) {
+        *p = profile.clone();
+    } else {
+        profiles.push(profile.clone());
+    }
+    save_profiles(room_id, &profiles);
+}
+
+pub fn get_profile(room_id: &str, agent_id: &str) -> Option<AgentProfile> {
+    load_profiles(room_id).into_iter().find(|p| p.agent_id == agent_id)
+}
+
 // ── Read Receipts ──────────────────────────────────────────────
 // receipts.json: { "msg_id": ["agent1", "agent2"], ... }
 

@@ -330,6 +330,20 @@ pub fn check(since: &str, room_label: Option<&str>) -> Result<Vec<serde_json::Va
                 continue;
             }
 
+            // Process incoming profiles
+            if env["type"].as_str() == Some("profile") {
+                let profile = store::AgentProfile {
+                    agent_id: from.to_string(),
+                    name: env["profile_name"].as_str().map(|s| s.to_string()),
+                    role: env["profile_role"].as_str().map(|s| s.to_string()),
+                    updated_at: env["ts"].as_u64().unwrap_or(0),
+                };
+                store::upsert_profile(&room.room_id, &profile);
+                store::save_message(&room.room_id, &env);
+                new_msgs.push(env);
+                continue;
+            }
+
             // Process incoming reactions
             if is_reaction(&env) {
                 if let (Some(target), Some(emoji)) = (env["target_id"].as_str(), env["emoji"].as_str()) {
@@ -397,6 +411,45 @@ pub fn react(target_id: &str, emoji: &str, room_label: Option<&str>) -> Result<(
 pub fn reactions(room_label: Option<&str>) -> Result<std::collections::HashMap<String, Vec<(String, String)>>, String> {
     let room = resolve_room(room_label)?;
     Ok(store::load_reactions(&room.room_id))
+}
+
+/// Set your agent profile and broadcast it to the room.
+pub fn set_profile(name: Option<&str>, role: Option<&str>, room_label: Option<&str>) -> Result<(), String> {
+    let room = resolve_room(room_label)?;
+    let room_key = crypto::derive_room_key(&room.secret, &room.room_id);
+    let agent_id = store::get_agent_id();
+
+    let profile = store::AgentProfile {
+        agent_id: agent_id.clone(),
+        name: name.map(|s| s.to_string()),
+        role: role.map(|s| s.to_string()),
+        updated_at: now(),
+    };
+    store::upsert_profile(&room.room_id, &profile);
+
+    // Broadcast profile as a special envelope
+    let env = json!({
+        "v": VERSION,
+        "id": msg_id(),
+        "from": agent_id,
+        "ts": now(),
+        "type": "profile",
+        "profile_name": profile.name,
+        "profile_role": profile.role,
+        "text": format!("Profile updated: {} ({})",
+            profile.name.as_deref().unwrap_or(&agent_id),
+            profile.role.as_deref().unwrap_or("agent")),
+    });
+    let encrypted = encrypt_envelope(&env, &room_key, &room.room_id);
+    transport::publish(&room.room_id, &encrypted);
+    store::save_message(&room.room_id, &env);
+    Ok(())
+}
+
+/// Look up an agent's profile.
+pub fn whois(agent_id: &str, room_label: Option<&str>) -> Result<Option<store::AgentProfile>, String> {
+    let room = resolve_room(room_label)?;
+    Ok(store::get_profile(&room.room_id, agent_id))
 }
 
 /// Export room history as JSON.

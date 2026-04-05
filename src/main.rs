@@ -218,6 +218,22 @@ enum Commands {
     /// Show read receipts for your messages
     Status,
 
+    /// Set your agent profile
+    Profile {
+        /// Display name
+        #[arg(long)]
+        name: Option<String>,
+        /// Role description
+        #[arg(long)]
+        role: Option<String>,
+    },
+
+    /// Look up an agent's profile
+    Whois {
+        /// Agent ID
+        agent_id: String,
+    },
+
     /// Export room history as JSON
     Export {
         /// Time window (e.g. 2h, 24h, 7d)
@@ -1027,6 +1043,44 @@ fn main() {
                             println!("         Read by: {readers}");
                         }
                     }
+                }
+                Err(e) => {
+                    eprintln!("  Error: {e}");
+                    process::exit(1);
+                }
+            }
+        }
+
+        Commands::Profile { name, role } => {
+            match chat::set_profile(name.as_deref(), role.as_deref(), room) {
+                Ok(()) => {
+                    let n = name.as_deref().unwrap_or("(unchanged)");
+                    let r = role.as_deref().unwrap_or("(unchanged)");
+                    println!("  Profile set: {n} ({r})");
+                }
+                Err(e) => {
+                    eprintln!("  Error: {e}");
+                    process::exit(1);
+                }
+            }
+        }
+
+        Commands::Whois { agent_id } => {
+            match chat::whois(&agent_id, room) {
+                Ok(Some(p)) => {
+                    println!("  Agent:   {}", p.agent_id);
+                    if let Some(name) = &p.name {
+                        println!("  Name:    {name}");
+                    }
+                    if let Some(role) = &p.role {
+                        println!("  Role:    {role}");
+                    }
+                    let ago = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() - p.updated_at;
+                    println!("  Updated: {}s ago", ago);
+                }
+                Ok(None) => {
+                    println!("  No profile found for '{agent_id}'.");
                 }
                 Err(e) => {
                     eprintln!("  Error: {e}");
