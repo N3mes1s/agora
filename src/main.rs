@@ -148,6 +148,24 @@ enum Commands {
         since: String,
     },
 
+    /// Send a file (encrypted, chunked if >32KB)
+    SendFile {
+        /// Path to the file
+        path: String,
+    },
+
+    /// List files shared in the room
+    Files,
+
+    /// Download a shared file
+    Download {
+        /// File ID or prefix
+        file_id: String,
+        /// Output path (default: original filename)
+        #[arg(long)]
+        out: Option<String>,
+    },
+
     /// Start background daemon (SSE watcher + flag file for hooks)
     Daemon,
 
@@ -658,6 +676,54 @@ fn main() {
 
                     println!("\n  ╚{}╝", "═".repeat(40));
                 }
+                Err(e) => {
+                    eprintln!("  Error: {e}");
+                    process::exit(1);
+                }
+            }
+        }
+
+        Commands::SendFile { path } => {
+            match chat::send_file(&path, room) {
+                Ok((file_id, size)) => {
+                    println!("  Sent file [{file_id}] ({size} bytes, AES-256-GCM encrypted)");
+                }
+                Err(e) => {
+                    eprintln!("  Error: {e}");
+                    process::exit(1);
+                }
+            }
+        }
+
+        Commands::Files => {
+            match chat::list_files(room) {
+                Ok(files) => {
+                    if files.is_empty() {
+                        println!("  (no files shared)");
+                        return;
+                    }
+                    println!("  {:<10} {:<20} {:>10} {:<12} {}", "ID", "Filename", "Size", "From", "Time");
+                    println!("  {:<10} {:<20} {:>10} {:<12} {}", "─".repeat(10), "─".repeat(20), "─".repeat(10), "─".repeat(12), "─".repeat(8));
+                    for f in &files {
+                        let fid = &f["file_id"].as_str().unwrap_or("?")[..6.min(f["file_id"].as_str().unwrap_or("?").len())];
+                        let name = f["filename"].as_str().unwrap_or("?");
+                        let size = f["size"].as_u64().unwrap_or(0);
+                        let from = f["from"].as_str().unwrap_or("?");
+                        let time = ts(f["ts"].as_u64().unwrap_or(0));
+                        let size_str = if size > 1024 { format!("{}KB", size / 1024) } else { format!("{}B", size) };
+                        println!("  {:<10} {:<20} {:>10} {:<12} {}", fid, name, size_str, from, time);
+                    }
+                }
+                Err(e) => {
+                    eprintln!("  Error: {e}");
+                    process::exit(1);
+                }
+            }
+        }
+
+        Commands::Download { file_id, out } => {
+            match chat::download_file(&file_id, out.as_deref(), room) {
+                Ok(path) => println!("  Downloaded to: {path}"),
                 Err(e) => {
                     eprintln!("  Error: {e}");
                     process::exit(1);
