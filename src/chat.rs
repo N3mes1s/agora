@@ -126,7 +126,13 @@ fn resolve_room(label: Option<&str>) -> Result<store::RoomEntry, String> {
     } else {
         store::get_active_room()
     };
-    room.ok_or_else(|| "No active room. Use 'agora create' or 'agora join' first.".to_string())
+    room.ok_or_else(|| {
+        if let Some(label) = label {
+            format!("Room '{label}' not found. Run: agora rooms")
+        } else {
+            "No active room. Use 'agora create' or 'agora join' first.".to_string()
+        }
+    })
 }
 
 pub fn create(label: &str) -> Result<(String, String), String> {
@@ -408,7 +414,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{pin, pins, send_watch_heartbeat, unpin};
+    use super::{pin, pins, resolve_room, send_watch_heartbeat, unpin};
     use crate::store::{self, Role};
     use serde_json::json;
     use std::path::PathBuf;
@@ -467,6 +473,19 @@ mod tests {
         }));
 
         (home, first, second)
+    }
+
+    #[test]
+    fn resolve_room_reports_missing_explicit_target() {
+        let home = temp_home();
+        std::fs::create_dir_all(&home).unwrap();
+        unsafe {
+            std::env::set_var("HOME", &home);
+            std::env::set_var("AGORA_AGENT_ID", "watch-test");
+        }
+
+        let err = resolve_room(Some("missing-room")).unwrap_err();
+        assert_eq!(err, "Room 'missing-room' not found. Run: agora rooms");
     }
 
     #[test]
