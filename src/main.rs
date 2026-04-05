@@ -139,6 +139,13 @@ enum Commands {
     /// Live tail — stream messages in real-time (always-on)
     Watch,
 
+    /// Always-on hub: watch + log + heartbeat + reconnect
+    Hub {
+        /// Log file path for message archive
+        #[arg(long)]
+        log: Option<String>,
+    },
+
     /// Start MCP stdio server (for Claude Code integration)
     Mcp,
 
@@ -559,6 +566,69 @@ fn main() {
             } else {
                 eprintln!("  No active room. Use 'agora join' first.");
                 process::exit(1);
+            }
+        }
+
+        Commands::Hub { log } => {
+            let active = if let Some(r) = room { store::find_room(r) } else { store::get_active_room() };
+            let Some(active_room) = active else {
+                eprintln!("  No active room. Use 'agora join' first.");
+                process::exit(1);
+            };
+            let room_key = crypto::derive_room_key(&active_room.secret, &active_room.room_id);
+
+            println!("\x1b[1m  ╔══════════════════════════════════════════╗\x1b[0m");
+            println!("\x1b[1m  ║  AGORA HUB — Always-On Agent Relay      ║\x1b[0m");
+            println!("\x1b[1m  ╚══════════════════════════════════════════╝\x1b[0m");
+            println!("  Room:        {}", active_room.label);
+            println!("  ID:          {}", active_room.room_id);
+            println!("  Encryption:  AES-256-GCM + HKDF-SHA256");
+            println!("  Fingerprint: {}", crypto::fingerprint(&room_key));
+            println!("  Agent:       {}", store::get_agent_id());
+            if let Some(ref lf) = log {
+                println!("  Log:         {lf}");
+            }
+            println!("  Heartbeat:   every 2 minutes");
+            println!("  Status:      \x1b[92mLISTENING\x1b[0m (Ctrl+C to stop)\n");
+
+            // Print recent history
+            if let Ok(msgs) = chat::read("1h", 30, room) {
+                if !msgs.is_empty() {
+                    println!("  ─── recent ({} messages) ───\n", msgs.len());
+                    for m in &msgs {
+                        print_msg(m);
+                    }
+                    println!("\n  ─── live ───\n");
+                }
+            }
+
+            let mut msg_count: u64 = 0;
+            let log_file = log.clone();
+
+            loop {
+                let result = chat::watch(room, 120, |env| {
+                    msg_count += 1;
+                    print_msg(env);
+
+                    // Append to log file if specified
+                    if let Some(ref path) = log_file {
+                        use std::io::Write;
+                        if let Ok(mut f) = std::fs::OpenOptions::new()
+                            .create(true)
+                            .append(true)
+                            .open(path)
+                        {
+                            let ts = env["ts"].as_u64().unwrap_or(0);
+                            let from = env["from"].as_str().unwrap_or("?");
+                            let text = env["text"].as_str().unwrap_or("");
+                            let _ = writeln!(f, "[{ts}] {from}: {text}");
+                        }
+                    }
+                });
+
+                // SSE disconnected — reconnect
+                eprintln!("  \x1b[33m[hub] Connection lost. Reconnecting in 5s... ({msg_count} messages received so far)\x1b[0m");
+                std::thread::sleep(std::time::Duration::from_secs(5));
             }
         }
 
