@@ -73,6 +73,26 @@ fn is_heartbeat(env: &serde_json::Value) -> bool {
     env["type"].as_str() == Some("heartbeat")
 }
 
+fn make_receipt(msg_ids: &[String]) -> serde_json::Value {
+    json!({
+        "v": VERSION,
+        "id": msg_id(),
+        "from": store::get_agent_id(),
+        "ts": now(),
+        "type": "receipt",
+        "read_ids": msg_ids,
+        "text": "",
+    })
+}
+
+fn is_receipt(env: &serde_json::Value) -> bool {
+    env["type"].as_str() == Some("receipt")
+}
+
+fn is_system_msg(env: &serde_json::Value) -> bool {
+    is_heartbeat(env) || is_receipt(env) || is_file_msg(env)
+}
+
 /// Update last_seen for the sender of a message.
 fn track_presence(room_id: &str, env: &serde_json::Value) {
     if let Some(from) = env["from"].as_str() {
@@ -266,9 +286,9 @@ pub fn check(since: &str, room_label: Option<&str>) -> Result<Vec<serde_json::Va
 
     let remote_events = transport::fetch(&room.room_id, since);
     let mut new_msgs = Vec::new();
+    let mut read_ids = Vec::new();
     for (_, payload) in &remote_events {
         if let Some(env) = decrypt_payload(payload, &room_key, &room.room_id) {
-            // Track presence from all messages
             track_presence(&room.room_id, &env);
             let mid = env["id"].as_str().unwrap_or("?").to_string();
             let from = env["from"].as_str().unwrap_or("");
@@ -276,15 +296,62 @@ pub fn check(since: &str, room_label: Option<&str>) -> Result<Vec<serde_json::Va
                 continue;
             }
             store::mark_seen(&room.room_id, &mid);
-            // Skip heartbeats from display
+
+            // Process incoming receipts
+            if is_receipt(&env) {
+                if let Some(ids) = env["read_ids"].as_array() {
+                    let reader = from.to_string();
+                    let msg_ids: Vec<String> = ids.iter()
+                        .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                        .collect();
+                    store::record_receipts(&room.room_id, &msg_ids, &reader);
+                }
+                continue;
+            }
+
             if is_heartbeat(&env) {
                 continue;
             }
             store::save_message(&room.room_id, &env);
+            read_ids.push(mid);
             new_msgs.push(env);
         }
     }
+
+    // Send read receipts for messages we just read
+    if !read_ids.is_empty() {
+        let receipt = make_receipt(&read_ids);
+        let encrypted = encrypt_envelope(&receipt, &room_key, &room.room_id);
+        transport::publish(&room.room_id, &encrypted);
+    }
+
     Ok(new_msgs)
+}
+
+/// Get read receipt status for recent messages.
+pub fn read_status(room_label: Option<&str>) -> Result<Vec<serde_json::Value>, String> {
+    let room = resolve_room(room_label)?;
+    let msgs = store::load_messages(&room.room_id, 7200); // last 2h
+    let receipts = store::load_receipts(&room.room_id);
+    let me = store::get_agent_id();
+
+    let mut status = Vec::new();
+    for msg in &msgs {
+        let mid = msg["id"].as_str().unwrap_or("?").to_string();
+        let from = msg["from"].as_str().unwrap_or("?");
+        // Only show status for our own messages
+        if from != me {
+            continue;
+        }
+        let readers = receipts.get(&mid).cloned().unwrap_or_default();
+        status.push(json!({
+            "id": mid,
+            "text": msg["text"].as_str().unwrap_or("")[..50.min(msg["text"].as_str().unwrap_or("").len())],
+            "ts": msg["ts"],
+            "read_by": readers,
+        }));
+    }
+    Ok(status)
 }
 
 pub fn info(room_label: Option<&str>) -> Result<serde_json::Value, String> {

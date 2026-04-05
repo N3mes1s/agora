@@ -332,6 +332,36 @@ pub fn remove_pin(room_id: &str, message_id: &str) -> bool {
     true
 }
 
+// ── Read Receipts ──────────────────────────────────────────────
+// receipts.json: { "msg_id": ["agent1", "agent2"], ... }
+
+pub fn load_receipts(room_id: &str) -> std::collections::HashMap<String, Vec<String>> {
+    let path = agora_dir().join("rooms").join(room_id).join("receipts.json");
+    if let Ok(data) = fs::read_to_string(&path) {
+        serde_json::from_str(&data).unwrap_or_default()
+    } else {
+        std::collections::HashMap::new()
+    }
+}
+
+pub fn save_receipts(room_id: &str, receipts: &std::collections::HashMap<String, Vec<String>>) {
+    let dir = agora_dir().join("rooms").join(room_id);
+    ensure_dir(&dir);
+    let data = serde_json::to_string(receipts).unwrap();
+    let _ = fs::write(dir.join("receipts.json"), data);
+}
+
+pub fn record_receipts(room_id: &str, msg_ids: &[String], reader: &str) {
+    let mut receipts = load_receipts(room_id);
+    for mid in msg_ids {
+        let readers = receipts.entry(mid.clone()).or_default();
+        if !readers.contains(&reader.to_string()) {
+            readers.push(reader.to_string());
+        }
+    }
+    save_receipts(room_id, &receipts);
+}
+
 pub fn daemon_pid_path(room_id: &str) -> PathBuf {
     let dir = agora_dir().join("rooms").join(room_id);
     ensure_dir(&dir);
