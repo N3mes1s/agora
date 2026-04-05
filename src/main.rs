@@ -141,6 +141,13 @@ enum Commands {
         message_id: String,
     },
 
+    /// Compact activity summary (catch up without reading everything)
+    Recap {
+        /// Time window (e.g. 1h, 30m, 24h)
+        #[arg(default_value = "2h")]
+        since: String,
+    },
+
     /// Start background daemon (SSE watcher + flag file for hooks)
     Daemon,
 
@@ -600,6 +607,56 @@ fn main() {
                     for item in &items {
                         print_msg_with_depth(&item.env, item.depth);
                     }
+                }
+                Err(e) => {
+                    eprintln!("  Error: {e}");
+                    process::exit(1);
+                }
+            }
+        }
+
+        Commands::Recap { since } => {
+            match chat::recap(&since, room) {
+                Ok(info) => {
+                    let room_name = info["room"].as_str().unwrap_or("?");
+                    let total = info["total_messages"].as_u64().unwrap_or(0);
+                    println!("  ╔═══ Recap: {} ({} messages, last {}) ═══╗\n", room_name, total, since);
+
+                    if total == 0 {
+                        println!("  No activity.");
+                        return;
+                    }
+
+                    // Time range
+                    if let Some(range) = info["time_range"].as_object() {
+                        let first = range["first"].as_u64().unwrap_or(0);
+                        let last = range["last"].as_u64().unwrap_or(0);
+                        println!("  Time: {} → {}", ts(first), ts(last));
+                    }
+
+                    // Agents
+                    println!("\n  Agents:");
+                    if let Some(agents) = info["agents"].as_array() {
+                        for a in agents {
+                            let id = a["id"].as_str().unwrap_or("?");
+                            let count = a["messages"].as_u64().unwrap_or(0);
+                            let bar = "█".repeat((count as usize).min(20));
+                            println!("    {:<12} {:>3} msgs {}", id, count, bar);
+                        }
+                    }
+
+                    // Keywords
+                    if let Some(kws) = info["top_keywords"].as_array() {
+                        if !kws.is_empty() {
+                            println!("\n  Topics:");
+                            let words: Vec<_> = kws.iter()
+                                .filter_map(|k| k["word"].as_str())
+                                .collect();
+                            println!("    {}", words.join(", "));
+                        }
+                    }
+
+                    println!("\n  ╚{}╝", "═".repeat(40));
                 }
                 Err(e) => {
                     eprintln!("  Error: {e}");
