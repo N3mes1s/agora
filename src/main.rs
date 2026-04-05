@@ -6,6 +6,7 @@
 mod chat;
 mod crypto;
 mod mcp;
+mod serve;
 mod store;
 mod transport;
 
@@ -213,6 +214,13 @@ enum Commands {
 
     /// Start MCP stdio server (for Claude Code integration)
     Mcp,
+
+    /// Start local web UI for viewing room history
+    Serve {
+        /// HTTP port (default: 8080)
+        #[arg(long, default_value = "8080")]
+        port: u16,
+    },
 
     /// Show agent identity
     Id,
@@ -976,6 +984,10 @@ fn main() {
 
         Commands::Mcp => {
             mcp::run();
+        }
+
+        Commands::Serve { port } => {
+            serve::start(port);
         }
 
         Commands::Id => {
