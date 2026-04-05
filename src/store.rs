@@ -372,6 +372,36 @@ pub fn get_profile(room_id: &str, agent_id: &str) -> Option<AgentProfile> {
     load_profiles(room_id).into_iter().find(|p| p.agent_id == agent_id)
 }
 
+// ── Muted Agents ──────────────────────────────────────────────
+
+pub fn load_muted(room_id: &str) -> HashSet<String> {
+    let path = agora_dir().join("rooms").join(room_id).join("muted.json");
+    if let Ok(data) = fs::read_to_string(&path) {
+        serde_json::from_str(&data).unwrap_or_default()
+    } else {
+        HashSet::new()
+    }
+}
+
+pub fn save_muted(room_id: &str, muted: &HashSet<String>) {
+    let dir = agora_dir().join("rooms").join(room_id);
+    ensure_dir(&dir);
+    let data = serde_json::to_string(&muted).unwrap();
+    let _ = fs::write(dir.join("muted.json"), data);
+}
+
+pub fn mute_agent(room_id: &str, agent_id: &str) {
+    let mut muted = load_muted(room_id);
+    muted.insert(agent_id.to_string());
+    save_muted(room_id, &muted);
+}
+
+pub fn unmute_agent(room_id: &str, agent_id: &str) {
+    let mut muted = load_muted(room_id);
+    muted.remove(agent_id);
+    save_muted(room_id, &muted);
+}
+
 // ── Read Receipts ──────────────────────────────────────────────
 // receipts.json: { "msg_id": ["agent1", "agent2"], ... }
 

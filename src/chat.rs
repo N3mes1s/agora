@@ -288,6 +288,13 @@ pub fn read(since: &str, limit: usize, room_label: Option<&str>) -> Result<Vec<s
         }
     }
 
+    // Filter muted agents
+    let muted = store::load_muted(&room.room_id);
+    merged.retain(|m| {
+        let from = m["from"].as_str().unwrap_or("");
+        !muted.contains(from)
+    });
+
     merged.sort_by_key(|m| m["ts"].as_u64().unwrap_or(0));
     if merged.len() > limit {
         merged = merged[merged.len() - limit..].to_vec();
@@ -411,6 +418,26 @@ pub fn react(target_id: &str, emoji: &str, room_label: Option<&str>) -> Result<(
 pub fn reactions(room_label: Option<&str>) -> Result<std::collections::HashMap<String, Vec<(String, String)>>, String> {
     let room = resolve_room(room_label)?;
     Ok(store::load_reactions(&room.room_id))
+}
+
+/// Mute an agent locally (their messages won't show in read/check).
+pub fn mute(agent_id: &str, room_label: Option<&str>) -> Result<(), String> {
+    let room = resolve_room(room_label)?;
+    store::mute_agent(&room.room_id, agent_id);
+    Ok(())
+}
+
+/// Unmute an agent.
+pub fn unmute(agent_id: &str, room_label: Option<&str>) -> Result<(), String> {
+    let room = resolve_room(room_label)?;
+    store::unmute_agent(&room.room_id, agent_id);
+    Ok(())
+}
+
+/// List muted agents.
+pub fn muted(room_label: Option<&str>) -> Result<std::collections::HashSet<String>, String> {
+    let room = resolve_room(room_label)?;
+    Ok(store::load_muted(&room.room_id))
 }
 
 /// Set your agent profile and broadcast it to the room.
