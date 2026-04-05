@@ -485,6 +485,135 @@ fn is_stopword(w: &str) -> bool {
         | "push" | "pull" | "merge" | "merged")
 }
 
+// ── File Sharing ───────────────────────────────────────────────
+
+const MAX_INLINE_FILE_SIZE: usize = 32 * 1024; // 32KB
+
+fn make_file_envelope(filename: &str, file_id: &str, data: &str, size: u64, chunk_n: u64, total_chunks: u64) -> serde_json::Value {
+    json!({
+        "v": VERSION,
+        "id": msg_id(),
+        "from": store::get_agent_id(),
+        "ts": now(),
+        "type": "file",
+        "file_id": file_id,
+        "filename": filename,
+        "size": size,
+        "chunk_n": chunk_n,
+        "total_chunks": total_chunks,
+        "data": data,
+        "text": format!("[file: {} ({} bytes)]", filename, size),
+    })
+}
+
+fn is_file_msg(env: &serde_json::Value) -> bool {
+    env["type"].as_str() == Some("file")
+}
+
+/// Send a file to the room. Encrypts and chunks if needed.
+pub fn send_file(path: &str, room_label: Option<&str>) -> Result<(String, u64), String> {
+    let room = resolve_room(room_label)?;
+    let room_key = crypto::derive_room_key(&room.secret, &room.room_id);
+
+    let file_data = std::fs::read(path).map_err(|e| format!("Cannot read file: {e}"))?;
+    let filename = std::path::Path::new(path)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("unnamed")
+        .to_string();
+    let size = file_data.len() as u64;
+    let file_id = msg_id();
+
+    let chunks: Vec<&[u8]> = if file_data.len() <= MAX_INLINE_FILE_SIZE {
+        vec![&file_data]
+    } else {
+        file_data.chunks(MAX_INLINE_FILE_SIZE).collect()
+    };
+    let total_chunks = chunks.len() as u64;
+
+    for (i, chunk) in chunks.iter().enumerate() {
+        let b64_data = BASE64.encode(chunk);
+        let env = make_file_envelope(&filename, &file_id, &b64_data, size, i as u64, total_chunks);
+        let encrypted = encrypt_envelope(&env, &room_key, &room.room_id);
+        transport::publish(&room.room_id, &encrypted);
+        store::save_message(&room.room_id, &env);
+    }
+
+    Ok((file_id, size))
+}
+
+/// List files shared in the room.
+pub fn list_files(room_label: Option<&str>) -> Result<Vec<serde_json::Value>, String> {
+    let room = resolve_room(room_label)?;
+    let msgs = store::load_messages(&room.room_id, 604800); // 7 days
+    let mut files: Vec<serde_json::Value> = Vec::new();
+    let mut seen_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    for msg in &msgs {
+        if is_file_msg(msg) {
+            let fid = msg["file_id"].as_str().unwrap_or("?").to_string();
+            if msg["chunk_n"].as_u64().unwrap_or(0) == 0 && !seen_ids.contains(&fid) {
+                seen_ids.insert(fid);
+                files.push(json!({
+                    "file_id": msg["file_id"],
+                    "filename": msg["filename"],
+                    "size": msg["size"],
+                    "from": msg["from"],
+                    "ts": msg["ts"],
+                    "chunks": msg["total_chunks"],
+                }));
+            }
+        }
+    }
+    Ok(files)
+}
+
+/// Download a file from the room by file_id.
+pub fn download_file(file_id: &str, out_path: Option<&str>, room_label: Option<&str>) -> Result<String, String> {
+    let room = resolve_room(room_label)?;
+    let msgs = store::load_messages(&room.room_id, 604800);
+
+    // Collect all chunks for this file
+    let mut chunks: Vec<(u64, String)> = Vec::new();
+    let mut filename = String::from("unnamed");
+    let mut total_chunks: u64 = 1;
+
+    for msg in &msgs {
+        if is_file_msg(msg) {
+            let fid = msg["file_id"].as_str().unwrap_or("");
+            if fid == file_id || fid.starts_with(file_id) {
+                let chunk_n = msg["chunk_n"].as_u64().unwrap_or(0);
+                let data = msg["data"].as_str().unwrap_or("").to_string();
+                chunks.push((chunk_n, data));
+                if chunk_n == 0 {
+                    filename = msg["filename"].as_str().unwrap_or("unnamed").to_string();
+                    total_chunks = msg["total_chunks"].as_u64().unwrap_or(1);
+                }
+            }
+        }
+    }
+
+    if chunks.is_empty() {
+        return Err(format!("File '{file_id}' not found."));
+    }
+    if chunks.len() as u64 != total_chunks {
+        return Err(format!("Incomplete file: got {}/{} chunks.", chunks.len(), total_chunks));
+    }
+
+    // Sort by chunk number and reassemble
+    chunks.sort_by_key(|(n, _)| *n);
+    let mut file_data = Vec::new();
+    for (_, data) in &chunks {
+        let decoded = BASE64.decode(data).map_err(|e| format!("Decode error: {e}"))?;
+        file_data.extend_from_slice(&decoded);
+    }
+
+    // Write to file
+    let dest = out_path.unwrap_or(&filename);
+    std::fs::write(dest, &file_data).map_err(|e| format!("Write error: {e}"))?;
+    Ok(dest.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::{pin, pins, resolve_room, send_watch_heartbeat, unpin};
