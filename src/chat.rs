@@ -399,6 +399,51 @@ pub fn reactions(room_label: Option<&str>) -> Result<std::collections::HashMap<S
     Ok(store::load_reactions(&room.room_id))
 }
 
+/// Export room history as JSON.
+pub fn export(since: &str, out_path: Option<&str>, room_label: Option<&str>) -> Result<(String, usize), String> {
+    let room = resolve_room(room_label)?;
+    let since_secs = parse_since(since);
+    let msgs = store::load_messages(&room.room_id, since_secs);
+    let receipts = store::load_receipts(&room.room_id);
+    let reactions = store::load_reactions(&room.room_id);
+    let pins = store::load_pins(&room.room_id);
+
+    let export = json!({
+        "room": {
+            "id": room.room_id,
+            "label": room.label,
+            "topic": room.topic,
+            "members": room.members.iter().map(|m| json!({
+                "agent_id": m.agent_id,
+                "role": format!("{:?}", m.role),
+            })).collect::<Vec<_>>(),
+        },
+        "exported_at": now(),
+        "since": since,
+        "message_count": msgs.len(),
+        "messages": msgs,
+        "receipts": receipts,
+        "reactions": reactions,
+        "pins": pins,
+    });
+
+    let json_str = serde_json::to_string_pretty(&export).map_err(|e| format!("JSON error: {e}"))?;
+    let count = msgs.len();
+
+    let dest = out_path.unwrap_or_else(|| {
+        // Will be handled by caller with a default
+        ""
+    });
+    if dest.is_empty() {
+        let default = format!("agora-export-{}-{}.json", room.label, now());
+        std::fs::write(&default, &json_str).map_err(|e| format!("Write error: {e}"))?;
+        Ok((default, count))
+    } else {
+        std::fs::write(dest, &json_str).map_err(|e| format!("Write error: {e}"))?;
+        Ok((dest.to_string(), count))
+    }
+}
+
 pub fn info(room_label: Option<&str>) -> Result<serde_json::Value, String> {
     let room = resolve_room(room_label)?;
     let room_key = crypto::derive_room_key(&room.secret, &room.room_id);

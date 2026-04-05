@@ -218,6 +218,16 @@ enum Commands {
     /// Show read receipts for your messages
     Status,
 
+    /// Export room history as JSON
+    Export {
+        /// Time window (e.g. 2h, 24h, 7d)
+        #[arg(default_value = "24h")]
+        since: String,
+        /// Output file path
+        #[arg(long)]
+        out: Option<String>,
+    },
+
     /// React to a message with an emoji
     React {
         /// Message ID or prefix
@@ -1017,6 +1027,18 @@ fn main() {
                             println!("         Read by: {readers}");
                         }
                     }
+                }
+                Err(e) => {
+                    eprintln!("  Error: {e}");
+                    process::exit(1);
+                }
+            }
+        }
+
+        Commands::Export { since, out } => {
+            match chat::export(&since, out.as_deref(), room) {
+                Ok((path, count)) => {
+                    println!("  Exported {count} messages to: {path}");
                 }
                 Err(e) => {
                     eprintln!("  Error: {e}");
