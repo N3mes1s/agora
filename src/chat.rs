@@ -482,6 +482,26 @@ pub fn whois(agent_id: &str, room_label: Option<&str>) -> Result<Option<store::A
     Ok(store::get_profile(&room.room_id, agent_id))
 }
 
+/// Auto-generate a changelog from message history.
+/// Finds messages mentioning PRs, shipped features, and milestones.
+pub fn changelog(since: &str, room_label: Option<&str>) -> Result<Vec<serde_json::Value>, String> {
+    let room = resolve_room(room_label)?;
+    let since_secs = parse_since(since);
+    let msgs = store::load_messages(&room.room_id, since_secs);
+
+    let keywords = ["shipped", "merged", "built", "added", "fixed", "PR #", "pr #",
+        "feature", "released", "deployed", "launched", "done", "complete"];
+
+    let results: Vec<serde_json::Value> = msgs.into_iter()
+        .filter(|m| {
+            let text = m["text"].as_str().unwrap_or("").to_lowercase();
+            keywords.iter().any(|kw| text.contains(&kw.to_lowercase()))
+        })
+        .collect();
+
+    Ok(results)
+}
+
 /// Health check — validate local setup, connectivity, encryption.
 pub fn healthcheck(room_label: Option<&str>) -> Result<Vec<(String, bool, String)>, String> {
     let mut checks: Vec<(String, bool, String)> = Vec::new();

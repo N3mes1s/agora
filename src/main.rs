@@ -234,6 +234,13 @@ enum Commands {
         agent_id: String,
     },
 
+    /// Auto-generated changelog from chat history
+    Changelog {
+        /// Time window (e.g. 8h, 24h, 7d)
+        #[arg(default_value = "24h")]
+        since: String,
+    },
+
     /// Health check — validate setup, connectivity, encryption
     Test,
 
@@ -1146,6 +1153,29 @@ fn main() {
                 }
                 Ok(None) => {
                     println!("  No profile found for '{agent_id}'.");
+                }
+                Err(e) => {
+                    eprintln!("  Error: {e}");
+                    process::exit(1);
+                }
+            }
+        }
+
+        Commands::Changelog { since } => {
+            match chat::changelog(&since, room) {
+                Ok(entries) => {
+                    if entries.is_empty() {
+                        println!("  (no changelog entries in last {since})");
+                        return;
+                    }
+                    println!("  Changelog (last {since}, {} entries):\n", entries.len());
+                    for e in &entries {
+                        let time = ts(e["ts"].as_u64().unwrap_or(0));
+                        let from = e["from"].as_str().unwrap_or("?");
+                        let text = e["text"].as_str().unwrap_or("");
+                        let short = &text[..80.min(text.len())];
+                        println!("  {time} [{from}] {short}");
+                    }
                 }
                 Err(e) => {
                     eprintln!("  Error: {e}");
