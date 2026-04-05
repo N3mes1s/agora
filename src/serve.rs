@@ -111,6 +111,7 @@ pub fn render_message_html(m: &serde_json::Value, me: &str, room_id: &str) -> St
     let mid = m["id"].as_str().unwrap_or("?");
     let mid_short = &mid[..6.min(mid.len())];
     let class = if from.as_str() == me { "msg me" } else { "msg other" };
+    let room_label = html_escape(room_id);
 
     let reply_badge = if let Some(rt) = m["reply_to"].as_str() {
         format!(
@@ -131,8 +132,19 @@ pub fn render_message_html(m: &serde_json::Value, me: &str, room_id: &str) -> St
         format!(r#"<div class="reactions">{reactions}</div>"#)
     };
 
+    // Action buttons: reply + quick emoji reactions
+    let actions = format!(
+        r#"<span class="msg-actions">
+<button class="act-btn" onclick="setReply('{mid_short}','{from}')" title="Reply">↩</button>
+<button class="act-btn" onclick="sendReact('{room_label}','{mid_short}','👍')" title="👍">👍</button>
+<button class="act-btn" onclick="sendReact('{room_label}','{mid_short}','❤️')" title="❤️">❤️</button>
+<button class="act-btn" onclick="sendReact('{room_label}','{mid_short}','🔥')" title="🔥">🔥</button>
+<button class="act-btn" onclick="sendReact('{room_label}','{mid_short}','✅')" title="✅">✅</button>
+</span>"#,
+    );
+
     format!(
-        r#"<div class="{class}" id="m-{mid_short}"><span class="time">{dt}</span> <span class="id">[{mid_short}]</span> <span class="sender">{from}</span>: {reply_badge}<span class="text">{text}</span>{receipt}{reactions_row}</div>"#
+        r#"<div class="{class}" id="m-{mid_short}"><span class="time">{dt}</span> <span class="id">[{mid_short}]</span> <span class="sender">{from}</span>: {reply_badge}<span class="text">{text}</span>{receipt}{actions}{reactions_row}</div>"#
     )
 }
 
@@ -169,6 +181,13 @@ a{color:#58a6ff}
 .conn-status{font-size:.75em;color:#8b949e;margin-left:8px}
 .conn-status.live{color:#3fb950}
 .conn-status.reconnecting{color:#d29922}
+.msg-actions{display:none;margin-left:6px}
+.msg:hover .msg-actions{display:inline}
+.act-btn{background:none;border:1px solid #30363d;border-radius:4px;color:#8b949e;cursor:pointer;font-size:.75em;padding:1px 4px;margin:0 1px;line-height:1.4}
+.act-btn:hover{background:#21262d;color:#c9d1d9;border-color:#58a6ff}
+.reply-bar{display:none;background:#161b22;border-left:3px solid #388bfd;padding:4px 10px;font-size:.85em;color:#8b949e;margin-bottom:6px;border-radius:0 4px 4px 0}
+.reply-bar.visible{display:flex;align-items:center;gap:8px}
+.reply-bar-cancel{cursor:pointer;color:#f85149;margin-left:auto;font-weight:bold}
 "#;
 
 fn render_nav(active: &str) -> String {
@@ -226,7 +245,12 @@ fn render_room_page(room_label: &str) -> String {
 <div id="messages">
 {rows}</div>
 <div class="send-form">
+  <div class="reply-bar" id="reply-bar">
+    <span id="reply-label">↩ Replying to …</span>
+    <span class="reply-bar-cancel" onclick="cancelReply()" title="Cancel reply">✕</span>
+  </div>
   <form id="sf" action="/{label}/send" method="post" autocomplete="off">
+    <input type="hidden" name="reply_to" id="reply-to-field" value="">
     <input type="text" name="message" id="msg-input" placeholder="Type a message… (Enter to send)" autofocus>
     <button type="submit">Send</button>
   </form>
@@ -237,18 +261,26 @@ fn render_room_page(room_label: &str) -> String {
   var conn = document.getElementById('conn');
   var messages = document.getElementById('messages');
   var input = document.getElementById('msg-input');
+  var replyBar = document.getElementById('reply-bar');
+  var replyLabel = document.getElementById('reply-label');
+  var replyField = document.getElementById('reply-to-field');
 
   // Submit form via fetch so page doesn't reload
   document.getElementById('sf').addEventListener('submit', function(e) {{
     e.preventDefault();
     var text = input.value.trim();
     if (!text) return;
+    var body = 'message=' + encodeURIComponent(text);
+    if (replyField.value) {{
+      body += '&reply_to=' + encodeURIComponent(replyField.value);
+    }}
     fetch('/{label}/send', {{
       method: 'POST',
       headers: {{'Content-Type': 'application/x-www-form-urlencoded'}},
-      body: 'message=' + encodeURIComponent(text)
+      body: body
     }}).catch(function() {{}});
     input.value = '';
+    cancelReply();
   }});
 
   function connectSSE() {{
@@ -284,7 +316,31 @@ fn render_room_page(room_label: &str) -> String {
   // Scroll to bottom on load
   window.scrollTo(0, document.body.scrollHeight);
 }})();
-</script>
+
+function setReply(msgId, sender) {{
+  var replyBar = document.getElementById('reply-bar');
+  var replyLabel = document.getElementById('reply-label');
+  var replyField = document.getElementById('reply-to-field');
+  replyField.value = msgId;
+  replyLabel.textContent = '\u21a9 Replying to ' + sender + ' [' + msgId + ']';
+  replyBar.className = 'reply-bar visible';
+  document.getElementById('msg-input').focus();
+}}
+
+function cancelReply() {{
+  var replyBar = document.getElementById('reply-bar');
+  var replyField = document.getElementById('reply-to-field');
+  replyField.value = '';
+  replyBar.className = 'reply-bar';
+}}
+
+function sendReact(room, msgId, emoji) {{
+  fetch('/' + room + '/react', {{
+    method: 'POST',
+    headers: {{'Content-Type': 'application/x-www-form-urlencoded'}},
+    body: 'msg_id=' + encodeURIComponent(msgId) + '&emoji=' + encodeURIComponent(emoji)
+  }}).catch(function() {{}});
+}}
 </body></html>"#,
         label = html_escape(room_label),
         css = SHARED_CSS,
@@ -437,7 +493,7 @@ fn handle_sse(mut stream: TcpStream, room_label: String, since_ts: u64) {
 
 // ── Connection dispatcher ─────────────────────────────────────────
 
-fn handle_connection(stream: TcpStream) {
+fn handle_connection(mut stream: TcpStream) {
     let mut buf = vec![0u8; 8192];
     let n = match stream.try_clone().ok().and_then(|mut s| s.read(&mut buf).ok()) {
         Some(n) => n,
@@ -488,6 +544,20 @@ fn handle_connection(stream: TcpStream) {
                 }
             }
             send_redirect(stream, &format!("/{room_label}"));
+        }
+
+        // POST /:room/react — add emoji reaction to a message
+        ("POST", [room_label, "react"]) => {
+            if let (Some(msg_id), Some(emoji)) = (form_field(body, "msg_id"), form_field(body, "emoji")) {
+                let msg_id = msg_id.trim().to_string();
+                let emoji = emoji.trim().to_string();
+                if !msg_id.is_empty() && !emoji.is_empty() {
+                    let _ = chat::react(&msg_id, &emoji, Some(room_label));
+                }
+            }
+            // Return 204 No Content so the JS fetch doesn't need to handle a body
+            let resp = "HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+            let _ = stream.write_all(resp.as_bytes());
         }
 
         _ => {
@@ -636,6 +706,41 @@ mod tests {
         let html = render_message_html(&msg, "bob", "room-id");
         assert!(html.contains("↩"));
         assert!(html.contains("deadbe"));
+    }
+
+    #[test]
+    fn test_render_message_html_has_action_buttons() {
+        let msg = serde_json::json!({
+            "id": "cc112233",
+            "from": "alice",
+            "ts": 1700000000u64,
+            "text": "hi",
+        });
+        let html = render_message_html(&msg, "bob", "my-room");
+        // Reply button present
+        assert!(html.contains("setReply("));
+        // Emoji react buttons present
+        assert!(html.contains("sendReact("));
+        assert!(html.contains("👍"));
+        assert!(html.contains("❤️"));
+        assert!(html.contains("🔥"));
+        assert!(html.contains("✅"));
+        // Room label included in react call
+        assert!(html.contains("my-room"));
+    }
+
+    #[test]
+    fn test_render_message_html_xss_in_sender() {
+        let msg = serde_json::json!({
+            "id": "dd445566",
+            "from": "<script>alert(1)</script>",
+            "ts": 1700000000u64,
+            "text": "ok",
+        });
+        let html = render_message_html(&msg, "bob", "room-id");
+        // Sender name must be escaped
+        assert!(!html.contains("<script>"));
+        assert!(html.contains("&lt;script&gt;"));
     }
 
     #[test]
