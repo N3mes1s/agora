@@ -1,13 +1,17 @@
 //! Agora chat engine.
 //!
-//! Wire format: base64(nonce || AES-256-GCM(envelope_json, aad=room_id))
+//! Wire format:
+//! - v3 legacy: base64(nonce || AES-256-GCM(envelope_json, aad=room_id))
+//! - v4 ratchet: json({v, from, ratchet_n, ct}) where `ct` is
+//!   base64(nonce || AES-256-GCM(envelope_json, aad=room_id:from:ratchet_n))
 //!
 //! Envelope (plaintext JSON):
 //! ```json
 //! {
-//!     "v": "3.0",
+//!     "v": "4.0",
 //!     "id": "<8-hex message ID>",
 //!     "from": "<agent-id>",
+//!     "ratchet_n": <u64>,
 //!     "ts": <unix-timestamp>,
 //!     "text": "<message body>",
 //!     "reply_to": "<optional parent ID>"
@@ -15,6 +19,7 @@
 //! ```
 
 use base64::Engine;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::{HashMap, HashSet};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -23,9 +28,11 @@ use ring::rand::SecureRandom;
 
 use crate::{crypto, store, transport};
 
-const VERSION: &str = "3.0";
+const VERSION: &str = "4.0";
 const BASE64: base64::engine::general_purpose::GeneralPurpose =
     base64::engine::general_purpose::STANDARD;
+
+const WIRE_VERSION_RATCHET: &str = "4.0";
 
 fn now() -> u64 {
     SystemTime::now()
@@ -99,9 +106,72 @@ fn parse_envelope(raw: &str) -> Option<serde_json::Value> {
     None
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct WirePayload {
+    v: String,
+    from: String,
+    ratchet_n: u64,
+    ct: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PayloadFrame {
+    from: Option<String>,
+    ratchet_n: Option<u64>,
+    ciphertext: String,
+}
+
+fn wrap_ratchet_payload(from: &str, ratchet_n: u64, ciphertext: &str) -> String {
+    serde_json::to_string(&WirePayload {
+        v: WIRE_VERSION_RATCHET.to_string(),
+        from: from.to_string(),
+        ratchet_n,
+        ct: ciphertext.to_string(),
+    })
+    .expect("serialize wire payload")
+}
+
+fn parse_payload_frame(payload: &str) -> PayloadFrame {
+    if let Ok(frame) = serde_json::from_str::<WirePayload>(payload) {
+        if frame.v == WIRE_VERSION_RATCHET {
+            return PayloadFrame {
+                from: Some(frame.from),
+                ratchet_n: Some(frame.ratchet_n),
+                ciphertext: frame.ct,
+            };
+        }
+    }
+
+    PayloadFrame {
+        from: None,
+        ratchet_n: None,
+        ciphertext: payload.to_string(),
+    }
+}
+
+fn encode_chain_key(key: &[u8; 32]) -> String {
+    hex::encode(key)
+}
+
+fn decode_chain_key(encoded: Option<&str>) -> Option<[u8; 32]> {
+    let encoded = encoded?;
+    let bytes = hex::decode(encoded).ok()?;
+    if bytes.len() != 32 {
+        return None;
+    }
+    let mut key = [0u8; 32];
+    key.copy_from_slice(&bytes);
+    Some(key)
+}
+
+fn ratchet_aad(room_id: &str, sender_id: &str, ratchet_n: u64) -> Vec<u8> {
+    format!("{room_id}:{sender_id}:{ratchet_n}").into_bytes()
+}
+
 // ── Encrypt / Decrypt ───────────────────────────────────────────
 
-fn encrypt_envelope(env: &serde_json::Value, room_key: &[u8; 32], room_id: &str) -> String {
+#[cfg(test)]
+fn encrypt_legacy_envelope(env: &serde_json::Value, room_key: &[u8; 32], room_id: &str) -> String {
     let (enc_key, _) = crypto::derive_message_keys(room_key);
     let plaintext = serde_json::to_string(env).unwrap();
     let aad = room_id.as_bytes();
@@ -109,13 +179,85 @@ fn encrypt_envelope(env: &serde_json::Value, room_key: &[u8; 32], room_id: &str)
     BASE64.encode(&blob)
 }
 
-fn decrypt_payload(payload: &str, room_key: &[u8; 32], room_id: &str) -> Option<serde_json::Value> {
+fn encrypt_envelope(env: &mut serde_json::Value, room_key: &[u8; 32], room_id: &str) -> String {
+    let sender_id = env["from"]
+        .as_str()
+        .map(|s| s.to_string())
+        .unwrap_or_else(store::get_agent_id);
+    let mut state = store::load_ratchet_state(room_id);
+    let chain_key = decode_chain_key(state.send_chain_key.as_deref())
+        .unwrap_or_else(|| crypto::init_sender_chain(room_key, &sender_id));
+    let ratchet_n = state.send_next_n;
+    env["ratchet_n"] = json!(ratchet_n);
+
+    let msg_key = crypto::derive_msg_key(&chain_key);
+    let plaintext = serde_json::to_string(env).unwrap();
+    let aad = ratchet_aad(room_id, &sender_id, ratchet_n);
+    let blob = crypto::encrypt(plaintext.as_bytes(), &msg_key, &aad).expect("encrypt failed");
+
+    let next_chain = crypto::advance_chain(&chain_key);
+    state.send_chain_key = Some(encode_chain_key(&next_chain));
+    state.send_next_n = ratchet_n + 1;
+    store::save_ratchet_state(room_id, &state);
+
+    wrap_ratchet_payload(&sender_id, ratchet_n, &BASE64.encode(&blob))
+}
+
+fn decrypt_legacy_payload(payload: &str, room_key: &[u8; 32], room_id: &str) -> Option<serde_json::Value> {
     let (enc_key, _) = crypto::derive_message_keys(room_key);
     let blob = BASE64.decode(payload).ok()?;
     let aad = room_id.as_bytes();
     let plaintext = crypto::decrypt(&blob, &enc_key, aad).ok()?;
     let raw = String::from_utf8(plaintext).ok()?;
     parse_envelope(&raw)
+}
+
+fn decrypt_ratchet_payload(
+    frame: &PayloadFrame,
+    room_key: &[u8; 32],
+    room_id: &str,
+) -> Option<serde_json::Value> {
+    let sender_id = frame.from.as_deref()?;
+    let ratchet_n = frame.ratchet_n?;
+    let mut state = store::load_ratchet_state(room_id);
+    let peer = state.recv.entry(sender_id.to_string()).or_default();
+
+    let mut chain_key = decode_chain_key(peer.chain_key.as_deref())
+        .unwrap_or_else(|| crypto::init_sender_chain(room_key, sender_id));
+    let mut current_n = peer.next_n;
+    if current_n > ratchet_n {
+        return None;
+    }
+    while current_n < ratchet_n {
+        chain_key = crypto::advance_chain(&chain_key);
+        current_n += 1;
+    }
+
+    let msg_key = crypto::derive_msg_key(&chain_key);
+    let blob = BASE64.decode(&frame.ciphertext).ok()?;
+    let aad = ratchet_aad(room_id, sender_id, ratchet_n);
+    let plaintext = crypto::decrypt(&blob, &msg_key, &aad).ok()?;
+    let raw = String::from_utf8(plaintext).ok()?;
+    let mut env = parse_envelope(&raw)?;
+    if env["from"].as_str() != Some(sender_id) {
+        return None;
+    }
+    env["ratchet_n"] = json!(ratchet_n);
+
+    let next_chain = crypto::advance_chain(&chain_key);
+    peer.chain_key = Some(encode_chain_key(&next_chain));
+    peer.next_n = ratchet_n + 1;
+    store::save_ratchet_state(room_id, &state);
+    Some(env)
+}
+
+fn decrypt_payload(payload: &str, room_key: &[u8; 32], room_id: &str) -> Option<serde_json::Value> {
+    let frame = parse_payload_frame(payload);
+    if frame.from.is_some() && frame.ratchet_n.is_some() {
+        decrypt_ratchet_payload(&frame, room_key, room_id)
+    } else {
+        decrypt_legacy_payload(&frame.ciphertext, room_key, room_id)
+    }
 }
 
 // ── Room Operations ─────────────────────────────────────────────
@@ -143,8 +285,8 @@ pub fn create(label: &str) -> Result<(String, String), String> {
     store::add_room(&room_id, &secret, label, store::Role::Admin);
     store::set_active_room(label);
 
-    let env = make_envelope("Room created (agora v3, AES-256-GCM).", None);
-    let encrypted = encrypt_envelope(&env, &room_key, &room_id);
+    let mut env = make_envelope("Room created (agora v4, AES-256-GCM).", None);
+    let encrypted = encrypt_envelope(&mut env, &room_key, &room_id);
     transport::publish(&room_id, &encrypted);
     store::save_message(&room_id, &env);
 
@@ -156,8 +298,8 @@ pub fn join(room_id: &str, secret: &str, label: &str) -> Result<store::RoomEntry
     let entry = store::add_room(room_id, secret, label, store::Role::Member);
     store::set_active_room(label);
 
-    let env = make_envelope("Joined (agora v3).", None);
-    let encrypted = encrypt_envelope(&env, &room_key, room_id);
+    let mut env = make_envelope("Joined (agora v4).", None);
+    let encrypted = encrypt_envelope(&mut env, &room_key, room_id);
     transport::publish(room_id, &encrypted);
     store::save_message(room_id, &env);
 
@@ -192,8 +334,8 @@ pub fn leave(room_label: Option<&str>) -> Result<serde_json::Value, String> {
 pub fn heartbeat(room_label: Option<&str>) -> Result<(), String> {
     let room = resolve_room(room_label)?;
     let room_key = crypto::derive_room_key(&room.secret, &room.room_id);
-    let env = make_heartbeat();
-    let encrypted = encrypt_envelope(&env, &room_key, &room.room_id);
+    let mut env = make_heartbeat();
+    let encrypted = encrypt_envelope(&mut env, &room_key, &room.room_id);
     transport::publish(&room.room_id, &encrypted);
     // Update our own last_seen
     store::update_last_seen(&room.room_id, &store::get_agent_id());
@@ -204,9 +346,9 @@ pub fn send(message: &str, reply_to: Option<&str>, room_label: Option<&str>) -> 
     let room = resolve_room(room_label)?;
     let room_key = crypto::derive_room_key(&room.secret, &room.room_id);
 
-    let env = make_envelope(message, reply_to);
+    let mut env = make_envelope(message, reply_to);
     let mid = env["id"].as_str().unwrap_or("?").to_string();
-    let encrypted = encrypt_envelope(&env, &room_key, &room.room_id);
+    let encrypted = encrypt_envelope(&mut env, &room_key, &room.room_id);
 
     transport::publish(&room.room_id, &encrypted);
     store::save_message(&room.room_id, &env);
@@ -331,8 +473,8 @@ pub fn topic(new_topic: &str, room_label: Option<&str>) -> Result<(), String> {
     store::update_room(&room);
 
     let room_key = crypto::derive_room_key(&room.secret, &room.room_id);
-    let env = make_envelope(&format!("Topic set: {new_topic}"), None);
-    let encrypted = encrypt_envelope(&env, &room_key, &room.room_id);
+    let mut env = make_envelope(&format!("Topic set: {new_topic}"), None);
+    let encrypted = encrypt_envelope(&mut env, &room_key, &room.room_id);
     transport::publish(&room.room_id, &encrypted);
     store::save_message(&room.room_id, &env);
     Ok(())
@@ -347,8 +489,8 @@ pub fn promote(agent_id: &str, room_label: Option<&str>) -> Result<(), String> {
     store::set_member_role(&room.room_id, agent_id, store::Role::Admin);
 
     let room_key = crypto::derive_room_key(&room.secret, &room.room_id);
-    let env = make_envelope(&format!("Promoted {agent_id} to admin."), None);
-    let encrypted = encrypt_envelope(&env, &room_key, &room.room_id);
+    let mut env = make_envelope(&format!("Promoted {agent_id} to admin."), None);
+    let encrypted = encrypt_envelope(&mut env, &room_key, &room.room_id);
     transport::publish(&room.room_id, &encrypted);
     store::save_message(&room.room_id, &env);
     Ok(())
@@ -366,8 +508,8 @@ pub fn kick(agent_id: &str, room_label: Option<&str>) -> Result<(), String> {
     store::remove_member_from_room(&room.room_id, agent_id);
 
     let room_key = crypto::derive_room_key(&room.secret, &room.room_id);
-    let env = make_envelope(&format!("Kicked {agent_id} from the room."), None);
-    let encrypted = encrypt_envelope(&env, &room_key, &room.room_id);
+    let mut env = make_envelope(&format!("Kicked {agent_id} from the room."), None);
+    let encrypted = encrypt_envelope(&mut env, &room_key, &room.room_id);
     transport::publish(&room.room_id, &encrypted);
     store::save_message(&room.room_id, &env);
     Ok(())
@@ -414,7 +556,12 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{pin, pins, resolve_room, send_watch_heartbeat, unpin};
+    use super::{
+        decrypt_payload, encrypt_envelope, encrypt_legacy_envelope, make_envelope,
+        parse_payload_frame, pin, pins, resolve_room, send_watch_heartbeat, unpin,
+        wrap_ratchet_payload,
+    };
+    use crate::crypto;
     use crate::store::{self, Role};
     use serde_json::json;
     use std::path::PathBuf;
@@ -477,6 +624,7 @@ mod tests {
 
     #[test]
     fn resolve_room_reports_missing_explicit_target() {
+        let _guard = store::test_env_lock().lock().unwrap();
         let home = temp_home();
         std::fs::create_dir_all(&home).unwrap();
         unsafe {
@@ -490,6 +638,7 @@ mod tests {
 
     #[test]
     fn watch_heartbeat_targets_watched_room_not_active_room() {
+        let _guard = store::test_env_lock().lock().unwrap();
         let home = temp_home();
         std::fs::create_dir_all(&home).unwrap();
         unsafe {
@@ -517,6 +666,7 @@ mod tests {
 
     #[test]
     fn pin_and_unpin_round_trip() {
+        let _guard = store::test_env_lock().lock().unwrap();
         let (_home, first, _second) = setup_pin_room();
 
         let (resolved, added) = pin("aaaa", None).unwrap();
@@ -534,6 +684,80 @@ mod tests {
         assert_eq!(unpinned, first);
         assert!(removed);
         assert!(pins(None).unwrap().is_empty());
+    }
+
+    #[test]
+    fn ratchet_wire_payload_round_trip() {
+        let payload = wrap_ratchet_payload("alice", 7, "ciphertext");
+        let frame = parse_payload_frame(&payload);
+        assert_eq!(
+            frame,
+            super::PayloadFrame {
+                from: Some("alice".to_string()),
+                ratchet_n: Some(7),
+                ciphertext: "ciphertext".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn legacy_payload_frame_falls_back_to_raw_ciphertext() {
+        let frame = parse_payload_frame("legacy-ciphertext");
+        assert_eq!(
+            frame,
+            super::PayloadFrame {
+                from: None,
+                ratchet_n: None,
+                ciphertext: "legacy-ciphertext".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn ratchet_encrypt_decrypt_round_trip() {
+        let _guard = store::test_env_lock().lock().unwrap();
+        let home = temp_home();
+        std::fs::create_dir_all(&home).unwrap();
+        unsafe {
+            std::env::set_var("HOME", &home);
+            std::env::set_var("AGORA_AGENT_ID", "alice");
+        }
+
+        let room = store::add_room("ag-ratchet", "secret-ratchet", "ratchet", Role::Admin);
+        let room_key = crypto::derive_room_key(&room.secret, &room.room_id);
+        let mut env = make_envelope("hello ratchet", None);
+
+        let payload = encrypt_envelope(&mut env, &room_key, &room.room_id);
+        let decrypted = decrypt_payload(&payload, &room_key, &room.room_id).unwrap();
+
+        assert_eq!(decrypted["text"].as_str(), Some("hello ratchet"));
+        assert_eq!(decrypted["from"].as_str(), Some("alice"));
+        assert_eq!(decrypted["ratchet_n"].as_u64(), Some(0));
+
+        let state = store::load_ratchet_state(&room.room_id);
+        assert_eq!(state.send_next_n, 1);
+        assert_eq!(state.recv.get("alice").map(|s| s.next_n), Some(1));
+    }
+
+    #[test]
+    fn legacy_payloads_still_decrypt() {
+        let _guard = store::test_env_lock().lock().unwrap();
+        let home = temp_home();
+        std::fs::create_dir_all(&home).unwrap();
+        unsafe {
+            std::env::set_var("HOME", &home);
+            std::env::set_var("AGORA_AGENT_ID", "legacy");
+        }
+
+        let room = store::add_room("ag-legacy", "secret-legacy", "legacy", Role::Admin);
+        let room_key = crypto::derive_room_key(&room.secret, &room.room_id);
+        let env = make_envelope("legacy path", None);
+
+        let payload = encrypt_legacy_envelope(&env, &room_key, &room.room_id);
+        let decrypted = decrypt_payload(&payload, &room_key, &room.room_id).unwrap();
+
+        assert_eq!(decrypted["text"].as_str(), Some("legacy path"));
+        assert!(decrypted.get("ratchet_n").is_none() || decrypted["ratchet_n"].is_null());
     }
 }
 
