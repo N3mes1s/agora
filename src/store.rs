@@ -232,6 +232,34 @@ pub fn set_active_room(label: &str) {
     let _ = fs::write(dir.join("active_room"), label);
 }
 
+pub fn remove_room(label_or_id: &str) -> Option<RoomEntry> {
+    let mut rooms = load_registry();
+    let idx = rooms
+        .iter()
+        .position(|r| r.label == label_or_id || r.room_id == label_or_id)?;
+    let removed = rooms.remove(idx);
+    save_registry(&rooms);
+
+    let room_dir = agora_dir().join("rooms").join(&removed.room_id);
+    if room_dir.exists() {
+        let _ = fs::remove_dir_all(&room_dir);
+    }
+
+    let active_file = agora_dir().join("active_room");
+    if let Ok(active) = fs::read_to_string(&active_file) {
+        let active = active.trim();
+        if active == removed.label || active == removed.room_id {
+            if let Some(next) = rooms.first() {
+                let _ = fs::write(&active_file, &next.label);
+            } else {
+                let _ = fs::remove_file(&active_file);
+            }
+        }
+    }
+
+    Some(removed)
+}
+
 // ── Message Persistence ─────────────────────────────────────────
 
 pub fn save_message(room_id: &str, envelope: &serde_json::Value) {

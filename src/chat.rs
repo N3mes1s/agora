@@ -158,6 +158,31 @@ pub fn join(room_id: &str, secret: &str, label: &str) -> Result<store::RoomEntry
     Ok(entry)
 }
 
+pub fn leave(room_label: Option<&str>) -> Result<serde_json::Value, String> {
+    let room = resolve_room(room_label)?;
+    let pid_path = store::daemon_pid_path(&room.room_id);
+    let mut daemon_stopped = false;
+
+    if let Ok(pid_str) = std::fs::read_to_string(&pid_path) {
+        if let Ok(pid) = pid_str.trim().parse::<i32>() {
+            unsafe { libc::kill(pid, libc::SIGTERM); }
+            daemon_stopped = true;
+        }
+        let _ = std::fs::remove_file(&pid_path);
+    }
+
+    let removed = store::remove_room(&room.room_id)
+        .ok_or_else(|| format!("Room '{}' not found.", room.label))?;
+    let active_room = store::get_active_room().map(|r| r.label);
+
+    Ok(json!({
+        "label": removed.label,
+        "room_id": removed.room_id,
+        "daemon_stopped": daemon_stopped,
+        "active_room": active_room,
+    }))
+}
+
 pub fn heartbeat(room_label: Option<&str>) -> Result<(), String> {
     let room = resolve_room(room_label)?;
     let room_key = crypto::derive_room_key(&room.secret, &room.room_id);
