@@ -479,6 +479,22 @@ pub fn whois(agent_id: &str, room_label: Option<&str>) -> Result<Option<store::A
     Ok(store::get_profile(&room.room_id, agent_id))
 }
 
+/// Broadcast a message to all joined rooms.
+pub fn broadcast(message: &str) -> Result<Vec<(String, String)>, String> {
+    let rooms = store::load_registry();
+    if rooms.is_empty() {
+        return Err("No rooms joined.".to_string());
+    }
+    let mut results = Vec::new();
+    for room in &rooms {
+        match send(message, None, Some(&room.label)) {
+            Ok(mid) => results.push((room.label.clone(), mid)),
+            Err(e) => results.push((room.label.clone(), format!("error: {e}"))),
+        }
+    }
+    Ok(results)
+}
+
 /// Room statistics dashboard.
 pub fn stats(room_label: Option<&str>) -> Result<serde_json::Value, String> {
     let room = resolve_room(room_label)?;

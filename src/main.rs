@@ -234,6 +234,12 @@ enum Commands {
         agent_id: String,
     },
 
+    /// Broadcast a message to all joined rooms
+    Broadcast {
+        /// Message text
+        message: Vec<String>,
+    },
+
     /// Room statistics dashboard
     Stats,
 
@@ -1109,6 +1115,31 @@ fn main() {
                 }
                 Ok(None) => {
                     println!("  No profile found for '{agent_id}'.");
+                }
+                Err(e) => {
+                    eprintln!("  Error: {e}");
+                    process::exit(1);
+                }
+            }
+        }
+
+        Commands::Broadcast { message } => {
+            let text = message.join(" ");
+            if text.is_empty() {
+                eprintln!("Usage: agora broadcast <message>");
+                process::exit(1);
+            }
+            match chat::broadcast(&text) {
+                Ok(results) => {
+                    for (label, mid) in &results {
+                        if mid.starts_with("error") {
+                            println!("  {label}: {mid}");
+                        } else {
+                            let short = &mid[..6.min(mid.len())];
+                            println!("  {label}: sent [{short}]");
+                        }
+                    }
+                    println!("  Broadcast to {} rooms.", results.len());
                 }
                 Err(e) => {
                     eprintln!("  Error: {e}");
