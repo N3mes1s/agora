@@ -479,6 +479,51 @@ pub fn whois(agent_id: &str, room_label: Option<&str>) -> Result<Option<store::A
     Ok(store::get_profile(&room.room_id, agent_id))
 }
 
+/// Compact old messages: move to archive, keep recent.
+pub fn compact(keep_hours: u64, room_label: Option<&str>) -> Result<(usize, usize), String> {
+    let room = resolve_room(room_label)?;
+    let all_msgs = store::load_messages(&room.room_id, 604800); // load 7 days
+    let cutoff = now() - (keep_hours * 3600);
+
+    let mut archived = 0;
+    let mut kept = 0;
+
+    // Separate old from recent
+    let mut old_msgs = Vec::new();
+    for msg in &all_msgs {
+        let ts = msg["ts"].as_u64().unwrap_or(0);
+        if ts < cutoff {
+            old_msgs.push(msg.clone());
+            archived += 1;
+        } else {
+            kept += 1;
+        }
+    }
+
+    if archived == 0 {
+        return Ok((0, kept));
+    }
+
+    // Append old messages to archive file
+    let archive_path = store::archive_path(&room.room_id);
+    let mut archive_data = if archive_path.exists() {
+        std::fs::read_to_string(&archive_path).unwrap_or_default()
+    } else {
+        String::new()
+    };
+
+    for msg in &old_msgs {
+        archive_data.push_str(&serde_json::to_string(msg).unwrap());
+        archive_data.push('\n');
+    }
+    std::fs::write(&archive_path, &archive_data).map_err(|e| format!("Archive write: {e}"))?;
+
+    // Delete old message files
+    store::delete_messages_before(&room.room_id, cutoff);
+
+    Ok((archived, kept))
+}
+
 /// Search across ALL joined rooms.
 pub fn grep(query: &str, use_regex: bool) -> Result<Vec<(String, serde_json::Value)>, String> {
     let rooms = store::load_registry();

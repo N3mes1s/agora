@@ -234,6 +234,13 @@ enum Commands {
         agent_id: String,
     },
 
+    /// Archive old messages to free space
+    Compact {
+        /// Keep messages from the last N hours (default: 24)
+        #[arg(default_value = "24")]
+        keep_hours: u64,
+    },
+
     /// Search across ALL rooms
     Grep {
         /// Search query
@@ -1124,6 +1131,22 @@ fn main() {
                 }
                 Ok(None) => {
                     println!("  No profile found for '{agent_id}'.");
+                }
+                Err(e) => {
+                    eprintln!("  Error: {e}");
+                    process::exit(1);
+                }
+            }
+        }
+
+        Commands::Compact { keep_hours } => {
+            match chat::compact(keep_hours, room) {
+                Ok((archived, kept)) => {
+                    if archived == 0 {
+                        println!("  Nothing to compact ({kept} messages, all within {keep_hours}h).");
+                    } else {
+                        println!("  Compacted: {archived} messages archived, {kept} kept (last {keep_hours}h).");
+                    }
                 }
                 Err(e) => {
                     eprintln!("  Error: {e}");

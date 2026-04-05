@@ -484,6 +484,32 @@ pub fn take_notify_flag(room_id: &str) -> bool {
     exists
 }
 
+pub fn archive_path(room_id: &str) -> PathBuf {
+    let dir = agora_dir().join("rooms").join(room_id);
+    ensure_dir(&dir);
+    dir.join("archive.jsonl")
+}
+
+pub fn delete_messages_before(room_id: &str, before_ts: u64) {
+    let dir = agora_dir().join("rooms").join(room_id).join("messages");
+    if !dir.exists() {
+        return;
+    }
+    if let Ok(entries) = fs::read_dir(&dir) {
+        for entry in entries.flatten() {
+            let fname = entry.file_name().to_string_lossy().to_string();
+            // Files are named: <ts>_<mid>.json
+            if let Some(ts_str) = fname.split('_').next() {
+                if let Ok(ts) = ts_str.parse::<u64>() {
+                    if ts < before_ts {
+                        let _ = fs::remove_file(entry.path());
+                    }
+                }
+            }
+        }
+    }
+}
+
 // ── Seen Tracking ───────────────────────────────────────────────
 
 pub fn load_seen(room_id: &str) -> HashSet<String> {
