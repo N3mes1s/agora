@@ -308,9 +308,22 @@ fn print_msg(env: &serde_json::Value) {
     print_msg_with_depth(env, 0);
 }
 
+fn resolve_display_name(agent_id: &str) -> String {
+    // Check all rooms for a profile with a name
+    for room in store::load_registry() {
+        if let Some(p) = store::get_profile(&room.room_id, agent_id) {
+            if let Some(name) = &p.name {
+                return format!("{name} ({agent_id})");
+            }
+        }
+    }
+    agent_id.to_string()
+}
+
 fn print_msg_with_depth(env: &serde_json::Value, depth: usize) {
     let time = ts(env["ts"].as_u64().unwrap_or(0));
-    let sender = env["from"].as_str().unwrap_or("?");
+    let sender_id = env["from"].as_str().unwrap_or("?");
+    let sender = resolve_display_name(sender_id);
     let text = env["text"].as_str().unwrap_or("");
     let mid = &env["id"].as_str().unwrap_or("?")[..6.min(env["id"].as_str().unwrap_or("?").len())];
     let reply = if let Some(rt) = env["reply_to"].as_str() {
@@ -320,7 +333,7 @@ fn print_msg_with_depth(env: &serde_json::Value, depth: usize) {
     };
     let indent = "    ".repeat(depth);
     let me = store::get_agent_id();
-    if sender == me {
+    if sender_id == me {
         println!("  {indent}\x1b[92m[{time}] [{mid}] {sender}: {text}{reply}\x1b[0m");
     } else {
         println!("  {indent}\x1b[96m[{time}]\x1b[0m [{mid}]{reply} {sender}: {text}");
