@@ -412,6 +412,79 @@ where
     Ok(())
 }
 
+/// Generate a compact activity summary for a room.
+/// Shows: time range, active agents, message counts, top keywords.
+pub fn recap(since: &str, room_label: Option<&str>) -> Result<serde_json::Value, String> {
+    let room = resolve_room(room_label)?;
+    let since_secs = parse_since(since);
+    let msgs = store::load_messages(&room.room_id, since_secs);
+
+    if msgs.is_empty() {
+        return Ok(json!({
+            "room": room.label,
+            "since": since,
+            "total_messages": 0,
+            "summary": "No activity."
+        }));
+    }
+
+    // Time range
+    let first_ts = msgs.first().and_then(|m| m["ts"].as_u64()).unwrap_or(0);
+    let last_ts = msgs.last().and_then(|m| m["ts"].as_u64()).unwrap_or(0);
+
+    // Per-agent message counts
+    let mut agent_counts: HashMap<String, u64> = HashMap::new();
+    let mut words: HashMap<String, u64> = HashMap::new();
+
+    for msg in &msgs {
+        let from = msg["from"].as_str().unwrap_or("?").to_string();
+        *agent_counts.entry(from).or_insert(0) += 1;
+
+        // Extract keywords (words 4+ chars, skip common ones)
+        if let Some(text) = msg["text"].as_str() {
+            for word in text.split_whitespace() {
+                let w = word.trim_matches(|c: char| !c.is_alphanumeric()).to_lowercase();
+                if w.len() >= 4 && !is_stopword(&w) {
+                    *words.entry(w).or_insert(0) += 1;
+                }
+            }
+        }
+    }
+
+    // Sort agents by message count
+    let mut agents: Vec<_> = agent_counts.into_iter().collect();
+    agents.sort_by(|a, b| b.1.cmp(&a.1));
+
+    // Top 10 keywords
+    let mut top_words: Vec<_> = words.into_iter().collect();
+    top_words.sort_by(|a, b| b.1.cmp(&a.1));
+    top_words.truncate(10);
+
+    Ok(json!({
+        "room": room.label,
+        "since": since,
+        "total_messages": msgs.len(),
+        "time_range": {
+            "first": first_ts,
+            "last": last_ts,
+        },
+        "agents": agents.iter().map(|(a, c)| json!({"id": a, "messages": c})).collect::<Vec<_>>(),
+        "top_keywords": top_words.iter().map(|(w, c)| json!({"word": w, "count": c})).collect::<Vec<_>>(),
+    }))
+}
+
+fn is_stopword(w: &str) -> bool {
+    matches!(w, "that" | "this" | "with" | "from" | "have" | "been"
+        | "will" | "your" | "they" | "what" | "when" | "were" | "them"
+        | "then" | "than" | "each" | "just" | "also" | "into" | "some"
+        | "more" | "here" | "agora" | "room" | "send" | "read" | "check"
+        | "should" | "would" | "could" | "about" | "there" | "which"
+        | "their" | "after" | "before" | "still" | "already" | "need"
+        | "want" | "like" | "make" | "does" | "done" | "good" | "work"
+        | "working" | "works" | "built" | "build" | "main" | "branch"
+        | "push" | "pull" | "merge" | "merged")
+}
+
 #[cfg(test)]
 mod tests {
     use super::{pin, pins, resolve_room, send_watch_heartbeat, unpin};
