@@ -408,8 +408,9 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::send_watch_heartbeat;
+    use super::{pin, pins, send_watch_heartbeat, unpin};
     use crate::store::{self, Role};
+    use serde_json::json;
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -429,6 +430,43 @@ mod tests {
             .find(|m| m.agent_id == me)
             .map(|m| m.last_seen)
             .unwrap_or(0)
+    }
+
+    fn setup_pin_room() -> (PathBuf, String, String) {
+        let home = std::env::temp_dir().join(format!(
+            "agora-pin-test-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&home).unwrap();
+        unsafe {
+            std::env::set_var("HOME", &home);
+            std::env::set_var("AGORA_AGENT_ID", "pin-test");
+        }
+
+        let room = store::add_room("ag-pin-test", "secret-pin", "pins", Role::Admin);
+        store::set_active_room("pins");
+        let first = "aaaabbbb".to_string();
+        let second = "ccccdddd".to_string();
+
+        store::save_message(&room.room_id, &json!({
+            "id": first,
+            "from": "pin-test",
+            "ts": 100,
+            "text": "first",
+            "v": "3.0",
+        }));
+        store::save_message(&room.room_id, &json!({
+            "id": second,
+            "from": "pin-test",
+            "ts": 101,
+            "text": "second",
+            "v": "3.0",
+        }));
+
+        (home, first, second)
     }
 
     #[test]
@@ -456,6 +494,27 @@ mod tests {
 
         assert_eq!(member_last_seen(&alpha.label), 0);
         assert!(member_last_seen(&beta.label) > 0);
+    }
+
+    #[test]
+    fn pin_and_unpin_round_trip() {
+        let (_home, first, _second) = setup_pin_room();
+
+        let (resolved, added) = pin("aaaa", None).unwrap();
+        assert_eq!(resolved, first);
+        assert!(added);
+
+        let pinned = pins(None).unwrap();
+        assert_eq!(pinned.len(), 1);
+        assert_eq!(pinned[0]["id"].as_str(), Some(first.as_str()));
+
+        let (_, added_again) = pin("aaaa", None).unwrap();
+        assert!(!added_again);
+
+        let (unpinned, removed) = unpin("aaaa", None).unwrap();
+        assert_eq!(unpinned, first);
+        assert!(removed);
+        assert!(pins(None).unwrap().is_empty());
     }
 }
 
