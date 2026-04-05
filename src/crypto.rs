@@ -68,10 +68,37 @@ fn hkdf_derive(ikm: &[u8], info_label: &[u8]) -> [u8; 32] {
     out
 }
 
-/// Test-only hash-ratchet primitive for experimental key evolution.
-#[cfg(test)]
-pub fn ratchet_key(current: &[u8; 32]) -> [u8; 32] {
-    hkdf_derive(current, b"agora-ratchet-v1")
+// ── Per-Sender Ratchet ─────────────────────────────────────────
+//
+// Provides no-backward-derivation: once a chain key is advanced,
+// previous message keys cannot be derived from the new state.
+// Does NOT provide full forward secrecy against room-secret
+// compromise (the initial chain is deterministic from room_key +
+// sender_id). See PR #12 for the design rationale.
+
+/// Initialize a per-sender chain key from the room key and sender ID.
+///
+/// Each sender gets a unique starting chain key so multi-sender
+/// rooms don't collide or need synchronized counters.
+pub fn init_sender_chain(room_key: &[u8; 32], sender_id: &str) -> [u8; 32] {
+    let salt = Salt::new(HKDF_SHA256, sender_id.as_bytes());
+    let prk = salt.extract(room_key);
+    let info = [b"agora-ratchet-v1".as_slice()];
+    let okm = prk.expand(&info, HkdfLen(32)).expect("HKDF expand failed");
+    let mut key = [0u8; 32];
+    okm.fill(&mut key).expect("HKDF fill failed");
+    key
+}
+
+/// Advance the chain key by one step. The old key should be deleted.
+pub fn advance_chain(chain_key: &[u8; 32]) -> [u8; 32] {
+    hkdf_derive(chain_key, b"agora-chain-advance")
+}
+
+/// Derive a message encryption key from the current chain key.
+/// This key is used for AES-256-GCM for a single message.
+pub fn derive_msg_key(chain_key: &[u8; 32]) -> [u8; 32] {
+    hkdf_derive(chain_key, b"agora-msg-key")
 }
 
 // ── Authenticated Encryption ────────────────────────────────────
@@ -247,21 +274,59 @@ mod tests {
     }
 
     #[test]
-    fn test_ratchet_advances() {
-        let key = derive_room_key("s", "r");
-        let next = ratchet_key(&key);
-        assert_ne!(key, next);
+    fn test_init_sender_chain_deterministic() {
+        let rk = derive_room_key("s", "r");
+        let c1 = init_sender_chain(&rk, "alice");
+        let c2 = init_sender_chain(&rk, "alice");
+        assert_eq!(c1, c2);
     }
 
     #[test]
-    fn test_ratchet_chain_unique() {
-        let mut key = derive_room_key("s", "r");
-        let mut seen = vec![key];
+    fn test_init_sender_chain_different_senders() {
+        let rk = derive_room_key("s", "r");
+        let c1 = init_sender_chain(&rk, "alice");
+        let c2 = init_sender_chain(&rk, "bob");
+        assert_ne!(c1, c2);
+    }
+
+    #[test]
+    fn test_advance_chain_unique() {
+        let rk = derive_room_key("s", "r");
+        let mut ck = init_sender_chain(&rk, "alice");
+        let mut seen = vec![ck];
         for _ in 0..10 {
-            key = ratchet_key(&key);
-            assert!(!seen.contains(&key));
-            seen.push(key);
+            ck = advance_chain(&ck);
+            assert!(!seen.contains(&ck));
+            seen.push(ck);
         }
+    }
+
+    #[test]
+    fn test_msg_key_differs_from_chain_key() {
+        let rk = derive_room_key("s", "r");
+        let ck = init_sender_chain(&rk, "alice");
+        let mk = derive_msg_key(&ck);
+        assert_ne!(ck, mk);
+    }
+
+    #[test]
+    fn test_msg_key_changes_after_advance() {
+        let rk = derive_room_key("s", "r");
+        let ck0 = init_sender_chain(&rk, "alice");
+        let mk0 = derive_msg_key(&ck0);
+        let ck1 = advance_chain(&ck0);
+        let mk1 = derive_msg_key(&ck1);
+        assert_ne!(mk0, mk1);
+    }
+
+    #[test]
+    fn test_encrypt_with_msg_key() {
+        let rk = derive_room_key("s", "r");
+        let ck = init_sender_chain(&rk, "alice");
+        let mk = derive_msg_key(&ck);
+        let blob = encrypt(b"hello ratchet", &mk, b"room").unwrap();
+        let pt = decrypt(&blob, &mk, b"room").unwrap();
+        assert_eq!(pt, b"hello ratchet");
     }
 
     #[test]
