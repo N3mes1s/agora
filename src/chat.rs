@@ -89,8 +89,25 @@ fn is_receipt(env: &serde_json::Value) -> bool {
     env["type"].as_str() == Some("receipt")
 }
 
+fn make_reaction(target_id: &str, emoji: &str) -> serde_json::Value {
+    json!({
+        "v": VERSION,
+        "id": msg_id(),
+        "from": store::get_agent_id(),
+        "ts": now(),
+        "type": "reaction",
+        "target_id": target_id,
+        "emoji": emoji,
+        "text": "",
+    })
+}
+
+fn is_reaction(env: &serde_json::Value) -> bool {
+    env["type"].as_str() == Some("reaction")
+}
+
 fn is_system_msg(env: &serde_json::Value) -> bool {
-    is_heartbeat(env) || is_receipt(env) || is_file_msg(env)
+    is_heartbeat(env) || is_receipt(env) || is_file_msg(env) || is_reaction(env)
 }
 
 /// Update last_seen for the sender of a message.
@@ -312,6 +329,15 @@ pub fn check(since: &str, room_label: Option<&str>) -> Result<Vec<serde_json::Va
             if is_heartbeat(&env) {
                 continue;
             }
+
+            // Process incoming reactions
+            if is_reaction(&env) {
+                if let (Some(target), Some(emoji)) = (env["target_id"].as_str(), env["emoji"].as_str()) {
+                    store::add_reaction(&room.room_id, target, from, emoji);
+                }
+                continue;
+            }
+
             store::save_message(&room.room_id, &env);
             read_ids.push(mid);
             new_msgs.push(env);
@@ -352,6 +378,25 @@ pub fn read_status(room_label: Option<&str>) -> Result<Vec<serde_json::Value>, S
         }));
     }
     Ok(status)
+}
+
+/// React to a message with an emoji.
+pub fn react(target_id: &str, emoji: &str, room_label: Option<&str>) -> Result<(), String> {
+    let room = resolve_room(room_label)?;
+    let room_key = crypto::derive_room_key(&room.secret, &room.room_id);
+    let env = make_reaction(target_id, emoji);
+    let encrypted = encrypt_envelope(&env, &room_key, &room.room_id);
+    transport::publish(&room.room_id, &encrypted);
+    store::save_message(&room.room_id, &env);
+    // Also store locally
+    store::add_reaction(&room.room_id, target_id, &store::get_agent_id(), emoji);
+    Ok(())
+}
+
+/// Get reactions for recent messages.
+pub fn reactions(room_label: Option<&str>) -> Result<std::collections::HashMap<String, Vec<(String, String)>>, String> {
+    let room = resolve_room(room_label)?;
+    Ok(store::load_reactions(&room.room_id))
 }
 
 pub fn info(room_label: Option<&str>) -> Result<serde_json::Value, String> {

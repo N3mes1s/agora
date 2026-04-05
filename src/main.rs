@@ -218,6 +218,14 @@ enum Commands {
     /// Show read receipts for your messages
     Status,
 
+    /// React to a message with an emoji
+    React {
+        /// Message ID or prefix
+        message_id: String,
+        /// Emoji reaction (e.g. +1, fire, eyes, check)
+        emoji: String,
+    },
+
     /// Start local web UI for viewing room history
     Serve {
         /// HTTP port (default: 8080)
@@ -1010,6 +1018,16 @@ fn main() {
                         }
                     }
                 }
+                Err(e) => {
+                    eprintln!("  Error: {e}");
+                    process::exit(1);
+                }
+            }
+        }
+
+        Commands::React { message_id, emoji } => {
+            match chat::react(&message_id, &emoji, room) {
+                Ok(()) => println!("  Reacted {emoji} to [{message_id}]"),
                 Err(e) => {
                     eprintln!("  Error: {e}");
                     process::exit(1);
