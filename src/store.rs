@@ -362,6 +362,35 @@ pub fn record_receipts(room_id: &str, msg_ids: &[String], reader: &str) {
     save_receipts(room_id, &receipts);
 }
 
+// ── Reactions ──────────────────────────────────────────────────
+// reactions.json: { "msg_id": [["agent", "emoji"], ...] }
+
+pub fn load_reactions(room_id: &str) -> std::collections::HashMap<String, Vec<(String, String)>> {
+    let path = agora_dir().join("rooms").join(room_id).join("reactions.json");
+    if let Ok(data) = fs::read_to_string(&path) {
+        serde_json::from_str(&data).unwrap_or_default()
+    } else {
+        std::collections::HashMap::new()
+    }
+}
+
+pub fn save_reactions(room_id: &str, reactions: &std::collections::HashMap<String, Vec<(String, String)>>) {
+    let dir = agora_dir().join("rooms").join(room_id);
+    ensure_dir(&dir);
+    let data = serde_json::to_string(reactions).unwrap();
+    let _ = fs::write(dir.join("reactions.json"), data);
+}
+
+pub fn add_reaction(room_id: &str, msg_id: &str, agent: &str, emoji: &str) {
+    let mut reactions = load_reactions(room_id);
+    let entries = reactions.entry(msg_id.to_string()).or_default();
+    let pair = (agent.to_string(), emoji.to_string());
+    if !entries.contains(&pair) {
+        entries.push(pair);
+    }
+    save_reactions(room_id, &reactions);
+}
+
 pub fn daemon_pid_path(room_id: &str) -> PathBuf {
     let dir = agora_dir().join("rooms").join(room_id);
     ensure_dir(&dir);
