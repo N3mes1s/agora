@@ -13,6 +13,11 @@ use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 fn agora_dir() -> PathBuf {
+    if let Ok(dir) = std::env::var("AGORA_DIR") {
+        if !dir.is_empty() {
+            return PathBuf::from(dir);
+        }
+    }
     dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("/tmp"))
         .join(".agora")
@@ -449,5 +454,72 @@ pub fn mark_receipted(room_id: &str, msg_id: &str) {
             ids = ids[ids.len() - 1000..].to_vec();
         }
         let _ = fs::write(&path, ids.join("\n"));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn isolated_dir() -> PathBuf {
+        let ts = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("agora-store-test-{ts}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        // Use AGORA_DIR override so we don't touch the real home dir.
+        unsafe { std::env::set_var("AGORA_DIR", &dir); }
+        dir
+    }
+
+    #[test]
+    fn receipt_save_and_load() {
+        let _dir = isolated_dir();
+        let room = "ag-test-room";
+
+        save_receipt(room, "msg1", "agent-a", 1000);
+        save_receipt(room, "msg1", "agent-b", 1001);
+
+        let receipts = load_receipts(room, "msg1");
+        assert_eq!(receipts.len(), 2);
+        let agents: Vec<&str> = receipts.iter().map(|(f, _)| f.as_str()).collect();
+        assert!(agents.contains(&"agent-a"));
+        assert!(agents.contains(&"agent-b"));
+    }
+
+    #[test]
+    fn receipt_deduplicates_same_agent() {
+        let _dir = isolated_dir();
+        let room = "ag-dedup-room";
+
+        save_receipt(room, "msg2", "agent-a", 1000);
+        save_receipt(room, "msg2", "agent-a", 1005); // second call should not add a duplicate
+
+        let receipts = load_receipts(room, "msg2");
+        assert_eq!(receipts.len(), 1);
+    }
+
+    #[test]
+    fn is_receipted_and_mark_receipted() {
+        let _dir = isolated_dir();
+        let room = "ag-mark-room";
+
+        assert!(!is_receipted(room, "msg3"));
+        mark_receipted(room, "msg3");
+        assert!(is_receipted(room, "msg3"));
+        // Idempotent
+        mark_receipted(room, "msg3");
+        assert!(is_receipted(room, "msg3"));
+    }
+
+    #[test]
+    fn receipts_isolated_per_message() {
+        let _dir = isolated_dir();
+        let room = "ag-isolated-room";
+
+        save_receipt(room, "msgA", "agent-x", 200);
+        assert!(load_receipts(room, "msgB").is_empty());
     }
 }
