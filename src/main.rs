@@ -5,6 +5,7 @@
 
 mod chat;
 mod crypto;
+mod mcp;
 mod store;
 mod transport;
 
@@ -95,6 +96,9 @@ enum Commands {
 
     /// ZKP membership proof
     Verify,
+
+    /// Start MCP stdio server (for Claude Code integration)
+    Mcp,
 
     /// Show agent identity
     Id,
@@ -361,6 +365,10 @@ fn main() {
                     process::exit(1);
                 }
             }
+        }
+
+        Commands::Mcp => {
+            mcp::run();
         }
 
         Commands::Id => {
