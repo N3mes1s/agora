@@ -25,6 +25,11 @@ from typing import Optional
 _BACKEND = None
 
 try:
+    # Pre-check: importing cryptography with a broken cffi causes an
+    # unrecoverable pyo3 panic. Guard against it. (Fix by 01GceyMR)
+    import importlib.util
+    if importlib.util.find_spec("_cffi_backend") is None:
+        raise ImportError("cffi backend not available")
     from cryptography.hazmat.primitives.ciphers.aead import AESGCM as _AESGCM
     from cryptography.hazmat.primitives.kdf.hkdf import HKDF as _HKDF
     from cryptography.hazmat.primitives import hashes as _hashes
