@@ -32,6 +32,13 @@ fn now() -> u64 {
 // ── Identity ────────────────────────────────────────────────────
 
 pub fn get_agent_id() -> String {
+    // Env override — lets multiple runtimes on the same machine have distinct IDs.
+    if let Ok(id) = std::env::var("AGORA_AGENT_ID") {
+        if !id.is_empty() {
+            return id;
+        }
+    }
+
     let id_file = agora_dir().join("identity.json");
     if let Ok(data) = fs::read_to_string(&id_file) {
         if let Ok(v) = serde_json::from_str::<serde_json::Value>(&data) {
