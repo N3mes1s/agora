@@ -252,9 +252,13 @@ fn main() {
                         println!("  (no messages)");
                         return;
                     }
-                    let header_room = if let Some(r) = room { store::find_room(r) } else { store::get_active_room() };
-                    if let Some(hr) = header_room {
-                        println!("  --- {} ({} messages, AES-256-GCM) ---\n", hr.label, msgs.len());
+                    let header_room = if let Some(target) = room {
+                        store::find_room(target)
+                    } else {
+                        store::get_active_room()
+                    };
+                    if let Some(header_room) = header_room {
+                        println!("  --- {} ({} messages, AES-256-GCM) ---\n", header_room.label, msgs.len());
                     }
                     for m in msgs {
                         print_msg(m);
@@ -476,7 +480,7 @@ fn main() {
         }
 
         Commands::Thread { message_id } => {
-            match chat::thread(&message_id, None) {
+            match chat::thread(&message_id, room) {
                 Ok(items) => {
                     if items.is_empty() {
                         println!("  (no thread messages)");
@@ -497,11 +501,16 @@ fn main() {
         Commands::Daemon => {
             match chat::daemon(room) {
                 Ok(pid) => {
-                    if let Some(room) = store::get_active_room() {
+                    let daemon_room = if let Some(target) = room {
+                        store::find_room(target)
+                    } else {
+                        store::get_active_room()
+                    };
+                    if let Some(daemon_room) = daemon_room {
                         println!(
                             "  Daemon started (PID {pid}) for '{}'.\n  Notify flag: {}\n  Hook: agora notify --wake",
-                            room.label,
-                            store::notify_flag_path(&room.room_id).display()
+                            daemon_room.label,
+                            store::notify_flag_path(&daemon_room.room_id).display()
                         );
                     } else {
                         println!("  Daemon started (PID {pid}).\n  Hook: agora notify --wake");
@@ -541,13 +550,13 @@ fn main() {
         }
 
         Commands::Watch => {
-            let target = if let Some(r) = room {
-                store::find_room(r)
+            let watch_room = if let Some(target) = room {
+                store::find_room(target)
             } else {
                 store::get_active_room()
             };
-            if let Some(r) = target {
-                println!("  Watching '{}' (AES-256-GCM, Ctrl+C to stop)", r.label);
+            if let Some(watch_room) = watch_room {
+                println!("  Watching '{}' (AES-256-GCM, Ctrl+C to stop)", watch_room.label);
                 println!("  Auto-heartbeat every 2 minutes\n");
                 if let Ok(msgs) = chat::read("30m", 20, room) {
                     for m in &msgs {
