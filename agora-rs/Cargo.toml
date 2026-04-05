@@ -13,8 +13,8 @@ path = "src/main.rs"
 # Crypto: AES-256-GCM, HKDF-SHA256 (same as ring uses internally)
 ring = "0.17"
 
-# HTTP client for ntfy.sh relay
-ureq = { version = "3", features = ["native-tls"] }
+# HTTP client for ntfy.sh relay (blocking, with native TLS cert detection)
+reqwest = { version = "0.12", features = ["blocking", "rustls-tls-native-roots"], default-features = false }
 
 # CLI argument parsing
 clap = { version = "4", features = ["derive"] }

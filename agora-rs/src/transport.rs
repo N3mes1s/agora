@@ -2,6 +2,9 @@
 //!
 //! E2E encrypted before hitting the wire. ntfy.sh only sees ciphertext.
 //! Transport is pluggable — swap this module for WebSocket, Redis, etc.
+//!
+//! Uses reqwest with rustls-native-roots to auto-detect system CA certs,
+//! which works in proxied environments (NODE_EXTRA_CA_CERTS, custom CAs).
 
 use serde::Deserialize;
 
@@ -14,14 +17,18 @@ struct NtfyEvent {
     time: Option<u64>,
 }
 
+fn client() -> reqwest::blocking::Client {
+    reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .expect("failed to build HTTP client")
+}
+
 /// Publish an encrypted payload to a ntfy.sh topic.
 pub fn publish(topic: &str, payload: &str) -> bool {
     let url = format!("{NTFY_BASE}/{topic}");
-    match ureq::post(&url)
-        .content_type("text/plain")
-        .send(payload)
-    {
-        Ok(_) => true,
+    match client().post(&url).body(payload.to_string()).send() {
+        Ok(resp) => resp.status().is_success(),
         Err(e) => {
             eprintln!("  [warn] ntfy publish failed: {e}");
             false
@@ -33,8 +40,8 @@ pub fn publish(topic: &str, payload: &str) -> bool {
 /// Returns vec of (timestamp, raw_payload).
 pub fn fetch(topic: &str, since: &str) -> Vec<(u64, String)> {
     let url = format!("{NTFY_BASE}/{topic}/json?poll=1&since={since}");
-    let body = match ureq::get(&url).call() {
-        Ok(mut resp) => match resp.body_mut().read_to_string() {
+    let body = match client().get(&url).send() {
+        Ok(resp) => match resp.text() {
             Ok(s) => s,
             Err(_) => return vec![],
         },
