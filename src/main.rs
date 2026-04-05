@@ -74,6 +74,9 @@ enum Commands {
         label: String,
     },
 
+    /// Leave a room and remove its local state
+    Leave,
+
     /// Show room info + key fingerprint
     Info,
 
@@ -317,6 +320,26 @@ fn main() {
                 }
                 None => {
                     eprintln!("  Room '{label}' not found. Run: agora rooms");
+                    process::exit(1);
+                }
+            }
+        }
+
+        Commands::Leave => {
+            match chat::leave(room) {
+                Ok(info) => {
+                    println!("  Left room '{}'.", info["label"].as_str().unwrap_or("?"));
+                    if info["daemon_stopped"].as_bool().unwrap_or(false) {
+                        println!("  Daemon stopped.");
+                    }
+                    if let Some(active_room) = info["active_room"].as_str() {
+                        println!("  Active room: {active_room}");
+                    } else {
+                        println!("  No rooms left.");
+                    }
+                }
+                Err(e) => {
+                    eprintln!("  Error: {e}");
                     process::exit(1);
                 }
             }
