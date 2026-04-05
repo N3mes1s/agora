@@ -479,6 +479,38 @@ pub fn whois(agent_id: &str, room_label: Option<&str>) -> Result<Option<store::A
     Ok(store::get_profile(&room.room_id, agent_id))
 }
 
+/// Search across ALL joined rooms.
+pub fn grep(query: &str, use_regex: bool) -> Result<Vec<(String, serde_json::Value)>, String> {
+    let rooms = store::load_registry();
+    let re = if use_regex {
+        Some(regex::RegexBuilder::new(query)
+            .case_insensitive(true)
+            .build()
+            .map_err(|e| format!("Invalid regex: {e}"))?)
+    } else {
+        None
+    };
+    let query_lower = query.to_lowercase();
+
+    let mut results = Vec::new();
+    for room in &rooms {
+        let msgs = store::load_messages(&room.room_id, 604800);
+        for msg in msgs {
+            let text = msg["text"].as_str().unwrap_or("");
+            let matches = if let Some(ref re) = re {
+                re.is_match(text)
+            } else {
+                text.to_lowercase().contains(&query_lower)
+            };
+            if matches {
+                results.push((room.label.clone(), msg));
+            }
+        }
+    }
+    results.sort_by_key(|(_, m)| m["ts"].as_u64().unwrap_or(0));
+    Ok(results)
+}
+
 /// Broadcast a message to all joined rooms.
 pub fn broadcast(message: &str) -> Result<Vec<(String, String)>, String> {
     let rooms = store::load_registry();

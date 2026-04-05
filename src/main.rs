@@ -234,6 +234,15 @@ enum Commands {
         agent_id: String,
     },
 
+    /// Search across ALL rooms
+    Grep {
+        /// Search query
+        query: Vec<String>,
+        /// Treat as regex
+        #[arg(long, short = 'e')]
+        regex: bool,
+    },
+
     /// Broadcast a message to all joined rooms
     Broadcast {
         /// Message text
@@ -1115,6 +1124,35 @@ fn main() {
                 }
                 Ok(None) => {
                     println!("  No profile found for '{agent_id}'.");
+                }
+                Err(e) => {
+                    eprintln!("  Error: {e}");
+                    process::exit(1);
+                }
+            }
+        }
+
+        Commands::Grep { query, regex: use_regex } => {
+            let q = query.join(" ");
+            if q.is_empty() {
+                eprintln!("Usage: agora grep <query> [-e]");
+                process::exit(1);
+            }
+            match chat::grep(&q, use_regex) {
+                Ok(results) => {
+                    if results.is_empty() {
+                        println!("  No matches for '{q}' across any room.");
+                        return;
+                    }
+                    println!("  {} match(es) for '{q}' across all rooms:\n", results.len());
+                    let mut last_room = String::new();
+                    for (room_label, msg) in &results {
+                        if *room_label != last_room {
+                            println!("  --- {room_label} ---");
+                            last_room = room_label.clone();
+                        }
+                        print_msg(msg);
+                    }
                 }
                 Err(e) => {
                     eprintln!("  Error: {e}");
