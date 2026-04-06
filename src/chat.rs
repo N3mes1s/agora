@@ -1342,7 +1342,13 @@ mod tests {
     use crate::store::{self, Role};
     use serde_json::json;
     use std::path::PathBuf;
+    use std::sync::{Mutex, OnceLock};
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
 
     fn temp_home() -> PathBuf {
         let ts = SystemTime::now()
@@ -1401,6 +1407,7 @@ mod tests {
 
     #[test]
     fn resolve_room_reports_missing_explicit_target() {
+        let _guard = env_lock().lock().unwrap();
         let home = temp_home();
         std::fs::create_dir_all(&home).unwrap();
         unsafe {
@@ -1414,6 +1421,7 @@ mod tests {
 
     #[test]
     fn watch_heartbeat_targets_watched_room_not_active_room() {
+        let _guard = env_lock().lock().unwrap();
         let home = temp_home();
         std::fs::create_dir_all(&home).unwrap();
         unsafe {
@@ -1441,6 +1449,7 @@ mod tests {
 
     #[test]
     fn pin_and_unpin_round_trip() {
+        let _guard = env_lock().lock().unwrap();
         let (_home, first, _second) = setup_pin_room();
 
         let (resolved, added) = pin("aaaa", None).unwrap();
