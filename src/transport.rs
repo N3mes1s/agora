@@ -1,14 +1,26 @@
-//! Agora transport layer — ntfy.sh relay.
+//! Agora transport layer — ntfy relay.
 //!
-//! E2E encrypted before hitting the wire. ntfy.sh only sees ciphertext.
+//! E2E encrypted before hitting the wire. The relay only sees ciphertext.
 //! Transport is pluggable — swap this module for WebSocket, Redis, etc.
 //!
-//! Uses reqwest with rustls-native-roots to auto-detect system CA certs,
-//! which works in proxied environments (NODE_EXTRA_CA_CERTS, custom CAs).
+//! Relay URL is configurable:
+//!   AGORA_RELAY_URL=https://ntfy.theagora.dev  (custom relay)
+//!   Default: https://ntfy.sh
+//!
+//! Dual-publish for zero-downtime migration:
+//!   AGORA_RELAY_MIRROR=https://ntfy.sh  (publish to both during transition)
 
 use serde::Deserialize;
 
-const NTFY_BASE: &str = "https://ntfy.sh";
+const DEFAULT_RELAY: &str = "https://ntfy.sh";
+
+fn relay_url() -> String {
+    std::env::var("AGORA_RELAY_URL").unwrap_or_else(|_| DEFAULT_RELAY.to_string())
+}
+
+fn mirror_url() -> Option<String> {
+    std::env::var("AGORA_RELAY_MIRROR").ok()
+}
 
 #[derive(Debug, Deserialize)]
 struct NtfyEvent {
@@ -31,22 +43,33 @@ fn streaming_client() -> reqwest::blocking::Client {
         .expect("failed to build streaming HTTP client")
 }
 
-/// Publish an encrypted payload to a ntfy.sh topic.
+/// Publish an encrypted payload to the relay topic.
+/// Also publishes to the mirror if AGORA_RELAY_MIRROR is set.
 pub fn publish(topic: &str, payload: &str) -> bool {
-    let url = format!("{NTFY_BASE}/{topic}");
-    match client().post(&url).body(payload.to_string()).send() {
+    let base = relay_url();
+    let url = format!("{base}/{topic}");
+    let ok = match client().post(&url).body(payload.to_string()).send() {
         Ok(resp) => resp.status().is_success(),
         Err(e) => {
-            eprintln!("  [warn] ntfy publish failed: {e}");
+            eprintln!("  [warn] relay publish failed: {e}");
             false
         }
+    };
+
+    // Dual-publish to mirror for zero-downtime migration
+    if let Some(mirror) = mirror_url() {
+        let mirror_url = format!("{mirror}/{topic}");
+        let _ = client().post(&mirror_url).body(payload.to_string()).send();
     }
+
+    ok
 }
 
-/// Fetch recent messages from a ntfy.sh topic.
+/// Fetch recent messages from the relay topic.
 /// Returns vec of (timestamp, raw_payload).
 pub fn fetch(topic: &str, since: &str) -> Vec<(u64, String)> {
-    let url = format!("{NTFY_BASE}/{topic}/json?poll=1&since={since}");
+    let base = relay_url();
+    let url = format!("{base}/{topic}/json?poll=1&since={since}");
     let body = match client().get(&url).send() {
         Ok(resp) => match resp.text() {
             Ok(s) => s,
@@ -72,14 +95,15 @@ pub fn fetch(topic: &str, since: &str) -> Vec<(u64, String)> {
     events
 }
 
-/// Open a streaming SSE connection to a ntfy.sh topic.
+/// Open a streaming SSE connection to the relay topic.
 /// Calls `on_message(timestamp, raw_payload)` for each message.
 /// Blocks forever. Returns on connection error.
 pub fn stream<F>(topic: &str, mut on_message: F)
 where
     F: FnMut(u64, &str),
 {
-    let url = format!("{NTFY_BASE}/{topic}/json");
+    let base = relay_url();
+    let url = format!("{base}/{topic}/json");
     let resp = match streaming_client().get(&url).send() {
         Ok(r) => r,
         Err(e) => {
