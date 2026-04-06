@@ -512,10 +512,6 @@ fn decrypt_signed_payload(raw: &str, room_key: &[u8; 32], room_id: &str) -> Opti
     let sig = BASE64.decode(&wire.sig).ok()?;
 
     if !crypto::verify_message_signature(&public_key, &signing_input, &sig) {
-        eprintln!(
-            "  [warn] dropped message from '{}' in room '{}' due to invalid signature",
-            wire.from, room_id
-        );
         return Some(make_auth_warning(
             room_id,
             &wire,
@@ -529,10 +525,6 @@ fn decrypt_signed_payload(raw: &str, room_key: &[u8; 32], room_id: &str) -> Opti
 
     if let Some(trusted) = store::get_trusted_signing_key(&wire.from) {
         if trusted != wire.signing_pubkey {
-            eprintln!(
-                "  [warn] dropped message from '{}' in room '{}' due to signing key mismatch",
-                wire.from, room_id
-            );
             return Some(make_auth_warning(
                 room_id,
                 &wire,
@@ -554,10 +546,6 @@ fn decrypt_signed_payload(raw: &str, room_key: &[u8; 32], room_id: &str) -> Opti
     let raw = String::from_utf8(plaintext).ok()?;
     let mut env = parse_envelope(&raw)?;
     if env["from"].as_str() != Some(wire.from.as_str()) {
-        eprintln!(
-            "  [warn] dropped message in room '{}' due to sender/signature mismatch",
-            room_id
-        );
         return Some(make_auth_warning(
             room_id,
             &wire,
