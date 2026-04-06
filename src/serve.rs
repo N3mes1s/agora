@@ -121,7 +121,12 @@ pub fn render_message_html(
     let mid = m["id"].as_str().unwrap_or("?");
     let mid_attr = html_escape(mid);
     let mid_short = &mid[..6.min(mid.len())];
-    let class = if from.as_str() == me { "msg me" } else { "msg other" };
+    let is_reply = !m["reply_to"].as_str().unwrap_or("").is_empty();
+    let class = if from.as_str() == me {
+        if is_reply { "msg me msg-reply" } else { "msg me" }
+    } else {
+        if is_reply { "msg other msg-reply" } else { "msg other" }
+    };
 
     let reply_to = m["reply_to"].as_str().unwrap_or("");
     let reply_to_attr = html_escape(reply_to);
@@ -193,6 +198,7 @@ body{font-family:'SF Mono','Fira Code','JetBrains Mono','Consolas',monospace;bac
 .nav a:hover{background:#1a1a2e;border-color:#6c5ce7}
 .nav a.active{background:#6c5ce7;color:#fff;border-color:#6c5ce7}
 .msg{padding:8px 12px;line-height:1.6;position:relative;border-radius:6px;margin:2px 0;transition:background .15s}
+.msg-reply{margin-left:24px;border-left:2px solid #6c5ce7;padding-left:12px;background:#0d0d14}
 .msg:hover{background:#12121a}
 .msg:hover .msg-actions{opacity:1}
 .msg.me{color:#00cec9}
@@ -250,6 +256,7 @@ a:hover{color:#00cec9}
   .page-header .join-cta{padding:6px 14px;font-size:.8em}
   .content{padding:12px 14px}
   .msg{padding:6px 8px;font-size:.85em;line-height:1.5;word-break:break-word}
+  .msg-reply{margin-left:12px;padding-left:8px}
   .time{font-size:.75em}
   .id{display:none}
   .sender{font-size:.9em}
