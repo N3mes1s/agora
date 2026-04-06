@@ -161,16 +161,86 @@ fn encrypt_envelope(env: &serde_json::Value, room_key: &[u8; 32], room_id: &str)
     let plaintext = serde_json::to_string(env).unwrap();
     let aad = room_id.as_bytes();
     let blob = crypto::encrypt(plaintext.as_bytes(), &enc_key, aad).expect("encrypt failed");
-    BASE64.encode(&blob)
+    let payload = BASE64.encode(&blob);
+    let from = env["from"].as_str().unwrap_or("");
+
+    let pkcs8 = store::load_or_create_signing_keypair(from).expect("signing key load failed");
+    let signing_pubkey = BASE64
+        .encode(crypto::signing_public_key(&pkcs8).expect("signing pubkey derivation failed"));
+    store::trust_signing_key(from, &signing_pubkey);
+
+    let signing_input = signing_message_bytes(room_id, from, &signing_pubkey, &payload);
+    let sig = BASE64.encode(
+        crypto::sign_message(&pkcs8, &signing_input).expect("message signing failed")
+    );
+
+    serde_json::to_string(&SignedWirePayload {
+        v: SIGNED_WIRE_VERSION.to_string(),
+        from: from.to_string(),
+        payload,
+        signing_pubkey,
+        sig,
+    })
+    .unwrap()
+}
+
+fn decrypt_signed_payload(raw: &str, room_key: &[u8; 32], room_id: &str) -> Option<serde_json::Value> {
+    let wire = serde_json::from_str::<SignedWirePayload>(raw).ok()?;
+    let signing_input =
+        signing_message_bytes(room_id, &wire.from, &wire.signing_pubkey, &wire.payload);
+    let public_key = BASE64.decode(&wire.signing_pubkey).ok()?;
+    let sig = BASE64.decode(&wire.sig).ok()?;
+
+    if !crypto::verify_message_signature(&public_key, &signing_input, &sig) {
+        eprintln!(
+            "  [warn] dropped message from '{}' in room '{}' due to invalid signature",
+            wire.from, room_id
+        );
+        return None;
+    }
+
+    if let Some(trusted) = store::get_trusted_signing_key(&wire.from) {
+        if trusted != wire.signing_pubkey {
+            eprintln!(
+                "  [warn] dropped message from '{}' in room '{}' due to signing key mismatch",
+                wire.from, room_id
+            );
+            return None;
+        }
+    } else {
+        store::trust_signing_key(&wire.from, &wire.signing_pubkey);
+    }
+
+    let (enc_key, _) = crypto::derive_message_keys(room_key);
+    let blob = BASE64.decode(&wire.payload).ok()?;
+    let aad = room_id.as_bytes();
+    let plaintext = crypto::decrypt(&blob, &enc_key, aad).ok()?;
+    let raw = String::from_utf8(plaintext).ok()?;
+    let mut env = parse_envelope(&raw)?;
+    if env["from"].as_str() != Some(wire.from.as_str()) {
+        eprintln!(
+            "  [warn] dropped message in room '{}' due to sender/signature mismatch",
+            room_id
+        );
+        return None;
+    }
+    env["_auth"] = json!("verified");
+    Some(env)
 }
 
 fn decrypt_payload(payload: &str, room_key: &[u8; 32], room_id: &str) -> Option<serde_json::Value> {
+    if payload.trim_start().starts_with('{') {
+        return decrypt_signed_payload(payload, room_key, room_id);
+    }
+
     let (enc_key, _) = crypto::derive_message_keys(room_key);
     let blob = BASE64.decode(payload).ok()?;
     let aad = room_id.as_bytes();
     let plaintext = crypto::decrypt(&blob, &enc_key, aad).ok()?;
     let raw = String::from_utf8(plaintext).ok()?;
-    parse_envelope(&raw)
+    let mut env = parse_envelope(&raw)?;
+    env["_auth"] = json!("unsigned");
+    Some(env)
 }
 
 // ── Room Operations ─────────────────────────────────────────────
@@ -1483,7 +1553,13 @@ pub fn download_file(file_id: &str, out_path: Option<&str>, room_label: Option<&
 
 #[cfg(test)]
 mod tests {
+    use base64::Engine;
     use super::{pin, pins, resolve_room, send_watch_heartbeat, unpin};
+    use super::{
+        decrypt_payload, encrypt_envelope, make_envelope, signing_message_bytes, SignedWirePayload,
+        SIGNED_WIRE_VERSION, BASE64,
+    };
+    use crate::crypto;
     use crate::store::{self, Role};
     use serde_json::json;
     use std::path::PathBuf;
@@ -1612,6 +1688,92 @@ mod tests {
         assert_eq!(unpinned, first);
         assert!(removed);
         assert!(pins(None).unwrap().is_empty());
+    }
+
+    #[test]
+    fn signed_payload_round_trip_marks_verified() {
+        let _guard = env_lock().lock().unwrap();
+        let home = temp_home();
+        std::fs::create_dir_all(&home).unwrap();
+        unsafe {
+            std::env::set_var("HOME", &home);
+            std::env::set_var("AGORA_AGENT_ID", "sign-test");
+        }
+
+        let room = store::add_room("ag-sign", "secret-sign", "sign", Role::Admin);
+        let room_key = crypto::derive_room_key(&room.secret, &room.room_id);
+        let env = make_envelope("hello signed world", None);
+        let wire = encrypt_envelope(&env, &room_key, &room.room_id);
+        let decrypted = decrypt_payload(&wire, &room_key, &room.room_id).unwrap();
+
+        assert_eq!(decrypted["text"].as_str(), Some("hello signed world"));
+        assert_eq!(decrypted["_auth"].as_str(), Some("verified"));
+        assert!(store::get_trusted_signing_key("sign-test").is_some());
+    }
+
+    #[test]
+    fn legacy_payload_round_trip_marks_unsigned() {
+        let _guard = env_lock().lock().unwrap();
+        let room_key = crypto::derive_room_key("secret-legacy", "ag-legacy");
+        let env = json!({
+            "v": "3.0",
+            "id": "legacy01",
+            "from": "legacy-agent",
+            "ts": 123,
+            "text": "legacy message",
+        });
+        let plaintext = serde_json::to_string(&env).unwrap();
+        let (enc_key, _) = crypto::derive_message_keys(&room_key);
+        let blob = crypto::encrypt(plaintext.as_bytes(), &enc_key, b"ag-legacy").unwrap();
+        let raw = BASE64.encode(&blob);
+
+        let decrypted = decrypt_payload(&raw, &room_key, "ag-legacy").unwrap();
+        assert_eq!(decrypted["text"].as_str(), Some("legacy message"));
+        assert_eq!(decrypted["_auth"].as_str(), Some("unsigned"));
+    }
+
+    #[test]
+    fn signed_payload_rejects_trusted_key_mismatch() {
+        let _guard = env_lock().lock().unwrap();
+        let home = temp_home();
+        std::fs::create_dir_all(&home).unwrap();
+        unsafe {
+            std::env::set_var("HOME", &home);
+            std::env::set_var("AGORA_AGENT_ID", "alice");
+        }
+
+        let room = store::add_room("ag-sign-mismatch", "secret-sign-mismatch", "sign-mismatch", Role::Admin);
+        let room_key = crypto::derive_room_key(&room.secret, &room.room_id);
+
+        let trusted_env = make_envelope("trusted", None);
+        let trusted_wire = encrypt_envelope(&trusted_env, &room_key, &room.room_id);
+        assert!(decrypt_payload(&trusted_wire, &room_key, &room.room_id).is_some());
+
+        let forged_env = json!({
+            "v": "3.0",
+            "id": "forged01",
+            "from": "alice",
+            "ts": 456,
+            "text": "forged",
+        });
+        let plaintext = serde_json::to_string(&forged_env).unwrap();
+        let (enc_key, _) = crypto::derive_message_keys(&room_key);
+        let blob = crypto::encrypt(plaintext.as_bytes(), &enc_key, room.room_id.as_bytes()).unwrap();
+        let payload = BASE64.encode(&blob);
+
+        let alt_pkcs8 = crypto::generate_signing_keypair_pkcs8().unwrap();
+        let alt_pubkey = BASE64.encode(crypto::signing_public_key(&alt_pkcs8).unwrap());
+        let signing_input = signing_message_bytes(&room.room_id, "alice", &alt_pubkey, &payload);
+        let sig = BASE64.encode(crypto::sign_message(&alt_pkcs8, &signing_input).unwrap());
+        let forged_wire = serde_json::to_string(&SignedWirePayload {
+            v: SIGNED_WIRE_VERSION.to_string(),
+            from: "alice".to_string(),
+            payload,
+            signing_pubkey: alt_pubkey,
+            sig,
+        }).unwrap();
+
+        assert!(decrypt_payload(&forged_wire, &room_key, &room.room_id).is_none());
     }
 }
 

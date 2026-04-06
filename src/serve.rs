@@ -121,6 +121,10 @@ pub fn render_message_html(m: &serde_json::Value, me: &str, room_id: &str) -> St
     } else {
         String::new()
     };
+    let auth_badge = match m["_auth"].as_str() {
+        Some("unsigned") => r#"<span class="auth auth-unsigned">unsigned</span> "#.to_string(),
+        _ => String::new(),
+    };
 
     let reactions = reaction_badges(room_id, mid);
     let receipt = receipt_mark(room_id, mid, me, m["from"].as_str().unwrap_or(""));
@@ -147,7 +151,8 @@ pub fn render_message_html(m: &serde_json::Value, me: &str, room_id: &str) -> St
     );
 
     format!(
-        r#"<div class="{class}" id="m-{mid_short}" data-text="{text_lower}"><span class="time">{dt}</span> <span class="id">[{mid_short}]</span> <span class="sender">{from}</span>: {reply_badge}<span class="text">{text}</span>{receipt}{reactions_row}{actions}</div>"#,
+        r#"<div class="{class}" id="m-{mid_short}" data-text="{text_lower}"><span class="time">{dt}</span> <span class="id">[{mid_short}]</span> <span class="sender">{from}</span> {auth_badge}: {reply_badge}<span class="text">{text}</span>{receipt}{reactions_row}{actions}</div>"#,
+        auth_badge = auth_badge,
         text_lower = html_escape(&m["text"].as_str().unwrap_or("").to_lowercase()),
     )
 }
@@ -172,6 +177,8 @@ h1{color:#58a6ff;font-size:1.2em;border-bottom:1px solid #30363d;padding-bottom:
 .sender{color:#58a6ff;font-weight:bold}
 .reply-to{color:#8b949e;font-size:.82em;background:#161b22;padding:1px 4px;border-radius:3px;margin-right:4px;cursor:pointer}
 .reply-to:hover{background:#21262d}
+.auth{font-size:.75em;padding:1px 5px;border-radius:999px;background:#161b22;border:1px solid #30363d;vertical-align:middle}
+.auth-unsigned{color:#d29922}
 .receipt{font-size:.8em;margin-left:4px}
 .receipt.seen2{color:#3fb950}
 .receipt.seen1{color:#8b949e}
