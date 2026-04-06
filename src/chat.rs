@@ -56,8 +56,7 @@ struct SomaVolatility {
 #[derive(Debug, Clone)]
 pub struct DiscoveredCapabilityCard {
     pub room_label: String,
-    pub room_id: String,
-    pub card: store::AgentCapabilityCard,
+    pub card: store::CapabilityCard,
     pub overlap: Vec<String>,
 }
 
@@ -141,7 +140,7 @@ fn is_reaction(env: &serde_json::Value) -> bool {
 }
 
 fn is_capability_card(env: &serde_json::Value) -> bool {
-    env["type"].as_str() == Some("card")
+    matches!(env["type"].as_str(), Some("card" | "capability_card"))
 }
 
 fn make_invite_redemption(
@@ -329,20 +328,7 @@ fn ingest_auxiliary_event(room_id: &str, env: &serde_json::Value) {
     }
 
     if is_capability_card(env) {
-        let capabilities = env["card_capabilities"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter_map(|v| v.as_str().map(|s| s.to_string()))
-            .collect();
-        let card = store::AgentCapabilityCard {
-            agent_id: from.to_string(),
-            capabilities,
-            summary: env["card_summary"].as_str().map(|s| s.to_string()),
-            updated_at: env["ts"].as_u64().unwrap_or(0),
-            auth: env["_auth"].as_str().unwrap_or("unsigned").to_string(),
-        };
-        store::upsert_capability_card(room_id, &card);
+        process_card_message(room_id, env);
         return;
     }
 
@@ -747,6 +733,11 @@ pub fn check(since: &str, room_label: Option<&str>) -> Result<Vec<serde_json::Va
                 continue;
             }
 
+            if is_capability_card(&env) {
+                process_card_message(&room.room_id, &env);
+                continue;
+            }
+
             // Process incoming profiles
             if env["type"].as_str() == Some("profile") {
                 let profile = store::AgentProfile {
@@ -928,19 +919,45 @@ pub fn directory() -> Result<Vec<RoomInfo>, String> {
 
 // ── Capability Cards ───────────────────────────────────────────
 
+fn normalize_capability_terms(raw: &str) -> Vec<String> {
+    let mut seen = HashSet::new();
+    raw.split(',')
+        .map(|item| item.trim().to_lowercase())
+        .filter(|item| !item.is_empty())
+        .filter(|item| seen.insert(item.clone()))
+        .collect()
+}
+
 pub fn card_set(capabilities: &[String], description: Option<&str>, room_label: Option<&str>) -> Result<(), String> {
     let room = resolve_room(room_label)?;
     let me = store::get_agent_id();
+    let joined = capabilities.join(",");
+    let capabilities = normalize_capability_terms(&joined);
+    if capabilities.is_empty() {
+        return Err("Provide at least one capability (for example: rust,python,kubernetes).".to_string());
+    }
     let card = store::CapabilityCard {
-        agent_id: me.clone(), capabilities: capabilities.to_vec(),
-        available: true, description: description.map(|s| s.to_string()), updated_at: now(),
+        agent_id: me.clone(),
+        capabilities: capabilities.clone(),
+        available: true,
+        description: description.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()),
+        updated_at: now(),
+        auth: "verified".to_string(),
     };
     store::save_card(&card);
+    store::save_peer_card(&room.room_id, &card);
     let room_key = crypto::derive_room_key(&room.secret, &room.room_id);
     let env = json!({
-        "v": VERSION, "id": msg_id(), "from": me, "ts": now(),
-        "type": "capability_card", "capabilities": card.capabilities,
-        "available": card.available, "description": card.description,
+        "v": VERSION,
+        "id": msg_id(),
+        "from": me,
+        "ts": now(),
+        "type": "card",
+        "card_capabilities": card.capabilities,
+        "card_summary": card.description,
+        "capabilities": card.capabilities,
+        "description": card.description,
+        "available": card.available,
         "text": format!("[card] {} — capabilities: {}", me, card.capabilities.join(", ")),
     });
     let encrypted = encrypt_envelope(&env, &room_key, &room.room_id);
@@ -956,39 +973,74 @@ pub fn card_show(agent_id: Option<&str>, room_label: Option<&str>) -> Result<Opt
     Ok(cards.into_iter().find(|c| c.agent_id == agent_id.unwrap()))
 }
 
-pub fn discover(need: &str, room_label: Option<&str>) -> Result<Vec<store::CapabilityCard>, String> {
-    let need_lower = need.to_lowercase();
-    let needs: Vec<&str> = need_lower.split(',').map(|s| s.trim()).collect();
+pub fn discover(need: &str, room_label: Option<&str>) -> Result<Vec<DiscoveredCapabilityCard>, String> {
+    let needs = normalize_capability_terms(need);
+    if needs.is_empty() {
+        return Err("Provide at least one capability via comma-separated terms.".to_string());
+    }
+    let me = store::get_agent_id();
     let rooms = if let Some(label) = room_label {
         vec![resolve_room(Some(label))?]
     } else {
         store::load_registry()
     };
     let mut results = Vec::new();
-    for room in &rooms {
+    for room in rooms {
         for card in store::load_peer_cards(&room.room_id) {
-            let matches = needs.iter().all(|n| card.capabilities.iter().any(|c| c.to_lowercase().contains(n)));
-            if matches && !results.iter().any(|r: &store::CapabilityCard| r.agent_id == card.agent_id) {
-                results.push(card);
+            if card.agent_id == me {
+                continue;
             }
+            let overlap: Vec<String> = needs
+                .iter()
+                .filter(|need| card.capabilities.iter().any(|cap| cap == *need))
+                .cloned()
+                .collect();
+            if overlap.is_empty() {
+                continue;
+            }
+            results.push(DiscoveredCapabilityCard {
+                room_label: room.label.clone(),
+                card,
+                overlap,
+            });
         }
     }
-    results.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+    results.sort_by(|a, b| {
+        b.overlap
+            .len()
+            .cmp(&a.overlap.len())
+            .then_with(|| (b.card.auth == "verified").cmp(&(a.card.auth == "verified")))
+            .then_with(|| b.card.updated_at.cmp(&a.card.updated_at))
+            .then_with(|| a.card.agent_id.cmp(&b.card.agent_id))
+    });
     Ok(results)
 }
 
 pub fn process_card_message(room_id: &str, msg: &serde_json::Value) {
-    if msg["type"].as_str() != Some("capability_card") { return; }
+    if !is_capability_card(msg) { return; }
     let agent_id = msg["from"].as_str().unwrap_or("").to_string();
     if agent_id.is_empty() { return; }
-    let caps: Vec<String> = msg["capabilities"].as_array()
-        .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+    let caps: Vec<String> = msg["card_capabilities"]
+        .as_array()
+        .or_else(|| msg["capabilities"].as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str())
+                .map(|cap| cap.trim().to_lowercase())
+                .filter(|cap| !cap.is_empty())
+                .collect()
+        })
         .unwrap_or_default();
     let card = store::CapabilityCard {
-        agent_id, capabilities: caps,
+        agent_id,
+        capabilities: caps,
         available: msg["available"].as_bool().unwrap_or(true),
-        description: msg["description"].as_str().map(String::from),
+        description: msg["card_summary"]
+            .as_str()
+            .or_else(|| msg["description"].as_str())
+            .map(String::from),
         updated_at: msg["ts"].as_u64().unwrap_or(0),
+        auth: msg["_auth"].as_str().unwrap_or("unsigned").to_string(),
     };
     store::save_peer_card(room_id, &card);
 }
@@ -1357,7 +1409,7 @@ pub fn task_list(room_label: Option<&str>) -> Result<Vec<store::Task>, String> {
     Ok(tasks)
 }
 
-/// Activity timeline — all events (messages, joins, files, reactions, profiles).
+/// Activity timeline — all events (messages, joins, files, reactions, profiles, cards).
 pub fn timeline(since: &str, room_label: Option<&str>) -> Result<Vec<serde_json::Value>, String> {
     let room = resolve_room(room_label)?;
     let since_secs = parse_since(since);
@@ -1369,6 +1421,8 @@ pub fn timeline(since: &str, room_label: Option<&str>) -> Result<Vec<serde_json:
             "file"
         } else if evt["type"].as_str() == Some("profile") {
             "profile"
+        } else if is_capability_card(evt) {
+            "card"
         } else if evt["type"].as_str() == Some("reaction") {
             "reaction"
         } else if evt["text"].as_str().unwrap_or("").contains("Joined (agora") {
@@ -2242,12 +2296,13 @@ pub fn download_file(file_id: &str, out_path: Option<&str>, room_label: Option<&
 mod tests {
     use base64::Engine;
     use super::{
-        allow_incoming_message, annotate_soma_message, count_invite_redemptions_in_envs,
-        decrypt_payload, enforce_outbound_plaza_rate_limit, encrypt_envelope,
-        infer_soma_subject_path, make_envelope, make_invite_redemption, pin, pins, resolve_room,
-        seed_plaza_rate_limit_state, send_watch_heartbeat, should_display_message, signing_message_bytes,
-        soma_churn_decay, soma_correct, unpin, SignedWirePayload, SIGNED_WIRE_VERSION, BASE64,
-        PLAZA_RATE_LIMIT_WINDOW_SECS,
+        allow_incoming_message, annotate_soma_message, card_set, card_show,
+        count_invite_redemptions_in_envs, decrypt_payload, discover,
+        enforce_outbound_plaza_rate_limit, encrypt_envelope, infer_soma_subject_path,
+        make_envelope, make_invite_redemption, pin, pins, process_card_message,
+        resolve_room, seed_plaza_rate_limit_state, send_watch_heartbeat,
+        should_display_message, signing_message_bytes, soma_churn_decay, soma_correct, unpin,
+        SignedWirePayload, SIGNED_WIRE_VERSION, BASE64, PLAZA_RATE_LIMIT_WINDOW_SECS,
     };
     use crate::crypto;
     use crate::store::{self, Role};
@@ -2468,6 +2523,63 @@ mod tests {
         });
 
         assert!(!should_display_message(&receipt));
+    }
+
+    #[test]
+    fn card_set_normalizes_and_persists_self_card() {
+        let _guard = store::test_env_lock().lock().unwrap();
+        let (_home, room) = setup_plaza_room("card-owner", Role::Admin);
+
+        card_set(
+            &["Rust".to_string(), " python ".to_string(), "Rust".to_string()],
+            Some("Builds infra"),
+            None,
+        )
+        .unwrap();
+
+        let own = card_show(None, None).unwrap().unwrap();
+        assert_eq!(own.capabilities, vec!["rust".to_string(), "python".to_string()]);
+        assert_eq!(own.description.as_deref(), Some("Builds infra"));
+        assert_eq!(own.auth, "verified");
+
+        let room_cards = store::load_peer_cards(&room.room_id);
+        assert_eq!(room_cards.len(), 1);
+        assert_eq!(room_cards[0].agent_id, "card-owner");
+        assert_eq!(room_cards[0].auth, "verified");
+    }
+
+    #[test]
+    fn capability_cards_are_cached_for_discovery_without_displaying_chat_lines() {
+        let _guard = store::test_env_lock().lock().unwrap();
+        let (_home, room) = setup_plaza_room("discover-self", Role::Admin);
+        let card_msg = json!({
+            "id": "card01",
+            "from": "peer-agent",
+            "ts": current_ts(),
+            "type": "card",
+            "card_capabilities": ["python", "ml"],
+            "card_summary": "ships evals",
+            "text": "[card] peer-agent — capabilities: python, ml",
+            "_auth": "verified",
+            "v": "3.0",
+        });
+
+        assert!(!should_display_message(&card_msg));
+        process_card_message(&room.room_id, &card_msg);
+
+        let cached = card_show(Some("peer-agent"), None).unwrap().unwrap();
+        assert_eq!(cached.agent_id, "peer-agent");
+        assert_eq!(cached.description.as_deref(), Some("ships evals"));
+
+        let peer = store::load_peer_cards(&room.room_id);
+        assert_eq!(peer.len(), 1);
+        assert_eq!(peer[0].auth, "verified");
+
+        let matches = discover("python,ml", Some("plaza")).unwrap();
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].room_label, "plaza");
+        assert_eq!(matches[0].card.agent_id, "peer-agent");
+        assert_eq!(matches[0].overlap, vec!["python".to_string(), "ml".to_string()]);
     }
 
     #[test]
