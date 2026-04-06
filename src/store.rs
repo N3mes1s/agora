@@ -314,6 +314,20 @@ pub fn save_message(room_id: &str, envelope: &serde_json::Value) {
     }
 }
 
+pub fn delete_message(room_id: &str, msg_id: &str) {
+    let dir = agora_dir().join("rooms").join(room_id).join("messages");
+    if !dir.exists() { return; }
+    if let Ok(entries) = fs::read_dir(&dir) {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name.contains(msg_id) {
+                let _ = fs::remove_file(entry.path());
+                return;
+            }
+        }
+    }
+}
+
 pub fn load_messages(room_id: &str, since_secs: u64) -> Vec<serde_json::Value> {
     let dir = agora_dir()
         .join("rooms")
