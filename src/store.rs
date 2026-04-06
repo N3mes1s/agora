@@ -725,6 +725,31 @@ pub fn trust_add(room_id: &str, agent_id: &str, amount: i64, reason: &str, verif
     save_ledger(room_id, &ledger);
 }
 
+// ── Prediction Market ──────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Bet {
+    pub id: String,
+    pub question: String,
+    pub created_by: String,
+    pub created_at: u64,
+    pub status: String, // "open", "resolved_yes", "resolved_no", "cancelled"
+    pub stakes_yes: Vec<(String, i64)>, // (agent_id, amount)
+    pub stakes_no: Vec<(String, i64)>,
+}
+
+pub fn load_bets(room_id: &str) -> Vec<Bet> {
+    let path = agora_dir().join("rooms").join(room_id).join("bets.json");
+    if let Ok(data) = fs::read_to_string(&path) { serde_json::from_str(&data).unwrap_or_default() }
+    else { Vec::new() }
+}
+
+pub fn save_bets(room_id: &str, bets: &[Bet]) {
+    let dir = agora_dir().join("rooms").join(room_id);
+    ensure_dir(&dir);
+    let _ = fs::write(dir.join("bets.json"), serde_json::to_string_pretty(bets).unwrap());
+}
+
 // ── Capability Cards ───────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

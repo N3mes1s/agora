@@ -1033,6 +1033,97 @@ pub fn credit_spend(amount: i64, reason: &str, room_label: Option<&str>) -> Resu
     Ok(balance - amount)
 }
 
+// ── Prediction Market ──────────────────────────────────────────
+
+pub fn bet_create(question: &str, room_label: Option<&str>) -> Result<String, String> {
+    let room = resolve_room(room_label)?;
+    let me = store::get_agent_id();
+    let id = msg_id();
+    let bet = store::Bet {
+        id: id.clone(), question: question.to_string(), created_by: me.clone(),
+        created_at: now(), status: "open".to_string(),
+        stakes_yes: Vec::new(), stakes_no: Vec::new(),
+    };
+    let mut bets = store::load_bets(&room.room_id);
+    bets.push(bet);
+    store::save_bets(&room.room_id, &bets);
+
+    let room_key = crypto::derive_room_key(&room.secret, &room.room_id);
+    let env = make_envelope(&format!("[bet] New: {} (id: {})", question, &id[..6]), None);
+    let encrypted = encrypt_envelope(&env, &room_key, &room.room_id);
+    transport::publish(&room.room_id, &encrypted);
+    store::save_message(&room.room_id, &env);
+    Ok(id)
+}
+
+pub fn bet_stake(bet_id: &str, side: bool, amount: i64, room_label: Option<&str>) -> Result<(), String> {
+    let room = resolve_room(room_label)?;
+    let me = store::get_agent_id();
+    let balance = store::credit_balance(&room.room_id, &me);
+    if balance < amount { return Err(format!("Insufficient credits: have {balance}, need {amount}")); }
+
+    let mut bets = store::load_bets(&room.room_id);
+    let bet = bets.iter_mut().find(|b| b.id.starts_with(bet_id) && b.status == "open")
+        .ok_or("Bet not found or already resolved")?;
+
+    if side { bet.stakes_yes.push((me.clone(), amount)); }
+    else { bet.stakes_no.push((me.clone(), amount)); }
+    store::save_bets(&room.room_id, &bets);
+
+    // Escrow: debit the staker
+    store::credit_add(&room.room_id, &me, -amount, &format!("bet escrow: {} on {}", if side {"YES"} else {"NO"}, &bet_id[..6.min(bet_id.len())]));
+
+    let side_str = if side { "YES" } else { "NO" };
+    let room_key = crypto::derive_room_key(&room.secret, &room.room_id);
+    let env = make_envelope(&format!("[bet] {me} stakes {amount} on {side_str} (bet {})", &bet_id[..6.min(bet_id.len())]), None);
+    let encrypted = encrypt_envelope(&env, &room_key, &room.room_id);
+    transport::publish(&room.room_id, &encrypted);
+    store::save_message(&room.room_id, &env);
+    Ok(())
+}
+
+pub fn bet_resolve(bet_id: &str, outcome: bool, room_label: Option<&str>) -> Result<String, String> {
+    let room = resolve_room(room_label)?;
+    let me = store::get_agent_id();
+    if !store::is_admin(&room.room_id, &me) { return Err("Only admins can resolve bets.".to_string()); }
+
+    let mut bets = store::load_bets(&room.room_id);
+    let idx = bets.iter().position(|b| b.id.starts_with(bet_id) && b.status == "open")
+        .ok_or("Bet not found or already resolved")?;
+
+    bets[idx].status = if outcome { "resolved_yes".to_string() } else { "resolved_no".to_string() };
+
+    let winners = if outcome { bets[idx].stakes_yes.clone() } else { bets[idx].stakes_no.clone() };
+    let losers = if outcome { bets[idx].stakes_no.clone() } else { bets[idx].stakes_yes.clone() };
+
+    let total_pot: i64 = losers.iter().map(|(_, a)| a).sum();
+    let winner_total: i64 = winners.iter().map(|(_, a)| a).sum();
+    let question = bets[idx].question.clone();
+
+    let mut payouts = Vec::new();
+    for (agent, stake) in &winners {
+        let share = if winner_total > 0 { (*stake as f64 / winner_total as f64 * total_pot as f64) as i64 } else { 0 };
+        let payout = stake + share;
+        store::credit_add(&room.room_id, agent, payout, &format!("bet won: {}", &bet_id[..6.min(bet_id.len())]));
+        payouts.push(format!("{}: +{}", agent, payout));
+    }
+
+    store::save_bets(&room.room_id, &bets);
+
+    let outcome_str = if outcome { "YES" } else { "NO" };
+    let room_key = crypto::derive_room_key(&room.secret, &room.room_id);
+    let env = make_envelope(&format!("[bet resolved] {} → {} | Pot: {} | {}", question, outcome_str, total_pot, payouts.join(", ")), None);
+    let encrypted = encrypt_envelope(&env, &room_key, &room.room_id);
+    transport::publish(&room.room_id, &encrypted);
+    store::save_message(&room.room_id, &env);
+    Ok(format!("Resolved: {} → {outcome_str}, pot {total_pot} distributed to {} winners", question, winners.len()))
+}
+
+pub fn bet_list(room_label: Option<&str>) -> Result<Vec<store::Bet>, String> {
+    let room = resolve_room(room_label)?;
+    Ok(store::load_bets(&room.room_id))
+}
+
 // ── Capability Gaps (v0.7 typed schema from plaza design) ──────
 
 /// A typed capability gap signal — what a room needs.

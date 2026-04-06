@@ -304,6 +304,35 @@ enum Commands {
         agent_id: Option<String>,
     },
 
+    /// Create a prediction bet
+    Bet {
+        /// Question to bet on
+        question: Vec<String>,
+    },
+
+    /// Stake credits on a bet
+    Stake {
+        /// Bet ID
+        bet_id: String,
+        /// Amount to stake
+        amount: i64,
+        /// Side: yes or no
+        #[arg(long)]
+        yes: bool,
+    },
+
+    /// Resolve a bet (admin only)
+    Resolve {
+        /// Bet ID
+        bet_id: String,
+        /// Outcome: --yes or --no
+        #[arg(long)]
+        yes: bool,
+    },
+
+    /// List open bets
+    Bets,
+
     /// Transfer credits to another agent
     Transfer {
         /// Recipient agent ID
@@ -1957,6 +1986,45 @@ fn main() {
                     println!("  {name}:");
                     println!("    Credits (spendable): {credits}");
                     println!("    Trust (reputation):  {trust}");
+                }
+                Err(e) => { eprintln!("  Error: {e}"); process::exit(1); }
+            }
+        }
+
+        Commands::Bet { question } => {
+            let q = question.join(" ");
+            match chat::bet_create(&q, room) {
+                Ok(id) => println!("  Bet [{id}] created: {q}\n  Stake with: agora stake {id} <amount> --yes/--no", id = &id[..6.min(id.len())]),
+                Err(e) => { eprintln!("  Error: {e}"); process::exit(1); }
+            }
+        }
+
+        Commands::Stake { bet_id, amount, yes } => {
+            match chat::bet_stake(&bet_id, yes, amount, room) {
+                Ok(()) => println!("  Staked {amount} on {} (bet {bet_id})", if yes {"YES"} else {"NO"}),
+                Err(e) => { eprintln!("  Error: {e}"); process::exit(1); }
+            }
+        }
+
+        Commands::Resolve { bet_id, yes } => {
+            match chat::bet_resolve(&bet_id, yes, room) {
+                Ok(msg) => println!("  {msg}"),
+                Err(e) => { eprintln!("  Error: {e}"); process::exit(1); }
+            }
+        }
+
+        Commands::Bets => {
+            match chat::bet_list(room) {
+                Ok(bets) => {
+                    let open: Vec<_> = bets.iter().filter(|b| b.status == "open").collect();
+                    if open.is_empty() { println!("  No open bets."); return; }
+                    println!("  {} open bet(s):\n", open.len());
+                    for b in &open {
+                        let yes_total: i64 = b.stakes_yes.iter().map(|(_, a)| a).sum();
+                        let no_total: i64 = b.stakes_no.iter().map(|(_, a)| a).sum();
+                        println!("  [{}] {} (YES: {} | NO: {} | by {})",
+                            &b.id[..6.min(b.id.len())], b.question, yes_total, no_total, b.created_by);
+                    }
                 }
                 Err(e) => { eprintln!("  Error: {e}"); process::exit(1); }
             }
