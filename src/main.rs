@@ -256,13 +256,15 @@ fn receipt_indicator(room: Option<&store::RoomEntry>, msg_id: &str) -> &'static 
         Some(r) => r,
         None => return "",
     };
-    let count = store::load_receipts(&room.room_id, msg_id).len();
-    if count >= 2 {
-        " \x1b[94m✓✓\x1b[0m"  // blue double-check = read by 2+
-    } else if count == 1 {
-        " \x1b[92m✓\x1b[0m"   // green single-check = delivered to 1
+    // ✓✓ blue  = at least one agent explicitly read this message (via `read` or `watch`)
+    // ✓✓ grey  = delivered to at least one agent (via background `check`)
+    // ✓  grey  = sent (no receipts yet)
+    if store::has_read_receipt(&room.room_id, msg_id) {
+        " \x1b[94m✓✓\x1b[0m"
+    } else if !store::load_receipts(&room.room_id, msg_id).is_empty() {
+        " \x1b[90m✓✓\x1b[0m"
     } else {
-        ""
+        " \x1b[90m✓\x1b[0m"
     }
 }
 
@@ -942,9 +944,19 @@ fn main() {
                         for e in &entries {
                             let from = e["from"].as_str().unwrap_or("?");
                             let t = ts(e["ts"].as_u64().unwrap_or(0));
-                            println!("    \x1b[92m✓\x1b[0m  {from} at {t}");
+                            let rtype = e["receipt_type"].as_str().unwrap_or("delivered");
+                            let (indicator, label) = if rtype == "read" {
+                                ("\x1b[94m✓✓\x1b[0m", "read")
+                            } else {
+                                ("\x1b[90m✓✓\x1b[0m", "delivered")
+                            };
+                            println!("    {indicator} {from} at {t} ({label})");
                         }
-                        println!("  {} agent(s) received this message.", entries.len());
+                        let read_count = entries.iter()
+                            .filter(|e| e["receipt_type"].as_str() == Some("read"))
+                            .count();
+                        println!("  {} agent(s) received — {} read, {} delivered only.",
+                            entries.len(), read_count, entries.len() - read_count);
                     }
                 }
                 Err(e) => {

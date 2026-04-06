@@ -462,6 +462,47 @@ pub fn mark_receipted(room_id: &str, msg_id: &str) {
     }
 }
 
+// ── Read Receipts (explicit "read" — viewed via `read` or `watch`) ──────────
+// read_receipts.json: { "msg_id": ["agent1", "agent2"], ... }
+// Separate from receipts.json which stores all delivery ACKs regardless of type.
+
+fn read_receipts_path(room_id: &str) -> PathBuf {
+    let dir = agora_dir().join("rooms").join(room_id);
+    ensure_dir(&dir);
+    dir.join("read_receipts.json")
+}
+
+/// Return which agents have explicitly "read" (not just fetched) a message.
+pub fn load_read_receipts(room_id: &str, msg_id: &str) -> Vec<String> {
+    let path = read_receipts_path(room_id);
+    let map: HashMap<String, Vec<String>> = if let Ok(data) = fs::read_to_string(&path) {
+        serde_json::from_str(&data).unwrap_or_default()
+    } else {
+        HashMap::new()
+    };
+    map.get(msg_id).cloned().unwrap_or_default()
+}
+
+/// Record that `agent` has explicitly read `msg_id` (via `agora read` or `agora watch`).
+pub fn save_read_receipt(room_id: &str, msg_id: &str, agent: &str) {
+    let path = read_receipts_path(room_id);
+    let mut map: HashMap<String, Vec<String>> = if let Ok(data) = fs::read_to_string(&path) {
+        serde_json::from_str(&data).unwrap_or_default()
+    } else {
+        HashMap::new()
+    };
+    let agents = map.entry(msg_id.to_string()).or_default();
+    if !agents.iter().any(|a| a == agent) {
+        agents.push(agent.to_string());
+    }
+    let _ = fs::write(&path, serde_json::to_string(&map).unwrap());
+}
+
+/// Return true if any agent has explicitly read this message.
+pub fn has_read_receipt(room_id: &str, msg_id: &str) -> bool {
+    !load_read_receipts(room_id, msg_id).is_empty()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -73,13 +73,15 @@ fn is_heartbeat(env: &serde_json::Value) -> bool {
     env["type"].as_str() == Some("heartbeat")
 }
 
-fn make_receipt(receipt_for: &str) -> serde_json::Value {
+/// `rtype`: "delivered" (background `check`) or "read" (explicit `read`/`watch`)
+fn make_receipt(receipt_for: &str, rtype: &str) -> serde_json::Value {
     json!({
         "v": VERSION,
         "id": msg_id(),
         "from": store::get_agent_id(),
         "ts": now(),
         "type": "receipt",
+        "receipt_type": rtype,
         "receipt_for": receipt_for,
         "text": "",
     })
@@ -89,19 +91,21 @@ fn is_receipt(env: &serde_json::Value) -> bool {
     env["type"].as_str() == Some("receipt")
 }
 
-/// Send a delivery receipt for a message from another agent.
-fn send_receipt(msg_id: &str, room: &store::RoomEntry) {
+/// Send a delivery receipt for a message.
+/// `rtype`: "delivered" (background check) or "read" (explicit view)
+fn send_receipt(msg_id: &str, room: &store::RoomEntry, rtype: &str) {
     if store::is_receipted(&room.room_id, msg_id) {
         return;
     }
     let room_key = crypto::derive_room_key(&room.secret, &room.room_id);
-    let env = make_receipt(msg_id);
+    let env = make_receipt(msg_id, rtype);
     let encrypted = encrypt_envelope(&env, &room_key, &room.room_id);
     let _ = transport::publish(&room.room_id, &encrypted);
     store::mark_receipted(&room.room_id, msg_id);
 }
 
 /// Process an incoming receipt envelope: store it locally.
+/// Dispatches to read_receipts store if receipt_type is "read".
 fn process_receipt(room_id: &str, env: &serde_json::Value) {
     if let (Some(receipt_for), Some(from)) = (
         env["receipt_for"].as_str(),
@@ -109,6 +113,10 @@ fn process_receipt(room_id: &str, env: &serde_json::Value) {
     ) {
         let ts = env["ts"].as_u64().unwrap_or_else(now);
         store::save_receipt(room_id, receipt_for, from, ts);
+        // Track explicit reads separately for the ✓✓ indicator
+        if env["receipt_type"].as_str() == Some("read") {
+            store::save_read_receipt(room_id, receipt_for, from);
+        }
     }
 }
 
@@ -291,10 +299,10 @@ pub fn read(since: &str, limit: usize, room_label: Option<&str>) -> Result<Vec<s
         }
         if !is_heartbeat(&msg) {
             store::save_message(&room.room_id, &msg);
-            // Auto-send receipt for messages from others
+            // Auto-send "read" receipt — user explicitly called `agora read`
             let from = msg["from"].as_str().unwrap_or("");
             if from != me && mid != "?" {
-                send_receipt(&mid, &room);
+                send_receipt(&mid, &room, "read");
             }
             merged.push(msg);
         }
@@ -335,9 +343,9 @@ pub fn check(since: &str, room_label: Option<&str>) -> Result<Vec<serde_json::Va
                 continue;
             }
             store::save_message(&room.room_id, &env);
-            // Auto-send receipt for messages from others
+            // Auto-send "delivered" receipt — background fetch, not explicit view
             if mid != "?" {
-                send_receipt(&mid, &room);
+                send_receipt(&mid, &room, "delivered");
             }
             new_msgs.push(env);
         }
@@ -360,9 +368,14 @@ pub fn receipts(msg_id_prefix: &str, room_label: Option<&str>) -> Result<Vec<ser
         .unwrap_or_else(|| msg_id_prefix.to_string());
 
     let entries = store::load_receipts(&room.room_id, &full_id);
+    let read_agents: std::collections::HashSet<String> =
+        store::load_read_receipts(&room.room_id, &full_id).into_iter().collect();
     Ok(entries
         .into_iter()
-        .map(|(from, ts)| json!({"from": from, "ts": ts}))
+        .map(|(from, ts)| {
+            let rtype = if read_agents.contains(&from) { "read" } else { "delivered" };
+            json!({"from": from, "ts": ts, "receipt_type": rtype})
+        })
         .collect())
 }
 
@@ -472,11 +485,24 @@ where
     // Send initial heartbeat
     let _ = send_watch_heartbeat(&room_id);
 
+    let me = store::get_agent_id();
     transport::stream(&room_id, |_ts, payload| {
         if let Some(env) = decrypt_payload(payload, &room_key, &room_id) {
             track_presence(&room_id, &env);
-            if !is_heartbeat(&env) {
+            if is_receipt(&env) {
+                // Process incoming receipts while watching
+                process_receipt(&room_id, &env);
+            } else if !is_heartbeat(&env) {
                 store::save_message(&room_id, &env);
+                // Send "read" receipt — user is actively watching, confirmed view
+                let mid = env["id"].as_str().unwrap_or("?").to_string();
+                let from = env["from"].as_str().unwrap_or("");
+                if from != me && mid != "?" && !store::is_receipted(&room_id, &mid) {
+                    let room_entry = store::find_room(&room_id).or_else(|| store::get_active_room());
+                    if let Some(r) = room_entry {
+                        send_receipt(&mid, &r, "read");
+                    }
+                }
                 on_message(&env);
             }
         }
@@ -597,11 +623,16 @@ mod tests {
 
     #[test]
     fn receipt_envelope_type() {
-        let env = make_receipt("abcd1234");
+        let env = make_receipt("abcd1234", "delivered");
         assert!(is_receipt(&env));
         assert_eq!(env["type"].as_str(), Some("receipt"));
         assert_eq!(env["receipt_for"].as_str(), Some("abcd1234"));
+        assert_eq!(env["receipt_type"].as_str(), Some("delivered"));
         assert_eq!(env["text"].as_str(), Some(""));
+
+        // "read" type
+        let read_env = make_receipt("abcd5678", "read");
+        assert_eq!(read_env["receipt_type"].as_str(), Some("read"));
     }
 
     #[test]
@@ -647,6 +678,48 @@ mod tests {
         // Marking again is a no-op
         store::mark_receipted(room_id, "m1");
         assert!(store::is_receipted(room_id, "m1"));
+    }
+
+    #[test]
+    fn process_receipt_with_read_type_updates_read_store() {
+        let (_dir, _guard) = setup_receipt_room();
+        let room_id = "ag-receipt-test";
+
+        // "delivered" receipt — should NOT appear in read_receipts
+        let delivered_env = json!({
+            "v": "3.0", "id": "env1", "from": "bob",
+            "ts": 1000, "type": "receipt",
+            "receipt_type": "delivered",
+            "receipt_for": "msgAAA", "text": ""
+        });
+        process_receipt(room_id, &delivered_env);
+        assert!(!store::has_read_receipt(room_id, "msgAAA"));
+        assert_eq!(store::load_read_receipts(room_id, "msgAAA").len(), 0);
+
+        // "read" receipt — should appear in BOTH receipt stores
+        let read_env = json!({
+            "v": "3.0", "id": "env2", "from": "alice",
+            "ts": 2000, "type": "receipt",
+            "receipt_type": "read",
+            "receipt_for": "msgBBB", "text": ""
+        });
+        process_receipt(room_id, &read_env);
+        assert!(store::has_read_receipt(room_id, "msgBBB"));
+        let read_agents = store::load_read_receipts(room_id, "msgBBB");
+        assert_eq!(read_agents, vec!["alice"]);
+        // Also in general receipts
+        assert_eq!(store::load_receipts(room_id, "msgBBB").len(), 1);
+    }
+
+    #[test]
+    fn read_receipt_deduplicates() {
+        let (_dir, _guard) = setup_receipt_room();
+        let room_id = "ag-receipt-test";
+
+        store::save_read_receipt(room_id, "msg-dedup", "carol");
+        store::save_read_receipt(room_id, "msg-dedup", "carol"); // second time
+        let agents = store::load_read_receipts(room_id, "msg-dedup");
+        assert_eq!(agents.len(), 1, "duplicate should be ignored");
     }
 
     fn member_last_seen(room_label: &str) -> u64 {
