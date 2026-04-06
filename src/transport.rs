@@ -7,9 +7,14 @@
 //!   AGORA_RELAY_URL=https://ntfy.theagora.dev  (custom relay)
 //!   Default: https://ntfy.sh
 //!
+//! Optional relay auth:
+//!   AGORA_RELAY_TOKEN=...  (sent as Authorization: Bearer ...)
+//!
 //! Dual-publish for zero-downtime migration:
 //!   AGORA_RELAY_MIRROR=https://ntfy.sh  (publish to both during transition)
 
+use reqwest::blocking::RequestBuilder;
+use reqwest::header::AUTHORIZATION;
 use serde::Deserialize;
 
 const DEFAULT_RELAY: &str = "https://ntfy.sh";
@@ -24,6 +29,18 @@ pub fn relay_status_label() -> String {
 
 fn mirror_url() -> Option<String> {
     std::env::var("AGORA_RELAY_MIRROR").ok()
+}
+
+fn relay_auth_token() -> Option<String> {
+    std::env::var("AGORA_RELAY_TOKEN").ok().filter(|s| !s.is_empty())
+}
+
+fn authorize(req: RequestBuilder) -> RequestBuilder {
+    if let Some(token) = relay_auth_token() {
+        req.header(AUTHORIZATION, format!("Bearer {token}"))
+    } else {
+        req
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -52,7 +69,10 @@ fn streaming_client() -> reqwest::blocking::Client {
 pub fn publish(topic: &str, payload: &str) -> bool {
     let base = relay_url();
     let url = format!("{base}/{topic}");
-    let ok = match client().post(&url).body(payload.to_string()).send() {
+    let ok = match authorize(client().post(&url))
+        .body(payload.to_string())
+        .send()
+    {
         Ok(resp) => resp.status().is_success(),
         Err(e) => {
             eprintln!("  [warn] relay publish failed: {e}");
@@ -63,7 +83,9 @@ pub fn publish(topic: &str, payload: &str) -> bool {
     // Dual-publish to mirror for zero-downtime migration
     if let Some(mirror) = mirror_url() {
         let mirror_url = format!("{mirror}/{topic}");
-        let _ = client().post(&mirror_url).body(payload.to_string()).send();
+        let _ = authorize(client().post(&mirror_url))
+            .body(payload.to_string())
+            .send();
     }
 
     ok
@@ -74,7 +96,7 @@ pub fn publish(topic: &str, payload: &str) -> bool {
 pub fn fetch(topic: &str, since: &str) -> Vec<(u64, String)> {
     let base = relay_url();
     let url = format!("{base}/{topic}/json?poll=1&since={since}");
-    let body = match client().get(&url).send() {
+    let body = match authorize(client().get(&url)).send() {
         Ok(resp) => match resp.text() {
             Ok(s) => s,
             Err(_) => return vec![],
@@ -108,7 +130,7 @@ where
 {
     let base = relay_url();
     let url = format!("{base}/{topic}/json");
-    let resp = match streaming_client().get(&url).send() {
+    let resp = match authorize(streaming_client().get(&url)).send() {
         Ok(r) => r,
         Err(e) => {
             eprintln!("  [error] stream connect failed: {e}");
@@ -139,7 +161,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{mirror_url, relay_status_label, relay_url, DEFAULT_RELAY};
+    use super::{mirror_url, relay_auth_token, relay_status_label, relay_url, DEFAULT_RELAY};
     use crate::store;
 
     fn restore_env(name: &str, value: Option<String>) {
@@ -182,6 +204,19 @@ mod tests {
         assert_eq!(mirror_url(), Some("https://ntfy.sh".to_string()));
 
         restore_env("AGORA_RELAY_MIRROR", prior);
+    }
+
+    #[test]
+    fn relay_auth_token_is_optional() {
+        let _guard = store::test_env_lock().lock().unwrap();
+        let prior = std::env::var("AGORA_RELAY_TOKEN").ok();
+        unsafe { std::env::remove_var("AGORA_RELAY_TOKEN") };
+        assert_eq!(relay_auth_token(), None);
+
+        unsafe { std::env::set_var("AGORA_RELAY_TOKEN", "relay-secret") };
+        assert_eq!(relay_auth_token(), Some("relay-secret".to_string()));
+
+        restore_env("AGORA_RELAY_TOKEN", prior);
     }
 
     #[test]

@@ -158,10 +158,18 @@ Agora defaults to `https://ntfy.sh`, but the relay is configurable:
 export AGORA_RELAY_URL=https://ntfy.theagora.dev
 ```
 
+For a private relay, configure a bearer token locally:
+
+```bash
+export AGORA_RELAY_URL=https://ntfy.theagora.dev
+export AGORA_RELAY_TOKEN=replace-me
+```
+
 For zero-downtime relay migration, dual-publish during the cutover:
 
 ```bash
 export AGORA_RELAY_URL=https://ntfy.theagora.dev
+export AGORA_RELAY_TOKEN=replace-me
 export AGORA_RELAY_MIRROR=https://ntfy.sh
 ```
 
