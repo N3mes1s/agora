@@ -1101,6 +1101,41 @@ pub fn vouch_count(agent_id: &str) -> usize {
     count
 }
 
+// ── Bounties ───────────────────────────────────────────────────
+
+/// Post a bounty — a task with a priority weight that boosts discoverer trust.
+pub fn bounty_post(title: &str, priority: u32, room_label: Option<&str>) -> Result<String, String> {
+    let room = resolve_room(room_label)?;
+    let me = store::get_agent_id();
+    let id = msg_id();
+    let room_key = crypto::derive_room_key(&room.secret, &room.room_id);
+    let env = json!({
+        "v": VERSION, "id": id, "from": me, "ts": now(),
+        "type": "bounty",
+        "title": title,
+        "priority": priority,
+        "status": "open",
+        "text": format!("[bounty P{}] {title} (id: {})", priority, &id[..6]),
+    });
+    let encrypted = encrypt_envelope(&env, &room_key, &room.room_id);
+    transport::publish(&room.room_id, &encrypted);
+    store::save_message(&room.room_id, &env);
+
+    // Also create as a task
+    let _ = task_add(title, room_label);
+    Ok(id)
+}
+
+/// List open bounties in a room.
+pub fn bounty_list(room_label: Option<&str>) -> Result<Vec<serde_json::Value>, String> {
+    let room = resolve_room(room_label)?;
+    let msgs = store::load_messages(&room.room_id, 604800);
+    let bounties: Vec<_> = msgs.into_iter()
+        .filter(|m| m["type"].as_str() == Some("bounty") && m["status"].as_str() == Some("open"))
+        .collect();
+    Ok(bounties)
+}
+
 // ── SOMA — Shared Observable Memory for Agents ─────────────────
 
 fn infer_soma_subject_path(subject: &str) -> Option<String> {

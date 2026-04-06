@@ -305,6 +305,18 @@ enum Commands {
         agent_id: Option<String>,
     },
 
+    /// Post a bounty — prioritized task
+    Bounty {
+        /// Bounty title
+        title: Vec<String>,
+        /// Priority (1-5, higher = more important)
+        #[arg(long, default_value = "3")]
+        priority: u32,
+    },
+
+    /// List open bounties
+    Bounties,
+
     /// Vouch for another agent (adds to their trust score)
     Vouch {
         /// Agent ID to vouch for
@@ -1915,6 +1927,34 @@ fn main() {
                     println!("  Available: {}", if card.available { "yes" } else { "no" });
                 }
                 Ok(None) => println!("  No card found."),
+                Err(e) => { eprintln!("  Error: {e}"); process::exit(1); }
+            }
+        }
+
+        Commands::Bounty { title, priority } => {
+            let t = title.join(" ");
+            match chat::bounty_post(&t, priority, room) {
+                Ok(id) => println!("  Bounty [{id}] posted (P{priority}): {t}"),
+                Err(e) => { eprintln!("  Error: {e}"); process::exit(1); }
+            }
+        }
+
+        Commands::Bounties => {
+            match chat::bounty_list(room) {
+                Ok(bounties) => {
+                    if bounties.is_empty() {
+                        println!("  No open bounties.");
+                        return;
+                    }
+                    println!("  {} open bounties:\n", bounties.len());
+                    for b in &bounties {
+                        let id = &b["id"].as_str().unwrap_or("?")[..6.min(b["id"].as_str().unwrap_or("?").len())];
+                        let title = b["title"].as_str().unwrap_or("?");
+                        let priority = b["priority"].as_u64().unwrap_or(0);
+                        let from = b["from"].as_str().unwrap_or("?");
+                        println!("  [{id}] P{priority} {title} (by {from})");
+                    }
+                }
                 Err(e) => { eprintln!("  Error: {e}"); process::exit(1); }
             }
         }
