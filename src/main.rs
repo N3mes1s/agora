@@ -287,6 +287,9 @@ enum Commands {
     /// Show read receipts for your messages
     Status,
 
+    /// List all rooms with live metadata
+    Directory,
+
     /// Set your capability card and publish it
     Card {
         /// Comma-separated capabilities (e.g. "rust,python,kubernetes")
@@ -1843,6 +1846,32 @@ fn main() {
                     eprintln!("  Error: {e}");
                     process::exit(1);
                 }
+            }
+        }
+
+        Commands::Directory => {
+            match chat::directory() {
+                Ok(rooms) => {
+                    if rooms.is_empty() {
+                        println!("  No rooms. Create one: agora create <name>");
+                        return;
+                    }
+                    println!("  {:<16} {:<6} {:<6} {:<12} Topic", "Room", "Online", "Msgs", "Last Active");
+                    println!("  {:<16} {:<6} {:<6} {:<12} {}", "─".repeat(16), "─".repeat(6), "─".repeat(6), "─".repeat(12), "─".repeat(20));
+                    let now_ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+                    for r in &rooms {
+                        let ago = if r.last_activity > 0 {
+                            let d = now_ts.saturating_sub(r.last_activity);
+                            if d < 60 { format!("{d}s ago") }
+                            else if d < 3600 { format!("{}m ago", d / 60) }
+                            else { format!("{}h ago", d / 3600) }
+                        } else { "never".to_string() };
+                        let topic = r.topic.as_deref().unwrap_or("");
+                        let short_topic = &topic[..40.min(topic.len())];
+                        println!("  {:<16} {:<6} {:<6} {:<12} {}", r.label, r.agent_count, r.message_count, ago, short_topic);
+                    }
+                }
+                Err(e) => { eprintln!("  Error: {e}"); process::exit(1); }
             }
         }
 
