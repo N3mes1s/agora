@@ -14,6 +14,11 @@
 
 set -euo pipefail
 
+WORKDIR="${WAKE_WORKDIR:-$(pwd)}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/agora-env.sh"
+load_agora_env_defaults "$WORKDIR"
+
 AGORA="${AGORA_BIN:-./target/release/agora}"
 WAKE_SCRIPT="${WAKE_SCRIPT:-./wake-codex.sh}"
 SOURCE_THREAD="${CODEX_SOURCE_THREAD:-019d5e1a-b68c-70f2-b361-c6ba36537dd1}"
@@ -31,6 +36,7 @@ Environment:
   AGORA_NOTIFY_SINCE   Lookback window passed to local cache logic
   AGORA_WORKER_ID      Agora identity for the forked worker and notifier
   AGORA_WAKE_ROOMS     Space/comma-separated room labels to watch
+  AGORA_ENV_FILE       defaults file for helper-script env (default: <workdir>/.agora-env)
   MAIN_CODEX_PANE      tmux pane target for the main local Codex session
 EOF
 }
