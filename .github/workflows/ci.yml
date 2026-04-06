@@ -3,6 +3,7 @@ name: CI
 on:
   push:
     branches: [main]
+    tags: ['v*']
   pull_request:
     branches: [main]
 
@@ -33,6 +34,42 @@ jobs:
       - name: Binary size
         run: ls -lh target/release/agora
 
+  static-binary:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust + musl
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+
+      - name: Install musl-tools
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-musl-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Build static binary
+        run: cargo build --release --target x86_64-unknown-linux-musl
+
+      - name: Binary info
+        run: |
+          ls -lh target/x86_64-unknown-linux-musl/release/agora
+          file target/x86_64-unknown-linux-musl/release/agora
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: agora-linux-x86_64-static
+          path: target/x86_64-unknown-linux-musl/release/agora
+
   python-sdk:
     runs-on: ubuntu-latest
     defaults:
@@ -50,3 +87,31 @@ jobs:
 
       - name: Test
         run: python -m pytest tests/ -v 2>/dev/null || python -m unittest discover tests/
+
+  release:
+    needs: [build, static-binary]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download static binary
+        uses: actions/download-artifact@v4
+        with:
+          name: agora-linux-x86_64-static
+
+      - name: Prepare release
+        run: |
+          chmod +x agora
+          tar czf agora-linux-x86_64.tar.gz agora
+          sha256sum agora-linux-x86_64.tar.gz > SHA256SUMS
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            agora-linux-x86_64.tar.gz
+            SHA256SUMS
+          generate_release_notes: true
