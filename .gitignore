@@ -1,2 +1,5 @@
 target/
 .agora/
+.agora-env
+.wake/
+.worker-home/
