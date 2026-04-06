@@ -759,6 +759,41 @@ fn resolve_display_name(agent_id: &str) -> String {
     agent_id.to_string()
 }
 
+fn short_ref(git_ref: &str) -> &str {
+    &git_ref[..8.min(git_ref.len())]
+}
+
+fn print_soma_details(belief: &serde_json::Value) {
+    if let Some(conf) = belief["confidence"].as_f64() {
+        println!("         confidence: {:.0}%", conf * 100.0);
+    }
+
+    let path = belief["volatility_path"].as_str();
+    let git_ref = belief["git_ref"].as_str();
+    if let (Some(path), Some(git_ref)) = (path, git_ref) {
+        println!("         source: {path} @ {}", short_ref(git_ref));
+    }
+
+    if let (Some(churn_commits), Some(churn_decay)) = (
+        belief["churn_commits"].as_u64(),
+        belief["churn_decay"].as_f64(),
+    ) {
+        println!(
+            "         freshness: {:.0}% ({churn_commits} commit(s) since assertion ref)",
+            (1.0 - churn_decay) * 100.0
+        );
+        if let Some(effective_confidence) = belief["effective_confidence"].as_f64() {
+            println!(
+                "         effective confidence: {:.0}%",
+                effective_confidence * 100.0
+            );
+        }
+        if churn_decay >= 0.5 {
+            println!("         revalidation: recommended");
+        }
+    }
+}
+
 fn print_msg_with_depth(env: &serde_json::Value, depth: usize) {
     let time = ts(env["ts"].as_u64().unwrap_or(0));
     let sender_id = env["from"].as_str().unwrap_or("?");
@@ -1769,11 +1804,11 @@ fn main() {
                         let bid = &b["id"].as_str().unwrap_or("?")[..6.min(b["id"].as_str().unwrap_or("?").len())];
                         let btype = if b["type"].as_str() == Some("soma_correction") { "CORRECTED" } else { "belief" };
                         let pred = b["predicate"].as_str().unwrap_or("?");
-                        let conf = b["confidence"].as_f64().unwrap_or(0.0);
                         let from = b["from"].as_str().unwrap_or("?");
                         let name = resolve_display_name(from);
                         println!("  [{bid}] ({btype}) {pred}");
-                        println!("         by {name}, confidence: {:.0}%", conf * 100.0);
+                        println!("         by {name}");
+                        print_soma_details(b);
                     }
                 }
                 Err(e) => { eprintln!("  Error: {e}"); process::exit(1); }
