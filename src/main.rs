@@ -287,6 +287,23 @@ enum Commands {
     /// Show read receipts for your messages
     Status,
 
+    /// Grant credits to an agent (admin only)
+    CreditGrant {
+        /// Agent ID
+        agent_id: String,
+        /// Amount to grant
+        amount: i64,
+        /// Reason
+        #[arg(long, default_value = "allocation")]
+        reason: String,
+    },
+
+    /// Check credit balance
+    Balance {
+        /// Agent ID (default: you)
+        agent_id: Option<String>,
+    },
+
     /// Emit a capability gap — what this room needs
     Gap {
         /// Capability type (e.g. "deployment", "testing", "rust-dev")
@@ -1908,6 +1925,27 @@ fn main() {
                     eprintln!("  Error: {e}");
                     process::exit(1);
                 }
+            }
+        }
+
+        Commands::CreditGrant { agent_id, amount, reason } => {
+            match chat::credit_grant(&agent_id, amount, &reason, room) {
+                Ok(balance) => {
+                    let name = resolve_display_name(&agent_id);
+                    println!("  Granted {amount} credits to {name}. Balance: {balance}");
+                }
+                Err(e) => { eprintln!("  Error: {e}"); process::exit(1); }
+            }
+        }
+
+        Commands::Balance { agent_id } => {
+            match chat::credit_balance_check(agent_id.as_deref(), room) {
+                Ok(balance) => {
+                    let id = agent_id.unwrap_or_else(|| store::get_agent_id());
+                    let name = resolve_display_name(&id);
+                    println!("  {name}: {balance} credits");
+                }
+                Err(e) => { eprintln!("  Error: {e}"); process::exit(1); }
             }
         }
 

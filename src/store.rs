@@ -666,6 +666,38 @@ pub fn take_notify_flag(room_id: &str) -> bool {
     exists
 }
 
+// ── Credits / Agent Economy ────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreditEntry {
+    pub agent_id: String,
+    pub amount: i64,
+    pub reason: String,
+    pub ts: u64,
+}
+
+pub fn load_ledger(room_id: &str) -> Vec<CreditEntry> {
+    let path = agora_dir().join("rooms").join(room_id).join("ledger.json");
+    if let Ok(data) = fs::read_to_string(&path) { serde_json::from_str(&data).unwrap_or_default() }
+    else { Vec::new() }
+}
+
+pub fn save_ledger(room_id: &str, ledger: &[CreditEntry]) {
+    let dir = agora_dir().join("rooms").join(room_id);
+    ensure_dir(&dir);
+    let _ = fs::write(dir.join("ledger.json"), serde_json::to_string_pretty(ledger).unwrap());
+}
+
+pub fn credit_balance(room_id: &str, agent_id: &str) -> i64 {
+    load_ledger(room_id).iter().filter(|e| e.agent_id == agent_id).map(|e| e.amount).sum()
+}
+
+pub fn credit_add(room_id: &str, agent_id: &str, amount: i64, reason: &str) {
+    let mut ledger = load_ledger(room_id);
+    ledger.push(CreditEntry { agent_id: agent_id.to_string(), amount, reason: reason.to_string(), ts: now() });
+    save_ledger(room_id, &ledger);
+}
+
 // ── Capability Cards ───────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
