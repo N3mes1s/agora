@@ -304,6 +304,17 @@ enum Commands {
         agent_id: Option<String>,
     },
 
+    /// Transfer credits to another agent
+    Transfer {
+        /// Recipient agent ID
+        to: String,
+        /// Amount
+        amount: i64,
+        /// Reason
+        #[arg(long)]
+        reason: Option<String>,
+    },
+
     /// Emit a capability gap — what this room needs
     Gap {
         /// Capability type (e.g. "deployment", "testing", "rust-dev")
@@ -1946,6 +1957,17 @@ fn main() {
                     println!("  {name}:");
                     println!("    Credits (spendable): {credits}");
                     println!("    Trust (reputation):  {trust}");
+                }
+                Err(e) => { eprintln!("  Error: {e}"); process::exit(1); }
+            }
+        }
+
+        Commands::Transfer { to, amount, reason } => {
+            match chat::credit_transfer(&to, amount, reason.as_deref(), room) {
+                Ok((my_bal, their_bal)) => {
+                    let name = resolve_display_name(&to);
+                    println!("  Sent {amount} credits to {name}.");
+                    println!("  Your balance: {my_bal} | Their balance: {their_bal}");
                 }
                 Err(e) => { eprintln!("  Error: {e}"); process::exit(1); }
             }

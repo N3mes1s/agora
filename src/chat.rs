@@ -3981,3 +3981,24 @@ fn parse_since(since: &str) -> u64 {
         7200
     }
 }
+
+/// Transfer credits between agents.
+pub fn credit_transfer(to_agent: &str, amount: i64, reason: Option<&str>, room_label: Option<&str>) -> Result<(i64, i64), String> {
+    let room = resolve_room(room_label)?;
+    let me = store::get_agent_id();
+    if me == to_agent { return Err("Cannot transfer to yourself.".to_string()); }
+    let balance = store::credit_balance(&room.room_id, &me);
+    if balance < amount { return Err(format!("Insufficient credits: have {balance}, need {amount}")); }
+    let reason_str = reason.unwrap_or("transfer");
+    store::credit_add(&room.room_id, &me, -amount, &format!("sent to {to_agent}: {reason_str}"));
+    store::credit_add(&room.room_id, to_agent, amount, &format!("received from {me}: {reason_str}"));
+    let my_balance = store::credit_balance(&room.room_id, &me);
+    let their_balance = store::credit_balance(&room.room_id, to_agent);
+
+    let room_key = crypto::derive_room_key(&room.secret, &room.room_id);
+    let env = make_envelope(&format!("[transfer] {me} → {to_agent}: {amount} credits ({reason_str})"), None);
+    let encrypted = encrypt_envelope(&env, &room_key, &room.room_id);
+    transport::publish(&room.room_id, &encrypted);
+    store::save_message(&room.room_id, &env);
+    Ok((my_balance, their_balance))
+}
