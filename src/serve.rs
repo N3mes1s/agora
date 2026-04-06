@@ -583,11 +583,11 @@ fn handle_sse(mut stream: TcpStream, room_label: String, since_ts: u64) {
     let mut relay_tick: u32 = 0;
 
     loop {
-        thread::sleep(Duration::from_secs(3));
+        thread::sleep(Duration::from_secs(2));
         relay_tick += 1;
 
-        // Every 5 ticks (~15 s) fetch from relay to populate local store.
-        if relay_tick % 5 == 0 {
+        // Every 3 ticks (~6 s) fetch from relay to populate local store.
+        if relay_tick % 3 == 0 {
             let _ = chat::read("30m", 50, Some(&room_label));
         }
 
