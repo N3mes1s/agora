@@ -7,6 +7,8 @@
 //!   identity.json             — agent identity
 
 use crate::crypto;
+use base64::Engine;
+use ring::digest;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -14,6 +16,11 @@ use std::path::PathBuf;
 #[cfg(test)]
 use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
+
+const BASE64: base64::engine::general_purpose::GeneralPurpose =
+    base64::engine::general_purpose::STANDARD;
+const BASE64_URLSAFE: base64::engine::general_purpose::GeneralPurpose =
+    base64::engine::general_purpose::URL_SAFE_NO_PAD;
 
 fn agora_dir() -> PathBuf {
     dirs::home_dir()
@@ -34,59 +41,140 @@ fn now() -> u64 {
 
 // ── Identity ────────────────────────────────────────────────────
 
-pub fn get_agent_id() -> String {
-    // Env override — lets multiple runtimes on the same machine have distinct IDs.
-    if let Ok(id) = std::env::var("AGORA_AGENT_ID") {
-        if !id.is_empty() {
-            return id;
-        }
-    }
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct IdentityRecord {
+    pub agent_id: String,
+    #[serde(default)]
+    pub legacy_agent_id: Option<String>,
+    #[serde(default)]
+    pub signing_pkcs8: Option<String>,
+    #[serde(default)]
+    pub created_at: u64,
+}
 
-    let id_file = agora_dir().join("identity.json");
-    if let Ok(data) = fs::read_to_string(&id_file) {
-        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&data) {
-            if let Some(id) = v["agent_id"].as_str() {
-                return id.to_string();
-            }
-        }
-    }
+fn identity_path() -> PathBuf {
+    agora_dir().join("identity.json")
+}
 
-    // Derive from env or generate
-    let agent_id = if let Ok(sid) = std::env::var("CLAUDE_CODE_SESSION_ID") {
-        if sid.starts_with("cse_") {
-            sid[4..12.min(sid.len())].to_string()
-        } else {
-            sid[..8.min(sid.len())].to_string()
-        }
-    } else {
-        let rng = ring::rand::SystemRandom::new();
-        let mut buf = [0u8; 4];
-        ring::rand::SecureRandom::fill(&rng, &mut buf).expect("RNG failed");
-        hex::encode(buf)
-    };
-
-    let dir = agora_dir();
-    ensure_dir(&dir);
-    let json = serde_json::json!({"agent_id": agent_id});
-    let _ = fs::write(&id_file, serde_json::to_string_pretty(&json).unwrap());
-    agent_id
+fn runtime_alias_override() -> Option<String> {
+    std::env::var("AGORA_AGENT_ID")
+        .ok()
+        .map(|id| id.trim().to_string())
+        .filter(|id| !id.is_empty())
 }
 
 fn signing_keys_dir() -> PathBuf {
     agora_dir().join("signing-keys")
 }
 
-pub fn load_or_create_signing_keypair(agent_id: &str) -> Result<Vec<u8>, String> {
-    let dir = signing_keys_dir();
+fn legacy_signing_key_path(agent_id: &str) -> PathBuf {
+    signing_keys_dir().join(format!("{agent_id}.pkcs8"))
+}
+
+fn decode_identity_key(encoded: &str) -> Result<Vec<u8>, String> {
+    let trimmed = encoded.trim();
+    BASE64
+        .decode(trimmed)
+        .or_else(|_| BASE64_URLSAFE.decode(trimmed))
+        .map_err(|e| format!("invalid AGORA_IDENTITY_KEY / persisted key: {e}"))
+}
+
+fn canonical_agent_id_from_public_key(public_key: &[u8]) -> String {
+    let hash = digest::digest(&digest::SHA256, public_key);
+    hex::encode(&hash.as_ref()[..8])
+}
+
+pub fn load_identity() -> Option<IdentityRecord> {
+    let data = fs::read_to_string(identity_path()).ok()?;
+    serde_json::from_str(&data).ok()
+}
+
+fn save_identity(identity: &IdentityRecord) -> Result<(), String> {
+    let dir = agora_dir();
     ensure_dir(&dir);
-    let path = dir.join(format!("{agent_id}.pkcs8"));
-    if let Ok(data) = fs::read(&path) {
-        return Ok(data);
+    let data = serde_json::to_string_pretty(identity).map_err(|e| e.to_string())?;
+    fs::write(identity_path(), data).map_err(|e| format!("failed to persist identity: {e}"))
+}
+
+fn normalize_identity(existing: Option<IdentityRecord>) -> Result<IdentityRecord, String> {
+    let existing = existing.unwrap_or_default();
+    let legacy_agent_id = existing.legacy_agent_id.clone().or_else(|| {
+        (existing.signing_pkcs8.is_none() && !existing.agent_id.is_empty())
+            .then(|| existing.agent_id.clone())
+    });
+
+    let pkcs8 = if let Ok(key) = std::env::var("AGORA_IDENTITY_KEY") {
+        if key.trim().is_empty() {
+            return Err("AGORA_IDENTITY_KEY is empty.".to_string());
+        }
+        decode_identity_key(&key)?
+    } else if let Some(encoded) = existing.signing_pkcs8.as_deref() {
+        decode_identity_key(encoded)?
+    } else if let Some(legacy) = legacy_agent_id.as_deref() {
+        fs::read(legacy_signing_key_path(legacy)).unwrap_or_else(|_| {
+            crypto::generate_signing_keypair_pkcs8().expect("identity key generation failed")
+        })
+    } else {
+        crypto::generate_signing_keypair_pkcs8().map_err(|e| e.to_string())?
+    };
+
+    let public_key = crypto::signing_public_key(&pkcs8).map_err(|e| e.to_string())?;
+    let canonical_agent_id = canonical_agent_id_from_public_key(&public_key);
+
+    Ok(IdentityRecord {
+        agent_id: canonical_agent_id.clone(),
+        legacy_agent_id: legacy_agent_id.filter(|legacy| legacy != &canonical_agent_id),
+        signing_pkcs8: Some(BASE64.encode(&pkcs8)),
+        created_at: if existing.created_at == 0 {
+            now()
+        } else {
+            existing.created_at
+        },
+    })
+}
+
+pub fn load_or_create_identity() -> Result<IdentityRecord, String> {
+    let existing = load_identity();
+    let identity = normalize_identity(existing.clone())?;
+    if existing.as_ref() != Some(&identity) {
+        save_identity(&identity)?;
+    }
+    Ok(identity)
+}
+
+pub fn get_canonical_agent_id() -> String {
+    load_or_create_identity()
+        .map(|identity| identity.agent_id)
+        .unwrap_or_default()
+}
+
+pub fn get_identity_fingerprint() -> Result<String, String> {
+    let identity = load_or_create_identity()?;
+    let pkcs8 = decode_identity_key(identity.signing_pkcs8.as_deref().unwrap_or(""))?;
+    let public_key = crypto::signing_public_key(&pkcs8).map_err(|e| e.to_string())?;
+    let hash = digest::digest(&digest::SHA256, &public_key);
+    Ok(hex::encode(&hash.as_ref()[..16])
+        .as_bytes()
+        .chunks(4)
+        .map(|chunk| std::str::from_utf8(chunk).unwrap_or(""))
+        .collect::<Vec<_>>()
+        .join(" "))
+}
+
+pub fn get_agent_id() -> String {
+    if let Some(alias) = runtime_alias_override() {
+        return alias;
     }
 
-    let pkcs8 = crypto::generate_signing_keypair_pkcs8().map_err(|e| e.to_string())?;
-    fs::write(&path, &pkcs8).map_err(|e| format!("failed to persist signing key: {e}"))?;
-    Ok(pkcs8)
+    match load_or_create_identity() {
+        Ok(identity) => identity.legacy_agent_id.unwrap_or(identity.agent_id),
+        Err(_) => String::new(),
+    }
+}
+
+pub fn load_or_create_signing_keypair(_agent_id: &str) -> Result<Vec<u8>, String> {
+    let identity = load_or_create_identity()?;
+    decode_identity_key(identity.signing_pkcs8.as_deref().unwrap_or(""))
 }
 
 // ── Trusted Signing Keys (TOFU) ────────────────────────────────
@@ -877,4 +965,151 @@ pub fn mark_seen(room_id: &str, msg_id: &str) {
         ids = ids[ids.len() - 1000..].to_vec();
     }
     let _ = fs::write(&path, ids.join("\n"));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_home(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "agora-store-{name}-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ))
+    }
+
+    fn restore_env(name: &str, value: Option<String>) {
+        match value {
+            Some(value) => unsafe { std::env::set_var(name, value) },
+            None => unsafe { std::env::remove_var(name) },
+        }
+    }
+
+    #[test]
+    fn fresh_identity_uses_canonical_key_derived_id() {
+        let _guard = test_env_lock().lock().unwrap();
+        let home = temp_home("fresh-id");
+        std::fs::create_dir_all(&home).unwrap();
+
+        let prior_home = std::env::var("HOME").ok();
+        let prior_agent = std::env::var("AGORA_AGENT_ID").ok();
+        let prior_key = std::env::var("AGORA_IDENTITY_KEY").ok();
+        unsafe {
+            std::env::set_var("HOME", &home);
+            std::env::remove_var("AGORA_AGENT_ID");
+            std::env::remove_var("AGORA_IDENTITY_KEY");
+        }
+
+        let sender_id = get_agent_id();
+        let canonical_id = get_canonical_agent_id();
+        let identity = load_identity().unwrap();
+
+        assert_eq!(sender_id, canonical_id);
+        assert_eq!(canonical_id.len(), 16);
+        assert!(identity.signing_pkcs8.is_some());
+        assert!(identity.legacy_agent_id.is_none());
+        assert!(!get_identity_fingerprint().unwrap().is_empty());
+
+        restore_env("HOME", prior_home);
+        restore_env("AGORA_AGENT_ID", prior_agent);
+        restore_env("AGORA_IDENTITY_KEY", prior_key);
+    }
+
+    #[test]
+    fn legacy_identity_migrates_alias_without_losing_sender_name() {
+        let _guard = test_env_lock().lock().unwrap();
+        let home = temp_home("legacy-id");
+        let agora = home.join(".agora");
+        std::fs::create_dir_all(agora.join("signing-keys")).unwrap();
+
+        let prior_home = std::env::var("HOME").ok();
+        let prior_agent = std::env::var("AGORA_AGENT_ID").ok();
+        let prior_key = std::env::var("AGORA_IDENTITY_KEY").ok();
+        unsafe {
+            std::env::set_var("HOME", &home);
+            std::env::remove_var("AGORA_AGENT_ID");
+            std::env::remove_var("AGORA_IDENTITY_KEY");
+        }
+
+        let pkcs8 = crypto::generate_signing_keypair_pkcs8().unwrap();
+        std::fs::write(agora.join("signing-keys").join("legacy-alice.pkcs8"), &pkcs8).unwrap();
+        std::fs::write(
+            agora.join("identity.json"),
+            serde_json::json!({"agent_id": "legacy-alice"}).to_string(),
+        )
+        .unwrap();
+
+        let sender_id = get_agent_id();
+        let canonical_id = get_canonical_agent_id();
+        let identity = load_identity().unwrap();
+
+        assert_eq!(sender_id, "legacy-alice");
+        assert_eq!(identity.legacy_agent_id.as_deref(), Some("legacy-alice"));
+        assert_ne!(canonical_id, "legacy-alice");
+        assert_eq!(canonical_id.len(), 16);
+        assert!(identity.signing_pkcs8.is_some());
+        assert_eq!(load_or_create_signing_keypair("legacy-alice").unwrap(), pkcs8);
+
+        restore_env("HOME", prior_home);
+        restore_env("AGORA_AGENT_ID", prior_agent);
+        restore_env("AGORA_IDENTITY_KEY", prior_key);
+    }
+
+    #[test]
+    fn imported_identity_key_sets_stable_canonical_id() {
+        let _guard = test_env_lock().lock().unwrap();
+        let home = temp_home("imported-id");
+        std::fs::create_dir_all(&home).unwrap();
+
+        let prior_home = std::env::var("HOME").ok();
+        let prior_agent = std::env::var("AGORA_AGENT_ID").ok();
+        let prior_key = std::env::var("AGORA_IDENTITY_KEY").ok();
+
+        let pkcs8 = crypto::generate_signing_keypair_pkcs8().unwrap();
+        let public_key = crypto::signing_public_key(&pkcs8).unwrap();
+        let expected = canonical_agent_id_from_public_key(&public_key);
+
+        unsafe {
+            std::env::set_var("HOME", &home);
+            std::env::remove_var("AGORA_AGENT_ID");
+            std::env::set_var("AGORA_IDENTITY_KEY", BASE64.encode(&pkcs8));
+        }
+
+        assert_eq!(get_canonical_agent_id(), expected);
+        assert_eq!(load_or_create_signing_keypair("ignored").unwrap(), pkcs8);
+
+        restore_env("HOME", prior_home);
+        restore_env("AGORA_AGENT_ID", prior_agent);
+        restore_env("AGORA_IDENTITY_KEY", prior_key);
+    }
+
+    #[test]
+    fn runtime_alias_override_does_not_change_canonical_identity() {
+        let _guard = test_env_lock().lock().unwrap();
+        let home = temp_home("alias-override");
+        std::fs::create_dir_all(&home).unwrap();
+
+        let prior_home = std::env::var("HOME").ok();
+        let prior_agent = std::env::var("AGORA_AGENT_ID").ok();
+        let prior_key = std::env::var("AGORA_IDENTITY_KEY").ok();
+        unsafe {
+            std::env::set_var("HOME", &home);
+            std::env::set_var("AGORA_AGENT_ID", "codex-worker");
+            std::env::remove_var("AGORA_IDENTITY_KEY");
+        }
+
+        let sender_id = get_agent_id();
+        let canonical_id = get_canonical_agent_id();
+
+        assert_eq!(sender_id, "codex-worker");
+        assert_eq!(canonical_id.len(), 16);
+        assert_ne!(canonical_id, sender_id);
+
+        restore_env("HOME", prior_home);
+        restore_env("AGORA_AGENT_ID", prior_agent);
+        restore_env("AGORA_IDENTITY_KEY", prior_key);
+    }
 }

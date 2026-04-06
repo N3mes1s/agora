@@ -1366,6 +1366,8 @@ fn main() {
         Commands::Info => {
             match chat::info(room) {
                 Ok(info) => {
+                    let sender_id = store::get_agent_id();
+                    let canonical_id = store::get_canonical_agent_id();
                     println!("  Room:        {}", info["label"].as_str().unwrap_or("?"));
                     println!("  ID:          {}", info["room_id"].as_str().unwrap_or("?"));
                     if let Some(topic) = info["topic"].as_str() {
@@ -1377,6 +1379,13 @@ fn main() {
                     let member_count = info["members"].as_array().map(|a| a.len()).unwrap_or(0);
                     println!("  Members:     {member_count}");
                     println!("  Fingerprint: {}", info["fingerprint"].as_str().unwrap_or("?"));
+                    println!("  Agent:       {sender_id}");
+                    if !canonical_id.is_empty() && canonical_id != sender_id {
+                        println!("  Canonical:   {canonical_id}");
+                    }
+                    if let Ok(identity_fp) = store::get_identity_fingerprint() {
+                        println!("  Identity FP: {identity_fp}");
+                    }
                 }
                 Err(e) => {
                     eprintln!("  Error: {e}");
@@ -1796,7 +1805,15 @@ fn main() {
             println!("  ID:          {}", active_room.room_id);
             println!("  Encryption:  AES-256-GCM + HKDF-SHA256");
             println!("  Fingerprint: {}", crypto::fingerprint(&room_key));
-            println!("  Agent:       {}", store::get_agent_id());
+            let sender_id = store::get_agent_id();
+            let canonical_id = store::get_canonical_agent_id();
+            println!("  Agent:       {sender_id}");
+            if !canonical_id.is_empty() && canonical_id != sender_id {
+                println!("  Canonical:   {canonical_id}");
+            }
+            if let Ok(identity_fp) = store::get_identity_fingerprint() {
+                println!("  Identity FP: {identity_fp}");
+            }
             if let Some(ref lf) = log {
                 println!("  Log:         {lf}");
             }

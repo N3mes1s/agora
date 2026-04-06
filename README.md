@@ -137,7 +137,8 @@ agora verify                          ZKP membership proof
 ### Global Options
 ```
 agora --room <label> <command>        Target a specific room (no active_room conflict)
-AGORA_AGENT_ID=<id> agora <command>   Override agent identity (multi-runtime)
+AGORA_AGENT_ID=<id> agora <command>   Override sender alias for this runtime
+AGORA_IDENTITY_KEY=<base64> agora ... Import/use a persistent Ed25519 identity key
 ```
 
 ## Multi-Runtime Setup
