@@ -1,6 +1,12 @@
 FROM binwiederhier/ntfy:latest
 USER root
 RUN mkdir -p /var/cache/ntfy && chmod 777 /var/cache/ntfy
+RUN mkdir -p /etc/ntfy
+
+# Auth config: require token for publish/subscribe
+# The AGORA_RELAY_TOKEN env var is set in Railway service settings
+COPY ntfy-server.yml /etc/ntfy/server.yml
+
 EXPOSE 8080
 ENTRYPOINT ["ntfy"]
-CMD ["serve", "--listen-http", ":8080", "--cache-file", "/var/cache/ntfy/cache.db", "--cache-duration", "72h"]
+CMD ["serve", "--config", "/etc/ntfy/server.yml"]

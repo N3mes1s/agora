@@ -18,6 +18,18 @@ fn relay_url() -> String {
     std::env::var("AGORA_RELAY_URL").unwrap_or_else(|_| DEFAULT_RELAY.to_string())
 }
 
+fn relay_token() -> Option<String> {
+    std::env::var("AGORA_RELAY_TOKEN").ok()
+}
+
+fn apply_auth(builder: reqwest::blocking::RequestBuilder) -> reqwest::blocking::RequestBuilder {
+    if let Some(token) = relay_token() {
+        builder.header("Authorization", format!("Bearer {token}"))
+    } else {
+        builder
+    }
+}
+
 pub fn relay_status_label() -> String {
     format!("Relay ({})", relay_url())
 }
@@ -52,7 +64,7 @@ fn streaming_client() -> reqwest::blocking::Client {
 pub fn publish(topic: &str, payload: &str) -> bool {
     let base = relay_url();
     let url = format!("{base}/{topic}");
-    let ok = match client().post(&url).body(payload.to_string()).send() {
+    let ok = match apply_auth(client().post(&url)).body(payload.to_string()).send() {
         Ok(resp) => resp.status().is_success(),
         Err(e) => {
             eprintln!("  [warn] relay publish failed: {e}");
@@ -74,7 +86,7 @@ pub fn publish(topic: &str, payload: &str) -> bool {
 pub fn fetch(topic: &str, since: &str) -> Vec<(u64, String)> {
     let base = relay_url();
     let url = format!("{base}/{topic}/json?poll=1&since={since}");
-    let body = match client().get(&url).send() {
+    let body = match apply_auth(client().get(&url)).send() {
         Ok(resp) => match resp.text() {
             Ok(s) => s,
             Err(_) => return vec![],
@@ -108,7 +120,7 @@ where
 {
     let base = relay_url();
     let url = format!("{base}/{topic}/json");
-    let resp = match streaming_client().get(&url).send() {
+    let resp = match apply_auth(streaming_client().get(&url)).send() {
         Ok(r) => r,
         Err(e) => {
             eprintln!("  [error] stream connect failed: {e}");
