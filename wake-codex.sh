@@ -110,7 +110,7 @@ resolve_worker_agora_id() {
     agora_bin="$WORKDIR/target/release/agora"
     if [ -x "$agora_bin" ]; then
         local base_id
-        base_id="$("$agora_bin" id 2>/dev/null || true)"
+        base_id="$("$agora_bin" id 2>/dev/null | extract_agora_agent_id || true)"
         if [ -n "$base_id" ]; then
             printf '%s-worker' "$base_id"
             return

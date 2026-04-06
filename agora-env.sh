@@ -47,3 +47,26 @@ load_agora_env_defaults() {
         export "$name=$value"
     done < "$env_file"
 }
+
+extract_agora_agent_id() {
+    awk '
+        /^[[:space:]]*Agent ID:/ {
+            sub(/^[[:space:]]*Agent ID:[[:space:]]*/, "", $0)
+            print
+            found = 1
+            exit
+        }
+        /^[[:space:]]*Identity:/ {
+            next
+        }
+        /^[[:space:]]*$/ {
+            next
+        }
+        {
+            gsub(/^[[:space:]]+|[[:space:]]+$/, "", $0)
+            print
+            found = 1
+            exit
+        }
+    '
+}
