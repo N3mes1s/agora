@@ -432,6 +432,35 @@ pub fn record_receipts(room_id: &str, msg_ids: &[String], reader: &str) {
     save_receipts(room_id, &receipts);
 }
 
+// ── Receipted-sent tracking ────────────────────────────────────
+// receipted_sent.txt: one message-ID per line, IDs we have already ACKed.
+// Prevents duplicate receipts across multiple `agora read` invocations.
+
+pub fn is_receipted_sent(room_id: &str, msg_id: &str) -> bool {
+    let path = agora_dir().join("rooms").join(room_id).join("receipted_sent.txt");
+    fs::read_to_string(&path)
+        .map(|data| data.lines().any(|s| s == msg_id))
+        .unwrap_or(false)
+}
+
+pub fn mark_receipted_sent(room_id: &str, msg_id: &str) {
+    let dir = agora_dir().join("rooms").join(room_id);
+    ensure_dir(&dir);
+    let path = dir.join("receipted_sent.txt");
+    let mut sent: HashSet<String> = fs::read_to_string(&path)
+        .map(|data| data.lines().map(|s| s.to_string()).collect())
+        .unwrap_or_default();
+    if sent.insert(msg_id.to_string()) {
+        let mut ids: Vec<_> = sent.into_iter().collect();
+        ids.sort();
+        // cap at 2000 entries — oldest (lexicographically) are trimmed first
+        if ids.len() > 2000 {
+            ids = ids[ids.len() - 2000..].to_vec();
+        }
+        let _ = fs::write(&path, ids.join("\n"));
+    }
+}
+
 // ── Reactions ──────────────────────────────────────────────────
 // reactions.json: { "msg_id": [["agent", "emoji"], ...] }
 

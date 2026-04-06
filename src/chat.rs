@@ -254,6 +254,7 @@ pub fn send(message: &str, reply_to: Option<&str>, room_label: Option<&str>) -> 
 pub fn read(since: &str, limit: usize, room_label: Option<&str>) -> Result<Vec<serde_json::Value>, String> {
     let room = resolve_room(room_label)?;
     let room_key = crypto::derive_room_key(&room.secret, &room.room_id);
+    let me = store::get_agent_id();
 
     // Fetch from relay
     let remote_events = transport::fetch(&room.room_id, since);
@@ -273,18 +274,52 @@ pub fn read(since: &str, limit: usize, room_label: Option<&str>) -> Result<Vec<s
 
     let mut seen_ids: HashSet<String> = HashSet::new();
     let mut merged = Vec::new();
+    let mut to_ack: Vec<String> = Vec::new();
+
     for msg in remote_msgs.into_iter().chain(local_msgs) {
         let mid = msg["id"].as_str().unwrap_or("?").to_string();
         if mid != "?" && seen_ids.contains(&mid) {
             continue;
         }
-        seen_ids.insert(mid);
+        seen_ids.insert(mid.clone());
         // Track presence from all messages (including heartbeats)
         track_presence(&room.room_id, &msg);
-        // Only persist and display non-heartbeat messages
-        if !is_heartbeat(&msg) {
-            store::save_message(&room.room_id, &msg);
-            merged.push(msg);
+
+        if is_heartbeat(&msg) {
+            continue;
+        }
+
+        // Process incoming receipts silently — record & skip display
+        if is_receipt(&msg) {
+            if let Some(ids) = msg["read_ids"].as_array() {
+                let reader = msg["from"].as_str().unwrap_or("").to_string();
+                let msg_ids: Vec<String> = ids
+                    .iter()
+                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                    .collect();
+                store::record_receipts(&room.room_id, &msg_ids, &reader);
+            }
+            continue;
+        }
+
+        store::save_message(&room.room_id, &msg);
+
+        // Queue an ACK for messages from other agents that we haven't receipted yet
+        let from = msg["from"].as_str().unwrap_or("");
+        if from != me && mid != "?" && !store::is_receipted_sent(&room.room_id, &mid) {
+            to_ack.push(mid.clone());
+        }
+
+        merged.push(msg);
+    }
+
+    // Send a single batched receipt for all newly-seen messages
+    if !to_ack.is_empty() {
+        let receipt = make_receipt(&to_ack);
+        let encrypted = encrypt_envelope(&receipt, &room_key, &room.room_id);
+        let _ = transport::publish(&room.room_id, &encrypted);
+        for mid in &to_ack {
+            store::mark_receipted_sent(&room.room_id, mid);
         }
     }
 
@@ -300,6 +335,27 @@ pub fn read(since: &str, limit: usize, room_label: Option<&str>) -> Result<Vec<s
         merged = merged[merged.len() - limit..].to_vec();
     }
     Ok(merged)
+}
+
+/// Return the list of agents that have sent a delivery receipt for `msg_id_prefix`.
+///
+/// The prefix is matched against stored message IDs; the shortest unique prefix works.
+pub fn delivery_receipts(msg_id_prefix: &str, room_label: Option<&str>) -> Result<Vec<serde_json::Value>, String> {
+    let room = resolve_room(room_label)?;
+    let receipts = store::load_receipts(&room.room_id);
+
+    // Resolve prefix → full ID (or use as-is if exact)
+    let full_id = receipts
+        .keys()
+        .find(|k| k.starts_with(msg_id_prefix))
+        .cloned()
+        .unwrap_or_else(|| msg_id_prefix.to_string());
+
+    let readers = receipts.get(&full_id).cloned().unwrap_or_default();
+    Ok(readers
+        .into_iter()
+        .map(|from| json!({ "from": from }))
+        .collect())
 }
 
 pub fn check(since: &str, room_label: Option<&str>) -> Result<Vec<serde_json::Value>, String> {
@@ -1131,7 +1187,11 @@ mod tests {
     use crate::store::{self, Role};
     use serde_json::json;
     use std::path::PathBuf;
+    use std::sync::Mutex;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    /// Serialise tests that mutate HOME / AGORA_AGENT_ID.
+    static TEST_ENV_MUTEX: Mutex<()> = Mutex::new(());
 
     fn temp_home() -> PathBuf {
         let ts = SystemTime::now()
@@ -1151,7 +1211,8 @@ mod tests {
             .unwrap_or(0)
     }
 
-    fn setup_pin_room() -> (PathBuf, String, String) {
+    fn setup_pin_room() -> (PathBuf, String, String, std::sync::MutexGuard<'static, ()>) {
+        let _lock = TEST_ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let home = std::env::temp_dir().join(format!(
             "agora-pin-test-{}",
             SystemTime::now()
@@ -1185,11 +1246,12 @@ mod tests {
             "v": "3.0",
         }));
 
-        (home, first, second)
+        (home, first, second, _lock)
     }
 
     #[test]
     fn resolve_room_reports_missing_explicit_target() {
+        let _lock = TEST_ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let home = temp_home();
         std::fs::create_dir_all(&home).unwrap();
         unsafe {
@@ -1203,6 +1265,7 @@ mod tests {
 
     #[test]
     fn watch_heartbeat_targets_watched_room_not_active_room() {
+        let _lock = TEST_ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let home = temp_home();
         std::fs::create_dir_all(&home).unwrap();
         unsafe {
@@ -1230,7 +1293,7 @@ mod tests {
 
     #[test]
     fn pin_and_unpin_round_trip() {
-        let (_home, first, _second) = setup_pin_room();
+        let (_home, first, _second, _lock) = setup_pin_room();
 
         let (resolved, added) = pin("aaaa", None).unwrap();
         assert_eq!(resolved, first);
@@ -1247,6 +1310,63 @@ mod tests {
         assert_eq!(unpinned, first);
         assert!(removed);
         assert!(pins(None).unwrap().is_empty());
+    }
+
+    #[test]
+    fn delivery_receipts_prefix_lookup() {
+        let _lock = TEST_ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = temp_home();
+        std::fs::create_dir_all(&home).unwrap();
+        unsafe {
+            std::env::set_var("HOME", &home);
+            std::env::set_var("AGORA_AGENT_ID", "receipt-test");
+        }
+
+        let room = store::add_room("ag-receipts", "secret-receipts", "receipts", Role::Admin);
+        store::set_active_room("receipts");
+
+        let msg_id = "abcdef1234567890".to_string();
+        store::record_receipts(&room.room_id, &[msg_id.clone()], "alice");
+        store::record_receipts(&room.room_id, &[msg_id.clone()], "bob");
+
+        // Full ID lookup
+        let results = super::delivery_receipts(&msg_id, None).unwrap();
+        assert_eq!(results.len(), 2);
+
+        // Prefix lookup
+        let results = super::delivery_receipts("abcdef", None).unwrap();
+        assert_eq!(results.len(), 2);
+        let froms: Vec<_> = results.iter().filter_map(|r| r["from"].as_str()).collect();
+        assert!(froms.contains(&"alice"));
+        assert!(froms.contains(&"bob"));
+
+        // Unknown ID → empty
+        let results = super::delivery_receipts("xxxxxx", None).unwrap();
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn mark_receipted_sent_idempotent() {
+        let _lock = TEST_ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = temp_home();
+        std::fs::create_dir_all(&home).unwrap();
+        unsafe {
+            std::env::set_var("HOME", &home);
+            std::env::set_var("AGORA_AGENT_ID", "receipt-idem-test");
+        }
+
+        let room = store::add_room("ag-idem", "secret-idem", "idem", Role::Admin);
+        store::set_active_room("idem");
+
+        let mid = "msg-001".to_string();
+        assert!(!store::is_receipted_sent(&room.room_id, &mid));
+
+        store::mark_receipted_sent(&room.room_id, &mid);
+        assert!(store::is_receipted_sent(&room.room_id, &mid));
+
+        // Calling again is a no-op (should not panic or duplicate)
+        store::mark_receipted_sent(&room.room_id, &mid);
+        assert!(store::is_receipted_sent(&room.room_id, &mid));
     }
 }
 
