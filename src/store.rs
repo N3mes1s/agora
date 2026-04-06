@@ -440,56 +440,6 @@ pub fn get_profile(room_id: &str, agent_id: &str) -> Option<AgentProfile> {
     load_profiles(room_id).into_iter().find(|p| p.agent_id == agent_id)
 }
 
-// ── Agent Capability Cards ─────────────────────────────────────
-
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct AgentCapabilityCard {
-    pub agent_id: String,
-    #[serde(default)]
-    pub capabilities: Vec<String>,
-    #[serde(default)]
-    pub summary: Option<String>,
-    pub updated_at: u64,
-    #[serde(default = "default_card_auth")]
-    pub auth: String,
-}
-
-fn default_card_auth() -> String {
-    "unsigned".to_string()
-}
-
-pub fn load_capability_cards(room_id: &str) -> Vec<AgentCapabilityCard> {
-    let path = agora_dir().join("rooms").join(room_id).join("cards.json");
-    if let Ok(data) = fs::read_to_string(&path) {
-        serde_json::from_str(&data).unwrap_or_default()
-    } else {
-        Vec::new()
-    }
-}
-
-pub fn save_capability_cards(room_id: &str, cards: &[AgentCapabilityCard]) {
-    let dir = agora_dir().join("rooms").join(room_id);
-    ensure_dir(&dir);
-    let data = serde_json::to_string_pretty(cards).unwrap();
-    let _ = fs::write(dir.join("cards.json"), data);
-}
-
-pub fn upsert_capability_card(room_id: &str, card: &AgentCapabilityCard) {
-    let mut cards = load_capability_cards(room_id);
-    if let Some(existing) = cards.iter_mut().find(|c| c.agent_id == card.agent_id) {
-        *existing = card.clone();
-    } else {
-        cards.push(card.clone());
-    }
-    save_capability_cards(room_id, &cards);
-}
-
-pub fn get_capability_card(room_id: &str, agent_id: &str) -> Option<AgentCapabilityCard> {
-    load_capability_cards(room_id)
-        .into_iter()
-        .find(|c| c.agent_id == agent_id)
-}
-
 // ── Muted Agents ──────────────────────────────────────────────
 
 pub fn load_muted(room_id: &str) -> HashSet<String> {
@@ -607,10 +557,23 @@ pub fn take_notify_flag(room_id: &str) -> bool {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CapabilityCard {
     pub agent_id: String,
+    #[serde(default)]
     pub capabilities: Vec<String>,
+    #[serde(default = "default_true")]
     pub available: bool,
+    #[serde(default)]
     pub description: Option<String>,
     pub updated_at: u64,
+    #[serde(default = "default_card_auth")]
+    pub auth: String,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_card_auth() -> String {
+    "unsigned".to_string()
 }
 
 pub fn save_card(card: &CapabilityCard) {

@@ -847,7 +847,7 @@ fn print_soma_details(belief: &serde_json::Value) {
 
 fn print_msg_with_depth(env: &serde_json::Value, depth: usize) {
     match env["type"].as_str() {
-        Some("heartbeat" | "receipt" | "reaction" | "invite_redeem") => return,
+        Some("heartbeat" | "receipt" | "reaction" | "invite_redeem" | "card" | "capability_card") => return,
         _ => {}
     }
     let time = ts(env["ts"].as_u64().unwrap_or(0));
@@ -1869,6 +1869,7 @@ fn main() {
                         println!("  Description: {desc}");
                     }
                     println!("  Available: {}", if card.available { "yes" } else { "no" });
+                    println!("  Trust: {}", card.auth);
                 }
                 Ok(None) => println!("  No card found."),
                 Err(e) => { eprintln!("  Error: {e}"); process::exit(1); }
@@ -1883,10 +1884,16 @@ fn main() {
                         return;
                     }
                     println!("  {} agent(s) matching '{need}':\n", agents.len());
-                    for card in &agents {
-                        let name = resolve_display_name(&card.agent_id);
-                        let desc = card.description.as_deref().unwrap_or("");
-                        println!("  {name} — {}", card.capabilities.join(", "));
+                    for hit in &agents {
+                        let name = resolve_display_name(&hit.card.agent_id);
+                        let desc = hit.card.description.as_deref().unwrap_or("");
+                        println!(
+                            "  {name} — {} [room: {}, trust: {}]",
+                            hit.card.capabilities.join(", "),
+                            hit.room_label,
+                            hit.card.auth
+                        );
+                        println!("    overlap: {}", hit.overlap.join(", "));
                         if !desc.is_empty() { println!("    {desc}"); }
                     }
                 }
@@ -2010,12 +2017,27 @@ fn main() {
         Commands::Whois { agent_id } => {
             match chat::whois(&agent_id, room) {
                 Ok(Some(p)) => {
+                    let room_entry = selected_room(room).ok();
                     println!("  Agent:   {}", p.agent_id);
                     if let Some(name) = &p.name {
                         println!("  Name:    {name}");
                     }
                     if let Some(role) = &p.role {
                         println!("  Role:    {role}");
+                    }
+                    if let Some(room_entry) = room_entry {
+                        if let Some(card) = store::load_peer_cards(&room_entry.room_id)
+                            .into_iter()
+                            .find(|card| card.agent_id == p.agent_id)
+                        {
+                            if !card.capabilities.is_empty() {
+                                println!("  Card:    {}", card.capabilities.join(", "));
+                            }
+                            if let Some(desc) = &card.description {
+                                println!("  Summary: {desc}");
+                            }
+                            println!("  Trust:   {}", card.auth);
+                        }
                     }
                     let ago = std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() - p.updated_at;
@@ -2047,6 +2069,7 @@ fn main() {
                             "join" => "+",
                             "file" => "F",
                             "profile" => "P",
+                            "card" => "C",
                             "reaction" => "R",
                             "topic" => "T",
                             "admin" => "A",
