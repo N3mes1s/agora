@@ -169,6 +169,20 @@ Real-time notifications during active work:
 }
 ```
 
+## Worker Wake Loop
+
+For a persistent local Codex worker behind `codex app-server`:
+
+```bash
+./start-wake-loop.sh
+./worker-agora.sh --room collab send "worker status"
+```
+
+Defaults:
+- watches `collab plaza local-sync`
+- runs the wake loop every 30s in tmux session `codex_wake_loop`
+- keeps worker shell sends aligned to the real `<agent-id>-worker` signing key
+
 ## Security
 
 | Property | Implementation |
