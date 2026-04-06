@@ -15,6 +15,7 @@
 //! ```
 
 use base64::Engine;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::{HashMap, HashSet};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -24,8 +25,18 @@ use ring::rand::SecureRandom;
 use crate::{crypto, store, transport};
 
 const VERSION: &str = "3.0";
+const SIGNED_WIRE_VERSION: &str = "3.1";
 const BASE64: base64::engine::general_purpose::GeneralPurpose =
     base64::engine::general_purpose::STANDARD;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SignedWirePayload {
+    v: String,
+    from: String,
+    payload: String,
+    signing_pubkey: String,
+    sig: String,
+}
 
 fn now() -> u64 {
     SystemTime::now()
@@ -134,6 +145,13 @@ fn parse_envelope(raw: &str) -> Option<serde_json::Value> {
         }));
     }
     None
+}
+
+fn signing_message_bytes(room_id: &str, from: &str, signing_pubkey: &str, payload: &str) -> Vec<u8> {
+    format!(
+        "agora-signed-wire-v1\n{room_id}\n{from}\n{signing_pubkey}\n{payload}"
+    )
+    .into_bytes()
 }
 
 // ── Encrypt / Decrypt ───────────────────────────────────────────
@@ -559,10 +577,59 @@ pub fn task_done(task_id: &str, notes: Option<&str>, room_label: Option<&str>) -
     Ok(tid)
 }
 
-/// List tasks in the room.
+/// List tasks — merges local state with room messages for cloud agents.
 pub fn task_list(room_label: Option<&str>) -> Result<Vec<store::Task>, String> {
     let room = resolve_room(room_label)?;
-    Ok(store::load_tasks(&room.room_id))
+    let mut tasks = store::load_tasks(&room.room_id);
+
+    // Also scan room messages for task announcements (for agents without local state)
+    let msgs = store::load_messages(&room.room_id, 604800);
+    for msg in &msgs {
+        let text = msg["text"].as_str().unwrap_or("");
+        if text.starts_with("[task] New:") {
+            // Extract id from "(id: XXXXXX)" at end
+            if let Some(id_start) = text.rfind("(id: ") {
+                let id = &text[id_start + 5..text.len() - 1];
+                if !tasks.iter().any(|t| t.id.starts_with(id)) {
+                    let title = text["[task] New: ".len()..id_start].trim().to_string();
+                    tasks.push(store::Task {
+                        id: id.to_string(),
+                        title,
+                        status: "open".to_string(),
+                        created_by: msg["from"].as_str().unwrap_or("?").to_string(),
+                        claimed_by: None,
+                        created_at: msg["ts"].as_u64().unwrap_or(0),
+                        updated_at: msg["ts"].as_u64().unwrap_or(0),
+                        notes: None,
+                    });
+                }
+            }
+        } else if text.starts_with("[task] Claimed by ") {
+            let rest = &text["[task] Claimed by ".len()..];
+            if let Some(colon) = rest.find(": ") {
+                let claimer = &rest[..colon];
+                let title = &rest[colon + 2..];
+                if let Some(t) = tasks.iter_mut().find(|t| t.title == title && t.status == "open") {
+                    t.status = "claimed".to_string();
+                    t.claimed_by = Some(claimer.to_string());
+                }
+            }
+        } else if text.starts_with("[task] Done by ") {
+            let rest = &text["[task] Done by ".len()..];
+            if let Some(colon) = rest.find(": ") {
+                let title_and_notes = &rest[colon + 2..];
+                let title = title_and_notes.split(" — ").next().unwrap_or(title_and_notes);
+                if let Some(t) = tasks.iter_mut().find(|t| t.title == title) {
+                    t.status = "done".to_string();
+                }
+            }
+        }
+    }
+
+    // Deduplicate by title
+    let mut seen = std::collections::HashSet::new();
+    tasks.retain(|t| seen.insert(t.title.clone()));
+    Ok(tasks)
 }
 
 /// Activity timeline — all events (messages, joins, files, reactions, profiles).
