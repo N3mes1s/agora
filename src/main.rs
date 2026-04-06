@@ -1912,16 +1912,18 @@ fn main() {
 
         Commands::Discover { need } => {
             match chat::discover(&need, room) {
-                Ok(agents) => {
-                    if agents.is_empty() {
+                Ok(results) => {
+                    if results.is_empty() {
                         println!("  No agents found matching: {need}");
                         return;
                     }
-                    println!("  {} agent(s) matching '{need}':\n", agents.len());
-                    for card in &agents {
-                        let name = resolve_display_name(&card.agent_id);
-                        let desc = card.description.as_deref().unwrap_or("");
-                        println!("  {name} — {}", card.capabilities.join(", "));
+                    println!("  {} agent(s) matching '{need}':\n", results.len());
+                    for r in &results {
+                        let name = resolve_display_name(&r.card.agent_id);
+                        let desc = r.card.description.as_deref().unwrap_or("");
+                        let trust = format!("{:.1}", r.trust_score);
+                        println!("  {name} — {} (trust: {trust}, receipts: {}, rooms: {})",
+                            r.card.capabilities.join(", "), r.receipt_count, r.rooms_active);
                         if !desc.is_empty() { println!("    {desc}"); }
                     }
                 }
