@@ -1691,6 +1691,167 @@ pub fn task_checkpoint(task_id: &str, notes: Option<&str>, room_label: Option<&s
     Ok(tid)
 }
 
+// ── Calibration Seeds ──────────────────────────────────────────────────────
+
+/// Static puzzle bank. Each entry is (title, puzzle_text, answer, difficulty).
+const PUZZLES: &[(&str, &str, &str, &str)] = &[
+    (
+        "String reversal",
+        "Reverse the string 'agora' (no spaces, lowercase).",
+        "aroga",
+        "easy",
+    ),
+    (
+        "Vowel count",
+        "Count the vowels (a,e,i,o,u) in 'cryptographic' (answer is a decimal integer).",
+        "4",
+        "easy",
+    ),
+    (
+        "Power of two",
+        "What is 2^16? (answer is a decimal integer)",
+        "65536",
+        "easy",
+    ),
+    (
+        "Fibonacci",
+        "What is the 10th Fibonacci number? (1-indexed, starting 1,1,..., answer is a decimal integer)",
+        "55",
+        "easy",
+    ),
+    (
+        "Word count",
+        "How many words are in the phrase 'the quick brown fox jumps over the lazy dog'? (answer is a decimal integer)",
+        "9",
+        "easy",
+    ),
+    (
+        "ROT13 decode",
+        "Decode this ROT13 message (lowercase, no punctuation): 'ntnag argjbex'",
+        "agent network",
+        "medium",
+    ),
+    (
+        "Base64 decode",
+        "Base64-decode 'YWdvcmE=' (UTF-8 string, lowercase).",
+        "agora",
+        "easy",
+    ),
+    (
+        "Hex to decimal",
+        "Convert the hex number 'ff' to decimal (answer is a decimal integer).",
+        "255",
+        "medium",
+    ),
+];
+
+fn sha256_hex(input: &str) -> String {
+    let d = digest::digest(&digest::SHA256, input.as_bytes());
+    hex::encode(d.as_ref())
+}
+
+/// Generate a calibration seed task and publish it to the room.
+/// Returns (seed_id, puzzle_text).
+pub fn seed_gen(room_label: Option<&str>) -> Result<(String, String), String> {
+    let room = resolve_room(room_label)?;
+    let me = store::get_agent_id();
+    let id = msg_id();
+
+    // Pick puzzle by rotating through based on existing seed count.
+    let existing = store::load_seeds(&room.room_id);
+    let puzzle_idx = existing.len() % PUZZLES.len();
+    let (title, puzzle, answer, difficulty) = PUZZLES[puzzle_idx];
+
+    let seed = store::CalibrationSeed {
+        id: id.clone(),
+        title: title.to_string(),
+        puzzle: puzzle.to_string(),
+        answer_hash: sha256_hex(answer),
+        difficulty: difficulty.to_string(),
+        created_by: me.clone(),
+        created_at: now(),
+        solved_by: Vec::new(),
+    };
+
+    let mut seeds = existing;
+    seeds.push(seed);
+    store::save_seeds(&room.room_id, &seeds);
+
+    let room_key = crypto::derive_room_key(&room.secret, &room.room_id);
+    let msg = format!(
+        "[seed] New calibration seed [{id_short}]: {title} ({difficulty}) — solve with: agora seed-verify {id_short} <answer>",
+        id_short = &id[..8]
+    );
+    let env = make_envelope(&msg, None);
+    let encrypted = encrypt_envelope(&env, &room_key, &room.room_id);
+    transport::publish(&room.room_id, &encrypted);
+    store::save_message(&room.room_id, &env);
+
+    Ok((id, puzzle.to_string()))
+}
+
+/// Attempt to verify an answer for a calibration seed.
+/// If correct, marks the seed solved and publishes a work receipt.
+pub fn seed_verify(seed_id: &str, answer: &str, room_label: Option<&str>) -> Result<bool, String> {
+    let room = resolve_room(room_label)?;
+    let me = store::get_agent_id();
+    let mut seeds = store::load_seeds(&room.room_id);
+
+    let seed = seeds
+        .iter_mut()
+        .find(|s| s.id.starts_with(seed_id))
+        .ok_or_else(|| format!("No calibration seed matching '{seed_id}'"))?;
+
+    let answer_clean = answer.trim().to_lowercase();
+    let submitted_hash = sha256_hex(&answer_clean);
+
+    if submitted_hash != seed.answer_hash {
+        return Ok(false);
+    }
+
+    if seed.solved_by.contains(&me) {
+        return Err(format!("You have already solved seed '{}'.", &seed.id[..8]));
+    }
+
+    seed.solved_by.push(me.clone());
+    let seed_snapshot = seed.clone();
+    store::save_seeds(&room.room_id, &seeds);
+
+    // Synthesise a Task so we can reuse publish_task_receipt.
+    let task = store::Task {
+        id: seed_snapshot.id.clone(),
+        title: format!("[seed] {}", seed_snapshot.title),
+        status: "done".to_string(),
+        created_by: seed_snapshot.created_by.clone(),
+        claimed_by: Some(me.clone()),
+        created_at: seed_snapshot.created_at,
+        updated_at: now(),
+        notes: Some(format!("difficulty:{}", seed_snapshot.difficulty)),
+    };
+
+    publish_task_receipt(&room, &task, &me, "done", task.notes.as_deref(), task.updated_at);
+
+    let room_key = crypto::derive_room_key(&room.secret, &room.room_id);
+    let msg = format!(
+        "[seed] {} solved calibration seed [{}]: {} — receipt issued",
+        me,
+        &seed_snapshot.id[..8],
+        seed_snapshot.title
+    );
+    let env = make_envelope(&msg, None);
+    let encrypted = encrypt_envelope(&env, &room_key, &room.room_id);
+    transport::publish(&room.room_id, &encrypted);
+    store::save_message(&room.room_id, &env);
+
+    Ok(true)
+}
+
+/// List calibration seeds in the room.
+pub fn seed_list(room_label: Option<&str>) -> Result<Vec<store::CalibrationSeed>, String> {
+    let room = resolve_room(room_label)?;
+    Ok(store::load_seeds(&room.room_id))
+}
+
 /// List tasks — merges local state with room messages for cloud agents.
 pub fn task_list(room_label: Option<&str>) -> Result<Vec<store::Task>, String> {
     let room = resolve_room(room_label)?;

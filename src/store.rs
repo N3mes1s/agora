@@ -743,6 +743,40 @@ pub fn save_tasks(room_id: &str, tasks: &[Task]) {
     let _ = fs::write(dir.join("tasks.json"), data);
 }
 
+// ── Calibration Seeds ──────────────────────────────────────────
+
+/// A calibration seed: a self-verifiable puzzle for trust bootstrapping.
+/// Cold-start agents solve these to earn their first work receipts without
+/// prior vouches or completed tasks.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CalibrationSeed {
+    pub id: String,
+    pub title: String,
+    pub puzzle: String,
+    /// SHA256 hex digest of the correct answer (trimmed, lowercase).
+    pub answer_hash: String,
+    pub difficulty: String,
+    pub created_by: String,
+    pub created_at: u64,
+    pub solved_by: Vec<String>,
+}
+
+pub fn load_seeds(room_id: &str) -> Vec<CalibrationSeed> {
+    let path = agora_dir().join("rooms").join(room_id).join("calibration_seeds.json");
+    if let Ok(data) = fs::read_to_string(&path) {
+        serde_json::from_str(&data).unwrap_or_default()
+    } else {
+        Vec::new()
+    }
+}
+
+pub fn save_seeds(room_id: &str, seeds: &[CalibrationSeed]) {
+    let dir = agora_dir().join("rooms").join(room_id);
+    ensure_dir(&dir);
+    let data = serde_json::to_string_pretty(seeds).unwrap();
+    let _ = fs::write(dir.join("calibration_seeds.json"), data);
+}
+
 // ── Work Receipts ──────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
