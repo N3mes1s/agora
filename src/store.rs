@@ -10,7 +10,7 @@ use crate::crypto;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 #[cfg(test)]
 use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -226,11 +226,18 @@ pub fn load_registry() -> Vec<RoomEntry> {
     }
 }
 
+fn atomic_write(path: &Path, data: &str) -> std::io::Result<()> {
+    let tmp = path.with_extension("tmp");
+    fs::write(&tmp, data)?;
+    fs::rename(&tmp, path)?;
+    Ok(())
+}
+
 pub fn save_registry(rooms: &[RoomEntry]) {
     let dir = agora_dir();
     ensure_dir(&dir);
     let data = serde_json::to_string_pretty(rooms).unwrap();
-    let _ = fs::write(dir.join("rooms.json"), data);
+    let _ = atomic_write(&dir.join("rooms.json"), &data);
 }
 
 pub fn add_room(room_id: &str, secret: &str, label: &str, role: Role) -> RoomEntry {
@@ -260,18 +267,27 @@ pub fn add_room(room_id: &str, secret: &str, label: &str, role: Role) -> RoomEnt
 
 pub fn update_room(room: &RoomEntry) {
     let mut rooms = load_registry();
+    let mut changed = false;
     if let Some(r) = rooms.iter_mut().find(|r| r.room_id == room.room_id) {
         *r = room.clone();
+        changed = true;
     }
-    save_registry(&rooms);
+    if changed {
+        save_registry(&rooms);
+    }
 }
 
 pub fn remove_member_from_room(room_id: &str, agent_id: &str) {
     let mut rooms = load_registry();
+    let mut changed = false;
     if let Some(room) = rooms.iter_mut().find(|r| r.room_id == room_id) {
+        let before = room.members.len();
         room.members.retain(|m| m.agent_id != agent_id);
+        changed = room.members.len() != before;
     }
-    save_registry(&rooms);
+    if changed {
+        save_registry(&rooms);
+    }
 }
 
 pub fn is_admin(room_id: &str, agent_id: &str) -> bool {
@@ -284,9 +300,11 @@ pub fn is_admin(room_id: &str, agent_id: &str) -> bool {
 
 pub fn update_last_seen(room_id: &str, agent_id: &str) {
     let mut rooms = load_registry();
+    let mut changed = false;
     if let Some(room) = rooms.iter_mut().find(|r| r.room_id == room_id) {
         if let Some(member) = room.members.iter_mut().find(|m| m.agent_id == agent_id) {
             member.last_seen = now();
+            changed = true;
         } else {
             // First time seeing this agent — add as member
             room.members.push(RoomMember {
@@ -296,19 +314,28 @@ pub fn update_last_seen(room_id: &str, agent_id: &str) {
                 nickname: None,
                 last_seen: now(),
             });
+            changed = true;
         }
     }
-    save_registry(&rooms);
+    if changed {
+        save_registry(&rooms);
+    }
 }
 
 pub fn set_member_role(room_id: &str, agent_id: &str, role: Role) {
     let mut rooms = load_registry();
+    let mut changed = false;
     if let Some(room) = rooms.iter_mut().find(|r| r.room_id == room_id) {
         if let Some(member) = room.members.iter_mut().find(|m| m.agent_id == agent_id) {
-            member.role = role;
+            if member.role != role {
+                member.role = role;
+                changed = true;
+            }
         }
     }
-    save_registry(&rooms);
+    if changed {
+        save_registry(&rooms);
+    }
 }
 
 pub fn find_room(label_or_id: &str) -> Option<RoomEntry> {
@@ -1065,4 +1092,73 @@ pub fn mark_seen(room_id: &str, msg_id: &str) {
         ids = ids[ids.len() - 1000..].to_vec();
     }
     let _ = fs::write(&path, ids.join("\n"));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::env;
+
+    fn test_home(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("agora-store-{name}-{}", std::process::id()))
+    }
+
+    #[test]
+    fn update_last_seen_does_not_clobber_invalid_registry() {
+        let _guard = test_env_lock().lock().unwrap();
+        let home = test_home("invalid-registry");
+        let agora = home.join(".agora");
+        let _ = fs::remove_dir_all(&home);
+        fs::create_dir_all(&agora).unwrap();
+        fs::write(agora.join("rooms.json"), "{not-json").unwrap();
+
+        let old_home = env::var("HOME").ok();
+        unsafe { env::set_var("HOME", &home); }
+
+        update_last_seen("missing-room", "agent-1");
+
+        let persisted = fs::read_to_string(agora.join("rooms.json")).unwrap();
+        assert_eq!(persisted, "{not-json");
+
+        if let Some(old) = old_home {
+            unsafe { env::set_var("HOME", old); }
+        } else {
+            unsafe { env::remove_var("HOME"); }
+        }
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn save_registry_persists_valid_json() {
+        let _guard = test_env_lock().lock().unwrap();
+        let home = test_home("atomic-save");
+        let agora = home.join(".agora");
+        let _ = fs::remove_dir_all(&home);
+        fs::create_dir_all(&agora).unwrap();
+
+        let old_home = env::var("HOME").ok();
+        unsafe { env::set_var("HOME", &home); }
+
+        let room = RoomEntry {
+            room_id: "room-1".to_string(),
+            secret: "secret".to_string(),
+            label: "plaza".to_string(),
+            joined_at: 1,
+            topic: None,
+            members: vec![],
+        };
+        save_registry(&[room]);
+
+        let persisted = fs::read_to_string(agora.join("rooms.json")).unwrap();
+        let parsed: Vec<RoomEntry> = serde_json::from_str(&persisted).unwrap();
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].label, "plaza");
+
+        if let Some(old) = old_home {
+            unsafe { env::set_var("HOME", old); }
+        } else {
+            unsafe { env::remove_var("HOME"); }
+        }
+        let _ = fs::remove_dir_all(&home);
+    }
 }
