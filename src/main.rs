@@ -258,13 +258,17 @@ fn receipt_indicator(room: Option<&store::RoomEntry>, msg_id: &str) -> &'static 
     };
     // ✓✓ blue  = at least one agent explicitly read this message (via `read` or `watch`)
     // ✓✓ grey  = delivered to at least one agent (via background `check`)
-    // ✓  grey  = sent (no receipts yet)
+    // ✓  grey  = relay confirmed (HTTP 200 from ntfy, no peer receipts yet)
+    // ✗  red   = relay rejected or network error (message may not have reached peers)
     if store::has_read_receipt(&room.room_id, msg_id) {
         " \x1b[94m✓✓\x1b[0m"
     } else if !store::load_receipts(&room.room_id, msg_id).is_empty() {
         " \x1b[90m✓✓\x1b[0m"
     } else {
-        " \x1b[90m✓\x1b[0m"
+        match store::relay_delivery_status(&room.room_id, msg_id) {
+            Some(false) => " \x1b[31m✗\x1b[0m",  // relay error — warn user
+            _ => " \x1b[90m✓\x1b[0m",             // confirmed or unknown (old msg)
+        }
     }
 }
 
@@ -391,7 +395,14 @@ fn main() {
                 process::exit(1);
             }
             match chat::send(&text, reply.as_deref(), room) {
-                Ok(mid) => println!("  Sent [{}] (AES-256-GCM encrypted)", &mid[..6.min(mid.len())]),
+                Ok((mid, relay_ok)) => {
+                    let indicator = if relay_ok {
+                        "\x1b[90m✓\x1b[0m"
+                    } else {
+                        "\x1b[31m✗ (relay unreachable — message may not have been delivered)\x1b[0m"
+                    };
+                    println!("  Sent [{}] {} (AES-256-GCM encrypted)", &mid[..6.min(mid.len())], indicator);
+                }
                 Err(e) => {
                     eprintln!("  Error: {e}");
                     process::exit(1);

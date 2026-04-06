@@ -319,8 +319,9 @@ fn tool_send(args: &Value) -> Result<String, String> {
     let message = args["message"].as_str().ok_or("Missing 'message'")?;
     let reply_to = args["reply_to"].as_str();
     let room = args["room"].as_str();
-    let mid = chat::send(message, reply_to, room)?;
-    Ok(format!("Sent [{mid}] (AES-256-GCM encrypted)"))
+    let (mid, relay_ok) = chat::send(message, reply_to, room)?;
+    let status = if relay_ok { "✓ relay confirmed" } else { "✗ relay unreachable" };
+    Ok(format!("Sent [{mid}] {status} (AES-256-GCM encrypted)"))
 }
 
 fn tool_read(args: &Value) -> Result<String, String> {

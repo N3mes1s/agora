@@ -247,7 +247,8 @@ pub fn heartbeat(room_label: Option<&str>) -> Result<(), String> {
     Ok(())
 }
 
-pub fn send(message: &str, reply_to: Option<&str>, room_label: Option<&str>) -> Result<String, String> {
+/// Returns `(msg_id, relay_ok)` where relay_ok indicates the ntfy relay accepted the message.
+pub fn send(message: &str, reply_to: Option<&str>, room_label: Option<&str>) -> Result<(String, bool), String> {
     let room = resolve_room(room_label)?;
     let room_key = crypto::derive_room_key(&room.secret, &room.room_id);
 
@@ -255,10 +256,11 @@ pub fn send(message: &str, reply_to: Option<&str>, room_label: Option<&str>) -> 
     let mid = env["id"].as_str().unwrap_or("?").to_string();
     let encrypted = encrypt_envelope(&env, &room_key, &room.room_id);
 
-    transport::publish(&room.room_id, &encrypted);
+    let relay_ok = transport::publish(&room.room_id, &encrypted);
     store::save_message(&room.room_id, &env);
+    store::record_relay_delivery(&room.room_id, &mid, relay_ok);
 
-    Ok(mid)
+    Ok((mid, relay_ok))
 }
 
 pub fn read(since: &str, limit: usize, room_label: Option<&str>) -> Result<Vec<serde_json::Value>, String> {

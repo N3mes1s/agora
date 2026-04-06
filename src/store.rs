@@ -503,6 +503,39 @@ pub fn has_read_receipt(room_id: &str, msg_id: &str) -> bool {
     !load_read_receipts(room_id, msg_id).is_empty()
 }
 
+// ── Relay Delivery Confirmation ─────────────────────────────────
+// relay_delivery.json: { "msg_id": true/false }
+// true  = ntfy relay returned HTTP 200
+// false = relay rejected or network error (message may not have been delivered)
+
+fn relay_delivery_path(room_id: &str) -> PathBuf {
+    let dir = agora_dir().join("rooms").join(room_id);
+    ensure_dir(&dir);
+    dir.join("relay_delivery.json")
+}
+
+pub fn record_relay_delivery(room_id: &str, msg_id: &str, ok: bool) {
+    let path = relay_delivery_path(room_id);
+    let mut map: HashMap<String, bool> = if let Ok(data) = fs::read_to_string(&path) {
+        serde_json::from_str(&data).unwrap_or_default()
+    } else {
+        HashMap::new()
+    };
+    map.insert(msg_id.to_string(), ok);
+    let _ = fs::write(&path, serde_json::to_string(&map).unwrap());
+}
+
+/// Returns Some(true) = confirmed sent, Some(false) = relay error, None = not tracked (old message).
+pub fn relay_delivery_status(room_id: &str, msg_id: &str) -> Option<bool> {
+    let path = relay_delivery_path(room_id);
+    let map: HashMap<String, bool> = if let Ok(data) = fs::read_to_string(&path) {
+        serde_json::from_str(&data).unwrap_or_default()
+    } else {
+        return None;
+    };
+    map.get(msg_id).copied()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -568,5 +601,38 @@ mod tests {
 
         save_receipt(room, "msgA", "agent-x", 200);
         assert!(load_receipts(room, "msgB").is_empty());
+    }
+
+    #[test]
+    fn relay_delivery_record_and_query() {
+        let (_dir, _guard) = isolated_dir();
+        let room = "ag-relay-room";
+
+        // Initially unknown for any message
+        assert_eq!(relay_delivery_status(room, "msg-new"), None);
+
+        // Record success
+        record_relay_delivery(room, "msg-ok", true);
+        assert_eq!(relay_delivery_status(room, "msg-ok"), Some(true));
+
+        // Record failure
+        record_relay_delivery(room, "msg-fail", false);
+        assert_eq!(relay_delivery_status(room, "msg-fail"), Some(false));
+
+        // Unrecorded message still unknown
+        assert_eq!(relay_delivery_status(room, "msg-other"), None);
+    }
+
+    #[test]
+    fn relay_delivery_overwrite() {
+        let (_dir, _guard) = isolated_dir();
+        let room = "ag-relay-overwrite-room";
+
+        // First record failure, then success (e.g., retry scenario)
+        record_relay_delivery(room, "msg-retry", false);
+        assert_eq!(relay_delivery_status(room, "msg-retry"), Some(false));
+
+        record_relay_delivery(room, "msg-retry", true);
+        assert_eq!(relay_delivery_status(room, "msg-retry"), Some(true));
     }
 }
