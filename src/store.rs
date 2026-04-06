@@ -11,6 +11,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::PathBuf;
+#[cfg(test)]
+use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 fn agora_dir() -> PathBuf {
@@ -113,6 +115,12 @@ pub fn trust_signing_key(agent_id: &str, signing_pubkey: &str) {
     let mut keys = load_trusted_signing_keys();
     keys.insert(agent_id.to_string(), signing_pubkey.to_string());
     save_trusted_signing_keys(&keys);
+}
+
+#[cfg(test)]
+pub fn test_env_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
 }
 
 // ── Room Registry ───────────────────────────────────────────────

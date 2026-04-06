@@ -26,6 +26,8 @@ struct InviteTokenPayload {
     #[serde(default)]
     target_agent_id: Option<String>,
     #[serde(default)]
+    target_signing_pubkey: Option<String>,
+    #[serde(default)]
     purpose: Option<String>,
     #[serde(default)]
     expires_at: Option<u64>,
@@ -34,6 +36,28 @@ struct InviteTokenPayload {
     #[serde(default)]
     created_by: Option<String>,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SignedInviteToken {
+    v: String,
+    payload: InviteTokenPayload,
+    inviter_signing_pubkey: String,
+    sig: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InviteTokenAuth {
+    SignedVerified,
+    Unsigned,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct ParsedInviteToken {
+    payload: InviteTokenPayload,
+    auth: InviteTokenAuth,
+}
+
+const SIGNED_INVITE_VERSION: &str = "1.0";
 
 #[derive(Parser)]
 #[command(name = "agora", about = "Encrypted agent-to-agent chat", version)]
@@ -510,36 +534,119 @@ fn dm_room_label(left: &str, right: &str) -> Result<String, String> {
     Ok(format!("dm-{a}-{b}"))
 }
 
-fn invite_token(room: &store::RoomEntry) -> String {
-    let payload = format!("{}:{}:{}", room.room_id, room.secret, room.label);
-    format!("agr_{}", BASE64.encode(payload.as_bytes()))
+fn invite_signing_message_bytes(
+    payload: &InviteTokenPayload,
+    inviter_signing_pubkey: &str,
+) -> Vec<u8> {
+    format!(
+        "agora-signed-invite-v1\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
+        payload.room_id,
+        payload.secret,
+        payload.label,
+        payload.target_agent_id.as_deref().unwrap_or(""),
+        payload.target_signing_pubkey.as_deref().unwrap_or(""),
+        payload.purpose.as_deref().unwrap_or(""),
+        payload
+            .expires_at
+            .map(|v| v.to_string())
+            .unwrap_or_default(),
+        payload.max_uses.map(|v| v.to_string()).unwrap_or_default(),
+        payload.created_by.as_deref().unwrap_or(""),
+        inviter_signing_pubkey,
+    )
+    .into_bytes()
 }
 
-fn targeted_invite_token(room: &store::RoomEntry, target_agent_id: &str, purpose: &str) -> String {
+fn local_signing_pubkey(agent_id: &str) -> Result<String, String> {
+    let pkcs8 = store::load_or_create_signing_keypair(agent_id)?;
+    let pubkey = crypto::signing_public_key(&pkcs8).map_err(|e| e.to_string())?;
+    Ok(BASE64.encode(pubkey))
+}
+
+fn sign_invite_token(payload: InviteTokenPayload) -> Result<String, String> {
+    let created_by = payload
+        .created_by
+        .clone()
+        .unwrap_or_else(store::get_agent_id);
+    let pkcs8 = store::load_or_create_signing_keypair(&created_by)?;
+    let inviter_signing_pubkey = BASE64.encode(
+        crypto::signing_public_key(&pkcs8).map_err(|e| e.to_string())?,
+    );
+    store::trust_signing_key(&created_by, &inviter_signing_pubkey);
+    let signing_input = invite_signing_message_bytes(&payload, &inviter_signing_pubkey);
+    let sig = BASE64.encode(
+        crypto::sign_message(&pkcs8, &signing_input).map_err(|e| e.to_string())?,
+    );
+    let token = SignedInviteToken {
+        v: SIGNED_INVITE_VERSION.to_string(),
+        payload,
+        inviter_signing_pubkey,
+        sig,
+    };
+    let bytes = serde_json::to_vec(&token).map_err(|e| e.to_string())?;
+    Ok(format!("agr_{}", BASE64.encode(bytes)))
+}
+
+fn targeted_invite_token(
+    room: &store::RoomEntry,
+    target_agent_id: &str,
+    purpose: &str,
+) -> Result<String, String> {
     let payload = InviteTokenPayload {
         room_id: room.room_id.clone(),
         secret: room.secret.clone(),
         label: room.label.clone(),
         target_agent_id: Some(target_agent_id.to_string()),
+        target_signing_pubkey: store::get_trusted_signing_key(target_agent_id),
         purpose: Some(purpose.to_string()),
         expires_at: None,
         max_uses: None,
         created_by: Some(store::get_agent_id()),
     };
-    format!(
-        "agr_{}",
-        BASE64.encode(serde_json::to_vec(&payload).expect("invite token payload should serialize"))
-    )
+    sign_invite_token(payload)
 }
 
-fn parse_invite_token(token: &str) -> Result<InviteTokenPayload, String> {
+fn parse_invite_token(token: &str) -> Result<ParsedInviteToken, String> {
     let raw = token.strip_prefix("agr_").unwrap_or(token);
     let bytes = BASE64
         .decode(raw)
         .map_err(|_| "Invalid invite token (bad encoding).".to_string())?;
 
+    if let Ok(token) = serde_json::from_slice::<SignedInviteToken>(&bytes) {
+        let signing_input =
+            invite_signing_message_bytes(&token.payload, &token.inviter_signing_pubkey);
+        let public_key = BASE64
+            .decode(&token.inviter_signing_pubkey)
+            .map_err(|_| "Invalid invite token (bad signing key).".to_string())?;
+        let sig = BASE64
+            .decode(&token.sig)
+            .map_err(|_| "Invalid invite token (bad signature encoding).".to_string())?;
+        if !crypto::verify_message_signature(&public_key, &signing_input, &sig) {
+            return Err("Invalid invite token signature.".to_string());
+        }
+        if let Some(created_by) = token.payload.created_by.as_deref() {
+            if let Some(trusted) = store::get_trusted_signing_key(created_by) {
+                if trusted != token.inviter_signing_pubkey {
+                    return Err(format!(
+                        "Invite token signer does not match trusted key for '{}'.",
+                        created_by
+                    ));
+                }
+            } else {
+                store::trust_signing_key(created_by, &token.inviter_signing_pubkey);
+            }
+        }
+        return Ok(ParsedInviteToken {
+            payload: token.payload,
+            auth: InviteTokenAuth::SignedVerified,
+        });
+    }
+
     if let Ok(payload) = serde_json::from_slice::<InviteTokenPayload>(&bytes) {
-        return Ok(payload);
+        return Ok(ParsedInviteToken {
+            payload,
+            auth: InviteTokenAuth::Unsigned,
+        });
     }
 
     let payload = String::from_utf8_lossy(&bytes);
@@ -548,19 +655,23 @@ fn parse_invite_token(token: &str) -> Result<InviteTokenPayload, String> {
         return Err("Invalid invite token.".to_string());
     }
 
-    Ok(InviteTokenPayload {
-        room_id: parts[0].to_string(),
-        secret: parts[1].to_string(),
-        label: if parts.len() == 3 {
-            parts[2].to_string()
-        } else {
-            parts[0][..12.min(parts[0].len())].to_string()
+    Ok(ParsedInviteToken {
+        payload: InviteTokenPayload {
+            room_id: parts[0].to_string(),
+            secret: parts[1].to_string(),
+            label: if parts.len() == 3 {
+                parts[2].to_string()
+            } else {
+                parts[0][..12.min(parts[0].len())].to_string()
+            },
+            target_agent_id: None,
+            target_signing_pubkey: None,
+            purpose: None,
+            expires_at: None,
+            max_uses: None,
+            created_by: None,
         },
-        target_agent_id: None,
-        purpose: None,
-        expires_at: None,
-        max_uses: None,
-        created_by: None,
+        auth: InviteTokenAuth::Unsigned,
     })
 }
 
@@ -670,12 +781,19 @@ fn main() {
                         secret: r.secret.clone(),
                         label: r.label.clone(),
                         target_agent_id: None,
+                        target_signing_pubkey: None,
                         purpose: None,
                         expires_at,
                         max_uses,
                         created_by: Some(store::get_agent_id()),
                     };
-                    let token = format!("agr_{}", BASE64.encode(serde_json::to_vec(&payload).unwrap()));
+                    let token = match sign_invite_token(payload) {
+                        Ok(token) => token,
+                        Err(e) => {
+                            eprintln!("  Error: failed to sign invite token: {e}");
+                            process::exit(1);
+                        }
+                    };
                     println!("  Invite token for '{}':\n", r.label);
                     println!("  {token}\n");
                     if let Some(exp) = &expires {
@@ -696,7 +814,8 @@ fn main() {
 
         Commands::Accept { token } => {
             match parse_invite_token(&token) {
-                Ok(payload) => {
+                Ok(parsed) => {
+                    let payload = parsed.payload;
                     // Check expiry
                     if let Some(expires_at) = payload.expires_at {
                         let now_ts = std::time::SystemTime::now()
@@ -719,14 +838,44 @@ fn main() {
                         }
                     }
 
+                    if let Some(target_key) = payload.target_signing_pubkey.as_deref() {
+                        let me = store::get_agent_id();
+                        let my_key = match local_signing_pubkey(&me) {
+                            Ok(key) => key,
+                            Err(e) => {
+                                eprintln!("  Error: failed to load local signing key: {e}");
+                                process::exit(1);
+                            }
+                        };
+                        if my_key != target_key {
+                            eprintln!(
+                                "  Error: invite token is bound to a different signing key than '{}'.",
+                                me
+                            );
+                            process::exit(1);
+                        }
+                    }
+
                     match chat::join(&payload.room_id, &payload.secret, &payload.label) {
                         Ok(_) => {
                             let room_key = crypto::derive_room_key(&payload.secret, &payload.room_id);
                             println!("  Joined room '{}'", payload.label);
                             println!("  Encryption: AES-256-GCM + HKDF-SHA256");
                             println!("  Fingerprint: {}", crypto::fingerprint(&room_key));
+                            match parsed.auth {
+                                InviteTokenAuth::SignedVerified => {
+                                    println!("  Invite signature: verified");
+                                }
+                                InviteTokenAuth::Unsigned => {
+                                    println!("  Invite signature: unsigned legacy token");
+                                }
+                            }
                             if payload.purpose.as_deref() == Some("dm") {
-                                println!("  DM invite target check passed.");
+                                if payload.target_signing_pubkey.is_some() {
+                                    println!("  DM invite target key check passed.");
+                                } else if payload.target_agent_id.is_some() {
+                                    println!("  DM invite target ID check passed.");
+                                }
                             }
                         }
                         Err(e) => {
@@ -785,16 +934,36 @@ fn main() {
                     }
                 }
             };
+            let target_key_known = store::get_trusted_signing_key(&agent_id).is_some();
 
             if created {
-                let token = targeted_invite_token(&room_entry, &agent_id, "dm");
+                let token = match targeted_invite_token(&room_entry, &agent_id, "dm") {
+                    Ok(token) => token,
+                    Err(e) => {
+                        eprintln!("  Error: failed to create DM invite token: {e}");
+                        process::exit(1);
+                    }
+                };
                 println!("  DM room '{}' is ready for {}", room_entry.label, agent_id);
                 println!("  Room ID:    {}", room_entry.room_id);
                 println!();
                 println!("  Share this DM invite token with {}:", agent_id);
                 println!("    agora accept {}", token);
-                println!("  Guardrail:  only '{}' will accept this token without overriding AGORA_AGENT_ID", agent_id);
-                println!("  Note:       agent IDs are not authenticated yet, so this is soft binding, not hard identity proof");
+                if target_key_known {
+                    println!(
+                        "  Guardrail:  only the trusted signing key for '{}' will accept this token",
+                        agent_id
+                    );
+                } else {
+                    println!(
+                        "  Guardrail:  only '{}' will accept this token without overriding AGORA_AGENT_ID",
+                        agent_id
+                    );
+                    println!(
+                        "  Note:       no trusted signing key is known for '{}', so binding is still soft",
+                        agent_id
+                    );
+                }
                 if let Some(mid) = sent_mid {
                     println!();
                     println!("  Initial message sent [{}]", &mid[..6.min(mid.len())]);
@@ -807,11 +976,31 @@ fn main() {
                     room_entry.label
                 );
             } else {
-                let token = targeted_invite_token(&room_entry, &agent_id, "dm");
+                let token = match targeted_invite_token(&room_entry, &agent_id, "dm") {
+                    Ok(token) => token,
+                    Err(e) => {
+                        eprintln!("  Error: failed to create DM invite token: {e}");
+                        process::exit(1);
+                    }
+                };
                 println!("  DM room '{}' is ready for {}", room_entry.label, agent_id);
                 println!("  DM invite token for {}:", agent_id);
                 println!("    agora accept {}", token);
-                println!("  Guardrail:  only '{}' will accept this token without overriding AGORA_AGENT_ID", agent_id);
+                if target_key_known {
+                    println!(
+                        "  Guardrail:  only the trusted signing key for '{}' will accept this token",
+                        agent_id
+                    );
+                } else {
+                    println!(
+                        "  Guardrail:  only '{}' will accept this token without overriding AGORA_AGENT_ID",
+                        agent_id
+                    );
+                    println!(
+                        "  Note:       no trusted signing key is known for '{}', so binding is still soft",
+                        agent_id
+                    );
+                }
                 println!("  Use it with:");
                 println!("    agora dm {} <message>", agent_id);
                 println!("    agora --room {} read", room_entry.label);
@@ -1978,8 +2167,22 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{dm_room_label, parse_invite_token, targeted_invite_token, InviteTokenPayload};
+    use super::{
+        dm_room_label, parse_invite_token, targeted_invite_token, InviteTokenAuth,
+        InviteTokenPayload,
+    };
+    use base64::Engine;
     use crate::store::{self, RoomEntry};
+
+    fn temp_home() -> std::path::PathBuf {
+        std::env::temp_dir().join(format!(
+            "agora-main-test-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ))
+    }
 
     #[test]
     fn dm_room_label_is_stable_and_symmetric() {
@@ -1997,6 +2200,14 @@ mod tests {
 
     #[test]
     fn targeted_dm_invite_round_trips() {
+        let _guard = store::test_env_lock().lock().unwrap();
+        let home = temp_home();
+        std::fs::create_dir_all(&home).unwrap();
+        unsafe {
+            std::env::set_var("HOME", &home);
+            std::env::set_var("AGORA_AGENT_ID", "agent-a");
+        }
+        store::trust_signing_key("agent-b", "cGVlci1zaWduaW5nLWtleQ");
         let room = RoomEntry {
             room_id: "ag-dm-test".to_string(),
             secret: "secret".to_string(),
@@ -2005,30 +2216,64 @@ mod tests {
             topic: None,
             members: vec![],
         };
-        let token = targeted_invite_token(&room, "agent-b", "dm");
+        let token = targeted_invite_token(&room, "agent-b", "dm").unwrap();
         let parsed = parse_invite_token(&token).unwrap();
         assert_eq!(
-            parsed,
+            parsed.payload,
             InviteTokenPayload {
                 room_id: "ag-dm-test".to_string(),
                 secret: "secret".to_string(),
                 label: "dm-a-b".to_string(),
                 target_agent_id: Some("agent-b".to_string()),
+                target_signing_pubkey: Some("cGVlci1zaWduaW5nLWtleQ".to_string()),
                 purpose: Some("dm".to_string()),
                 expires_at: None,
                 max_uses: None,
                 created_by: Some(store::get_agent_id()),
             }
         );
+        assert_eq!(parsed.auth, InviteTokenAuth::SignedVerified);
+    }
+
+    #[test]
+    fn signed_invite_token_rejects_tampering() {
+        let _guard = store::test_env_lock().lock().unwrap();
+        let home = temp_home();
+        std::fs::create_dir_all(&home).unwrap();
+        unsafe {
+            std::env::set_var("HOME", &home);
+            std::env::set_var("AGORA_AGENT_ID", "agent-a");
+        }
+
+        let room = RoomEntry {
+            room_id: "ag-dm-test".to_string(),
+            secret: "secret".to_string(),
+            label: "dm-a-b".to_string(),
+            joined_at: 0,
+            topic: None,
+            members: vec![],
+        };
+        let token = targeted_invite_token(&room, "agent-b", "dm").unwrap();
+        let raw = token.strip_prefix("agr_").unwrap();
+        let bytes = super::BASE64.decode(raw).unwrap();
+        let mut signed: super::SignedInviteToken = serde_json::from_slice(&bytes).unwrap();
+        signed.payload.label = "tampered".to_string();
+        let tampered =
+            format!("agr_{}", super::BASE64.encode(serde_json::to_vec(&signed).unwrap()));
+
+        let err = parse_invite_token(&tampered).unwrap_err();
+        assert_eq!(err, "Invalid invite token signature.");
     }
 
     #[test]
     fn legacy_invite_token_still_parses() {
         let token = "agr_YWctcm9vbTpzZWNyZXQ6bGFiZWw";
         let parsed = parse_invite_token(token).unwrap();
-        assert_eq!(parsed.room_id, "ag-room");
-        assert_eq!(parsed.secret, "secret");
-        assert_eq!(parsed.label, "label");
-        assert_eq!(parsed.target_agent_id, None);
+        assert_eq!(parsed.payload.room_id, "ag-room");
+        assert_eq!(parsed.payload.secret, "secret");
+        assert_eq!(parsed.payload.label, "label");
+        assert_eq!(parsed.payload.target_agent_id, None);
+        assert_eq!(parsed.payload.target_signing_pubkey, None);
+        assert_eq!(parsed.auth, InviteTokenAuth::Unsigned);
     }
 }
