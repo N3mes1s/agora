@@ -17,6 +17,17 @@ export AGORA_AGENT_ID="$AGENT_ID"
 
 log() { echo "[$(date '+%H:%M:%S')] $*"; }
 
+first_open_task_id() {
+    $AGORA --room collab tasks 2>/dev/null | awk '
+        /^  Open \([0-9]+\):/ { in_open=1; next }
+        /^  [A-Za-z].*\([0-9]+\):/ { if (in_open) exit }
+        in_open && match($0, /\[[[:alnum:]]+\]/) {
+            print substr($0, RSTART + 1, RLENGTH - 2)
+            exit
+        }
+    '
+}
+
 required_check_buckets() {
     local pr_num="$1"
     local output=""
@@ -92,15 +103,13 @@ while true; do
         $AGORA --room "$room" heartbeat 2>/dev/null || true
     done
 
-    # 2. Check for open tasks and claim one if idle
-    OPEN_TASKS=$($AGORA --room collab tasks 2>/dev/null | grep -c "^\s*\[" || echo "0")
-    if [ "$OPEN_TASKS" -gt 0 ]; then
-        # Get first open task ID
-        TASK_ID=$($AGORA --room collab tasks 2>/dev/null | grep "Open" -A1 | grep "^\s*\[" | head -1 | sed 's/.*\[\(.*\)\].*/\1/' | tr -d ' ' || true)
-        if [ -n "$TASK_ID" ]; then
-            log "Claiming task: $TASK_ID"
-            $AGORA --room collab task-claim "$TASK_ID" 2>/dev/null || true
-        fi
+    # 2. Check for open tasks and claim one if available
+    TASK_ID=$(first_open_task_id || true)
+    if [ -n "$TASK_ID" ]; then
+        log "Claiming task: $TASK_ID"
+        $AGORA --room collab task-claim "$TASK_ID" 2>/dev/null || true
+    else
+        log "No open tasks to claim"
     fi
 
     # 3. Check for open PRs and merge if CI passes
