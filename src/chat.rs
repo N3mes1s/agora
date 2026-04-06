@@ -17,7 +17,7 @@
 use base64::Engine;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::Path;
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -29,6 +29,9 @@ use crate::{crypto, store, transport};
 const VERSION: &str = "3.0";
 const SIGNED_WIRE_VERSION: &str = "3.1";
 const SOMA_VOLATILITY_COMMIT_CAP: f64 = 32.0;
+const PLAZA_RATE_LIMIT_LABEL: &str = "plaza";
+const PLAZA_RATE_LIMIT_MAX_MSGS: usize = 10;
+const PLAZA_RATE_LIMIT_WINDOW_SECS: u64 = 60;
 const BASE64: base64::engine::general_purpose::GeneralPurpose =
     base64::engine::general_purpose::STANDARD;
 
@@ -153,6 +156,134 @@ fn is_invite_redeem(env: &serde_json::Value) -> bool {
 
 fn is_system_msg(env: &serde_json::Value) -> bool {
     is_heartbeat(env) || is_receipt(env) || is_file_msg(env) || is_reaction(env) || is_invite_redeem(env)
+}
+
+#[derive(Default)]
+struct PlazaRateLimitState {
+    muted: HashSet<String>,
+    recent_by_sender: HashMap<String, VecDeque<u64>>,
+    me_is_admin: bool,
+}
+
+fn is_public_plaza(room: &store::RoomEntry) -> bool {
+    room.label == PLAZA_RATE_LIMIT_LABEL
+}
+
+fn counts_toward_plaza_rate_limit(env: &serde_json::Value) -> bool {
+    if is_system_msg(env) {
+        return false;
+    }
+    if env["type"].as_str() == Some("profile") {
+        return false;
+    }
+    let from = env["from"].as_str().unwrap_or("");
+    !from.is_empty()
+}
+
+fn prune_recent(queue: &mut VecDeque<u64>, effective_ts: u64) {
+    while let Some(front) = queue.front().copied() {
+        if effective_ts.saturating_sub(front) >= PLAZA_RATE_LIMIT_WINDOW_SECS {
+            queue.pop_front();
+        } else {
+            break;
+        }
+    }
+}
+
+fn seed_plaza_rate_limit_state(
+    room: &store::RoomEntry,
+    existing: &[serde_json::Value],
+) -> PlazaRateLimitState {
+    let mut state = PlazaRateLimitState {
+        muted: store::load_muted(&room.room_id),
+        recent_by_sender: HashMap::new(),
+        me_is_admin: store::is_admin(&room.room_id, &store::get_agent_id()),
+    };
+
+    for env in existing {
+        if !counts_toward_plaza_rate_limit(env) {
+            continue;
+        }
+        let from = env["from"].as_str().unwrap_or("");
+        if from.is_empty() {
+            continue;
+        }
+        let ts = env["ts"].as_u64().unwrap_or(0);
+        let queue = state.recent_by_sender.entry(from.to_string()).or_default();
+        prune_recent(queue, ts);
+        queue.push_back(ts);
+    }
+
+    state
+}
+
+fn enforce_outbound_plaza_rate_limit(room: &store::RoomEntry, sender: &str) -> Result<(), String> {
+    if !is_public_plaza(room) {
+        return Ok(());
+    }
+
+    let now_ts = now();
+    let recent = store::load_messages(&room.room_id, PLAZA_RATE_LIMIT_WINDOW_SECS);
+    let mut queue = VecDeque::new();
+    for env in &recent {
+        if !counts_toward_plaza_rate_limit(env) {
+            continue;
+        }
+        if env["from"].as_str().unwrap_or("") != sender {
+            continue;
+        }
+        let ts = env["ts"].as_u64().unwrap_or(0);
+        prune_recent(&mut queue, now_ts);
+        if now_ts.saturating_sub(ts) < PLAZA_RATE_LIMIT_WINDOW_SECS {
+            queue.push_back(ts);
+        }
+    }
+
+    if queue.len() >= PLAZA_RATE_LIMIT_MAX_MSGS {
+        return Err(format!(
+            "Plaza rate limit exceeded: max {} messages per {}s.",
+            PLAZA_RATE_LIMIT_MAX_MSGS, PLAZA_RATE_LIMIT_WINDOW_SECS
+        ));
+    }
+
+    Ok(())
+}
+
+fn allow_incoming_message(
+    room: &store::RoomEntry,
+    env: &serde_json::Value,
+    effective_ts: u64,
+    state: &mut PlazaRateLimitState,
+) -> bool {
+    let from = env["from"].as_str().unwrap_or("");
+    if from.is_empty() {
+        return false;
+    }
+
+    if state.muted.contains(from) {
+        return false;
+    }
+
+    if !is_public_plaza(room) || !counts_toward_plaza_rate_limit(env) {
+        return true;
+    }
+
+    let queue = state.recent_by_sender.entry(from.to_string()).or_default();
+    prune_recent(queue, effective_ts);
+    if queue.len() >= PLAZA_RATE_LIMIT_MAX_MSGS {
+        state.muted.insert(from.to_string());
+        store::mute_agent(&room.room_id, from);
+        eprintln!(
+            "  [warn] muted '{}' in '{}' due to plaza rate limit (>{} msgs/{}s)",
+            from, room.label, PLAZA_RATE_LIMIT_MAX_MSGS, PLAZA_RATE_LIMIT_WINDOW_SECS
+        );
+        if state.me_is_admin && !store::is_admin(&room.room_id, from) {
+            let _ = kick(from, Some(room.label.as_str()));
+        }
+        return false;
+    }
+    queue.push_back(effective_ts);
+    true
 }
 
 /// Update last_seen for the sender of a message.
@@ -361,6 +492,8 @@ pub fn heartbeat(room_label: Option<&str>) -> Result<(), String> {
 
 pub fn send(message: &str, reply_to: Option<&str>, room_label: Option<&str>) -> Result<String, String> {
     let room = resolve_room(room_label)?;
+    let sender = store::get_agent_id();
+    enforce_outbound_plaza_rate_limit(&room, &sender)?;
     let room_key = crypto::derive_room_key(&room.secret, &room.room_id);
 
     let env = make_envelope(message, reply_to);
@@ -434,22 +567,34 @@ pub fn redeem_invite(
 pub fn read(since: &str, limit: usize, room_label: Option<&str>) -> Result<Vec<serde_json::Value>, String> {
     let room = resolve_room(room_label)?;
     let room_key = crypto::derive_room_key(&room.secret, &room.room_id);
+    let since_secs = parse_since(since);
+    let local_msgs = store::load_messages(&room.room_id, since_secs);
+    let local_ids: HashSet<String> = local_msgs
+        .iter()
+        .filter_map(|msg| msg["id"].as_str().map(|s| s.to_string()))
+        .collect();
+    let recent_local = store::load_messages(&room.room_id, PLAZA_RATE_LIMIT_WINDOW_SECS);
+    let mut rate_limit = seed_plaza_rate_limit_state(&room, &recent_local);
 
     // Fetch from relay
-    let remote_events = transport::fetch(&room.room_id, since);
+    let mut remote_events = transport::fetch(&room.room_id, since);
+    remote_events.sort_by_key(|(ts, _)| *ts);
     let mut remote_msgs: Vec<serde_json::Value> = Vec::new();
     for (ts, payload) in &remote_events {
         if let Some(mut env) = decrypt_payload(payload, &room_key, &room.room_id) {
             if env["ts"].as_u64().unwrap_or(0) == 0 {
                 env["ts"] = json!(ts);
             }
+            let mid = env["id"].as_str().unwrap_or("?");
+            if mid != "?" && local_ids.contains(mid) {
+                continue;
+            }
+            if !allow_incoming_message(&room, &env, *ts, &mut rate_limit) {
+                continue;
+            }
             remote_msgs.push(env);
         }
     }
-
-    // Merge with local
-    let since_secs = parse_since(since);
-    let local_msgs = store::load_messages(&room.room_id, since_secs);
 
     let mut seen_ids: HashSet<String> = HashSet::new();
     let mut merged = Vec::new();
@@ -487,11 +632,14 @@ pub fn check(since: &str, room_label: Option<&str>) -> Result<Vec<serde_json::Va
     let room_key = crypto::derive_room_key(&room.secret, &room.room_id);
     let me = store::get_agent_id();
     let seen = store::load_seen(&room.room_id);
+    let recent_local = store::load_messages(&room.room_id, PLAZA_RATE_LIMIT_WINDOW_SECS);
+    let mut rate_limit = seed_plaza_rate_limit_state(&room, &recent_local);
 
-    let remote_events = transport::fetch(&room.room_id, since);
+    let mut remote_events = transport::fetch(&room.room_id, since);
+    remote_events.sort_by_key(|(ts, _)| *ts);
     let mut new_msgs = Vec::new();
     let mut read_ids = Vec::new();
-    for (_, payload) in &remote_events {
+    for (ts, payload) in &remote_events {
         if let Some(env) = decrypt_payload(payload, &room_key, &room.room_id) {
             track_presence(&room.room_id, &env);
             let mid = env["id"].as_str().unwrap_or("?").to_string();
@@ -500,6 +648,9 @@ pub fn check(since: &str, room_label: Option<&str>) -> Result<Vec<serde_json::Va
                 continue;
             }
             store::mark_seen(&room.room_id, &mid);
+            if !allow_incoming_message(&room, &env, *ts, &mut rate_limit) {
+                continue;
+            }
 
             // Process incoming receipts
             if is_receipt(&env) {
@@ -1678,15 +1829,25 @@ where
     let room = resolve_room(room_label)?;
     let room_key = crypto::derive_room_key(&room.secret, &room.room_id);
     let room_id = room.room_id.clone();
+    let mut rate_limit = seed_plaza_rate_limit_state(
+        &room,
+        &store::load_messages(&room.room_id, PLAZA_RATE_LIMIT_WINDOW_SECS),
+    );
 
     // Track last heartbeat time
     let mut last_heartbeat = now();
     // Send initial heartbeat
     let _ = send_watch_heartbeat(&room_id);
 
-    transport::stream(&room_id, |_ts, payload| {
-        if let Some(env) = decrypt_payload(payload, &room_key, &room_id) {
+    transport::stream(&room_id, |ts, payload| {
+        if let Some(mut env) = decrypt_payload(payload, &room_key, &room_id) {
+            if env["ts"].as_u64().unwrap_or(0) == 0 {
+                env["ts"] = json!(ts);
+            }
             track_presence(&room_id, &env);
+            if !allow_incoming_message(&room, &env, ts, &mut rate_limit) {
+                return;
+            }
             if !is_heartbeat(&env) {
                 store::save_message(&room_id, &env);
                 on_message(&env);
@@ -1909,10 +2070,12 @@ pub fn download_file(file_id: &str, out_path: Option<&str>, room_label: Option<&
 mod tests {
     use base64::Engine;
     use super::{
-        annotate_soma_message, count_invite_redemptions_in_envs, decrypt_payload,
-        encrypt_envelope, infer_soma_subject_path, make_envelope, make_invite_redemption, pin,
-        pins, resolve_room, send_watch_heartbeat, signing_message_bytes, soma_churn_decay,
-        soma_correct, unpin, SignedWirePayload, SIGNED_WIRE_VERSION, BASE64,
+        allow_incoming_message, annotate_soma_message, count_invite_redemptions_in_envs,
+        decrypt_payload, enforce_outbound_plaza_rate_limit, encrypt_envelope,
+        infer_soma_subject_path, make_envelope, make_invite_redemption, pin, pins, resolve_room,
+        seed_plaza_rate_limit_state, send_watch_heartbeat, signing_message_bytes,
+        soma_churn_decay, soma_correct, unpin, SignedWirePayload, SIGNED_WIRE_VERSION, BASE64,
+        PLAZA_RATE_LIMIT_WINDOW_SECS,
     };
     use crate::crypto;
     use crate::store::{self, Role};
@@ -1973,6 +2136,25 @@ mod tests {
         }));
 
         (home, first, second)
+    }
+
+    fn setup_plaza_room(agent_id: &str, role: Role) -> (PathBuf, store::RoomEntry) {
+        let home = std::env::temp_dir().join(format!(
+            "agora-plaza-test-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&home).unwrap();
+        unsafe {
+            std::env::set_var("HOME", &home);
+            std::env::set_var("AGORA_AGENT_ID", agent_id);
+        }
+
+        let room = store::add_room("ag-plaza-test", "secret-plaza", "plaza", role);
+        store::set_active_room("plaza");
+        (home, room)
     }
 
     fn setup_soma_room() -> (PathBuf, store::RoomEntry) {
@@ -2049,6 +2231,56 @@ mod tests {
 
         assert_eq!(member_last_seen(&alpha.label), 0);
         assert!(member_last_seen(&beta.label) > 0);
+    }
+
+    #[test]
+    fn incoming_plaza_rate_limit_mutes_spammer() {
+        let _guard = store::test_env_lock().lock().unwrap();
+        let (_home, room) = setup_plaza_room("listener", Role::Member);
+        let now_ts = current_ts();
+
+        for i in 0..10 {
+            store::save_message(&room.room_id, &json!({
+                "id": format!("spam{i}"),
+                "from": "spammer",
+                "ts": now_ts - 30 + i,
+                "text": format!("msg {i}"),
+                "v": "3.0",
+            }));
+        }
+
+        let recent = store::load_messages(&room.room_id, PLAZA_RATE_LIMIT_WINDOW_SECS);
+        let mut state = seed_plaza_rate_limit_state(&room, &recent);
+        let overflow = json!({
+            "id": "overflow",
+            "from": "spammer",
+            "ts": now_ts,
+            "text": "too much",
+            "v": "3.0",
+        });
+
+        assert!(!allow_incoming_message(&room, &overflow, now_ts, &mut state));
+        assert!(store::load_muted(&room.room_id).contains("spammer"));
+    }
+
+    #[test]
+    fn outbound_plaza_rate_limit_rejects_eleventh_message() {
+        let _guard = store::test_env_lock().lock().unwrap();
+        let (_home, room) = setup_plaza_room("speaker", Role::Member);
+        let now_ts = current_ts();
+
+        for i in 0..10 {
+            store::save_message(&room.room_id, &json!({
+                "id": format!("mine{i}"),
+                "from": "speaker",
+                "ts": now_ts - 30 + i,
+                "text": format!("own {i}"),
+                "v": "3.0",
+            }));
+        }
+
+        let err = enforce_outbound_plaza_rate_limit(&room, "speaker").unwrap_err();
+        assert!(err.contains("Plaza rate limit exceeded"));
     }
 
     #[test]
@@ -2559,13 +2791,23 @@ pub fn daemon(room_label: Option<&str>) -> Result<u32, String> {
 
     let room_key = crypto::derive_room_key(&secret, &room_id);
     let me = store::get_agent_id();
+    let mut rate_limit = seed_plaza_rate_limit_state(
+        &room,
+        &store::load_messages(&room.room_id, PLAZA_RATE_LIMIT_WINDOW_SECS),
+    );
 
-    transport::stream(&room_id, |_ts, payload| {
-        if let Some(env) = decrypt_payload(payload, &room_key, &room_id) {
+    transport::stream(&room_id, |ts, payload| {
+        if let Some(mut env) = decrypt_payload(payload, &room_key, &room_id) {
+            if env["ts"].as_u64().unwrap_or(0) == 0 {
+                env["ts"] = json!(ts);
+            }
             track_presence(&room_id, &env);
             let from = env["from"].as_str().unwrap_or("");
             // Skip own messages and heartbeats
             if from == me || is_heartbeat(&env) {
+                return;
+            }
+            if !allow_incoming_message(&room, &env, ts, &mut rate_limit) {
                 return;
             }
             store::save_message(&room_id, &env);
