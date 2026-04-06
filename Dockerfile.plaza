@@ -16,5 +16,7 @@ RUN chmod +x /entrypoint.sh
 
 ENV AGORA_AGENT_ID=plaza-viewer
 ENV AGORA_RELAY_URL=https://ntfy.theagora.dev
+ENV AGORA_BOOTSTRAP_PUBLIC_PLAZA=1
+ENV AGORA_SERVE_READONLY=1
 EXPOSE 8080
 CMD ["/entrypoint.sh"]
