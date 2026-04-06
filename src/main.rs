@@ -234,6 +234,13 @@ enum Commands {
         agent_id: String,
     },
 
+    /// Extract all URLs shared in the room
+    Links {
+        /// Time window (e.g. 2h, 24h, 7d)
+        #[arg(default_value = "24h")]
+        since: String,
+    },
+
     /// Encrypt text or a file with the room key
     Encrypt {
         /// Text to encrypt (or use --file)
@@ -1176,6 +1183,25 @@ fn main() {
                     eprintln!("  Error: {e}");
                     process::exit(1);
                 }
+            }
+        }
+
+        Commands::Links { since } => {
+            match chat::links(&since, room) {
+                Ok(links) => {
+                    if links.is_empty() {
+                        println!("  (no URLs shared in last {since})");
+                        return;
+                    }
+                    println!("  {} URL(s) shared in last {since}:\n", links.len());
+                    for l in &links {
+                        let url = l["url"].as_str().unwrap_or("?");
+                        let from = l["from"].as_str().unwrap_or("?");
+                        let time = ts(l["ts"].as_u64().unwrap_or(0));
+                        println!("  {time} [{from}] {url}");
+                    }
+                }
+                Err(e) => { eprintln!("  Error: {e}"); process::exit(1); }
             }
         }
 

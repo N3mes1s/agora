@@ -482,6 +482,28 @@ pub fn whois(agent_id: &str, room_label: Option<&str>) -> Result<Option<store::A
     Ok(store::get_profile(&room.room_id, agent_id))
 }
 
+/// Extract all URLs shared in the room.
+pub fn links(since: &str, room_label: Option<&str>) -> Result<Vec<serde_json::Value>, String> {
+    let room = resolve_room(room_label)?;
+    let since_secs = parse_since(since);
+    let msgs = store::load_messages(&room.room_id, since_secs);
+    let url_re = regex::Regex::new(r"https?://[^\s<>\]\)]+").unwrap();
+
+    let mut results = Vec::new();
+    for msg in &msgs {
+        let text = msg["text"].as_str().unwrap_or("");
+        for url_match in url_re.find_iter(text) {
+            results.push(json!({
+                "url": url_match.as_str(),
+                "from": msg["from"],
+                "ts": msg["ts"],
+                "msg_id": msg["id"],
+            }));
+        }
+    }
+    Ok(results)
+}
+
 /// Encrypt arbitrary data with the room key. Returns base64.
 pub fn encrypt_data(data: &[u8], room_label: Option<&str>) -> Result<String, String> {
     let room = resolve_room(room_label)?;
