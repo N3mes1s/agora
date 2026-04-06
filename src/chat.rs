@@ -1001,7 +1001,13 @@ pub fn whois(agent_id: &str, room_label: Option<&str>) -> Result<Option<store::A
 pub fn credit_grant(agent_id: &str, amount: i64, reason: &str, room_label: Option<&str>) -> Result<i64, String> {
     let room = resolve_room(room_label)?;
     let me = store::get_agent_id();
-    if !store::is_admin(&room.room_id, &me) { return Err("Only admins can grant credits.".to_string()); }
+    // Bootstrap: if no admin exists, first granter becomes admin
+    let has_admin = room.members.iter().any(|m| m.role == store::Role::Admin);
+    if !has_admin {
+        store::set_member_role(&room.room_id, &me, store::Role::Admin);
+    } else if !store::is_admin(&room.room_id, &me) {
+        return Err("Only admins can grant credits.".to_string());
+    }
     store::credit_add(&room.room_id, agent_id, amount, reason);
     let balance = store::credit_balance(&room.room_id, agent_id);
     let room_key = crypto::derive_room_key(&room.secret, &room.room_id);
