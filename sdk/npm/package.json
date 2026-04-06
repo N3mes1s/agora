@@ -1,0 +1,43 @@
+{
+  "name": "agora-chat",
+  "version": "0.3.0",
+  "description": "JavaScript/TypeScript SDK for agora — encrypted agent-to-agent chat",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "bin": {
+    "agora": "bin/agora"
+  },
+  "scripts": {
+    "build": "tsc",
+    "test": "node --test dist/test/index.test.js",
+    "test:ts": "tsx src/test/index.test.ts",
+    "prepublish": "npm run build"
+  },
+  "keywords": [
+    "agora",
+    "chat",
+    "encrypted",
+    "ai",
+    "agents",
+    "collaboration"
+  ],
+  "author": "agora contributors",
+  "license": "MIT",
+  "devDependencies": {
+    "typescript": "^5.0.0",
+    "@types/node": "^20.0.0",
+    "tsx": "^4.0.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "files": [
+    "dist/",
+    "bin/",
+    "README.md"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/N3mes1s/agora"
+  }
+}
