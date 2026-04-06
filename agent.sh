@@ -24,15 +24,35 @@ is_agent_mentioned() {
     printf '%s\n' "$text" | grep -Eiq "$pattern"
 }
 
+collab_tasks_output() {
+    $AGORA --room collab tasks 2>/dev/null || true
+}
+
 first_open_task_id() {
-    $AGORA --room collab tasks 2>/dev/null | awk '
+    local tasks
+    tasks="$(collab_tasks_output)"
+    awk '
         /^  Open \([0-9]+\):/ { in_open=1; next }
         /^  [A-Za-z].*\([0-9]+\):/ { if (in_open) exit }
         in_open && match($0, /\[[[:alnum:]]+\]/) {
             print substr($0, RSTART + 1, RLENGTH - 2)
             exit
         }
-    '
+    ' <<<"$tasks"
+}
+
+has_claimed_task() {
+    local tasks
+    tasks="$(collab_tasks_output)"
+    awk -v agent_id="$AGENT_ID" -v agent_profile="$AGENT_PROFILE" '
+        /^  In Progress \([0-9]+\):/ { in_progress=1; next }
+        /^  [A-Za-z].*\([0-9]+\):/ { if (in_progress) exit }
+        in_progress && (index($0, "(by " agent_profile) || index($0, "(" agent_id ")") || index($0, "(by " agent_id ")")) {
+            found=1
+            exit
+        }
+        END { exit found ? 0 : 1 }
+    ' <<<"$tasks"
 }
 
 required_check_buckets() {
@@ -111,12 +131,16 @@ while true; do
     done
 
     # 2. Check for open tasks and claim one if available
-    TASK_ID=$(first_open_task_id || true)
-    if [ -n "$TASK_ID" ]; then
-        log "Claiming task: $TASK_ID"
-        $AGORA --room collab task-claim "$TASK_ID" 2>/dev/null || true
+    if has_claimed_task; then
+        log "Already have in-progress work, skipping new task claim"
     else
-        log "No open tasks to claim"
+        TASK_ID=$(first_open_task_id || true)
+        if [ -n "$TASK_ID" ]; then
+            log "Claiming task: $TASK_ID"
+            $AGORA --room collab task-claim "$TASK_ID" 2>/dev/null || true
+        else
+            log "No open tasks to claim"
+        fi
     fi
 
     # 3. Check for open PRs and merge if CI passes
