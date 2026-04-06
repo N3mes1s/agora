@@ -63,7 +63,7 @@ resolve_worker_agora_id() {
     fi
 
     local base_id
-    base_id="$("$AGORA" id 2>/dev/null || true)"
+    base_id="$("$AGORA" id 2>/dev/null | extract_agora_agent_id || true)"
     if [ -n "$base_id" ]; then
         printf '%s-worker' "$base_id"
         return
