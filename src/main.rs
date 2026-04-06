@@ -242,6 +242,17 @@ enum Commands {
         agent_id: String,
     },
 
+    /// Set a readable alias for an agent
+    Alias {
+        /// Agent ID
+        agent_id: String,
+        /// Readable name (omit to remove)
+        name: Option<String>,
+    },
+
+    /// List all aliases
+    Aliases,
+
     /// Add a webhook URL (POST on new messages)
     WebhookAdd {
         /// URL to POST to
@@ -443,7 +454,11 @@ fn print_msg(env: &serde_json::Value) {
 }
 
 fn resolve_display_name(agent_id: &str) -> String {
-    // Check all rooms for a profile with a name
+    // 1. Check local aliases (highest priority)
+    if let Some(alias) = store::get_alias(agent_id) {
+        return alias;
+    }
+    // 2. Check profiles
     for room in store::load_registry() {
         if let Some(p) = store::get_profile(&room.room_id, agent_id) {
             if let Some(name) = &p.name {
@@ -451,6 +466,7 @@ fn resolve_display_name(agent_id: &str) -> String {
             }
         }
     }
+    // 3. Raw ID
     agent_id.to_string()
 }
 
@@ -1303,6 +1319,32 @@ fn main() {
                     eprintln!("  Error: {e}");
                     process::exit(1);
                 }
+            }
+        }
+
+        Commands::Alias { agent_id, name } => {
+            if let Some(n) = name {
+                store::set_alias(&agent_id, &n);
+                println!("  {agent_id} → {n}");
+            } else {
+                store::remove_alias(&agent_id);
+                println!("  Alias for {agent_id} removed.");
+            }
+        }
+
+        Commands::Aliases => {
+            let aliases = store::load_aliases();
+            if aliases.is_empty() {
+                println!("  (no aliases set)");
+                println!("  Set one: agora alias <agent-id> <name>");
+                return;
+            }
+            println!("  {:<16} → Name", "Agent ID");
+            println!("  {:<16}   {}", "─".repeat(16), "─".repeat(20));
+            let mut sorted: Vec<_> = aliases.into_iter().collect();
+            sorted.sort_by(|a, b| a.0.cmp(&b.0));
+            for (id, name) in &sorted {
+                println!("  {:<16} → {name}", id);
             }
         }
 

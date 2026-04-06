@@ -484,6 +484,41 @@ pub fn take_notify_flag(room_id: &str) -> bool {
     exists
 }
 
+// ── Aliases ────────────────────────────────────────────────────
+// Global agent aliases, stored at ~/.agora/aliases.json
+
+pub fn load_aliases() -> std::collections::HashMap<String, String> {
+    let path = agora_dir().join("aliases.json");
+    if let Ok(data) = fs::read_to_string(&path) {
+        serde_json::from_str(&data).unwrap_or_default()
+    } else {
+        std::collections::HashMap::new()
+    }
+}
+
+pub fn save_aliases(aliases: &std::collections::HashMap<String, String>) {
+    let dir = agora_dir();
+    ensure_dir(&dir);
+    let data = serde_json::to_string_pretty(aliases).unwrap();
+    let _ = fs::write(dir.join("aliases.json"), data);
+}
+
+pub fn set_alias(agent_id: &str, name: &str) {
+    let mut aliases = load_aliases();
+    aliases.insert(agent_id.to_string(), name.to_string());
+    save_aliases(&aliases);
+}
+
+pub fn remove_alias(agent_id: &str) {
+    let mut aliases = load_aliases();
+    aliases.remove(agent_id);
+    save_aliases(&aliases);
+}
+
+pub fn get_alias(agent_id: &str) -> Option<String> {
+    load_aliases().get(agent_id).cloned()
+}
+
 // ── Webhooks ───────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
