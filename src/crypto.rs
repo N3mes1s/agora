@@ -218,6 +218,34 @@ pub fn generate_secret() -> String {
     hex::encode(bytes)
 }
 
+/// Derive a deterministic DM room ID from two agent IDs.
+///
+/// The room ID is symmetric: `dm_room_id(a, b) == dm_room_id(b, a)`.
+/// Uses HMAC-SHA256 with a fixed key so the output is a stable identifier.
+pub fn dm_room_id(agent1: &str, agent2: &str) -> String {
+    let (a, b) = if agent1 <= agent2 { (agent1, agent2) } else { (agent2, agent1) };
+    let combined = format!("{}|{}", a, b);
+    let key = hmac::Key::new(hmac::HMAC_SHA256, b"agora-dm-room-v1");
+    let tag = hmac::sign(&key, combined.as_bytes());
+    format!("dm-{}", &hex::encode(tag.as_ref())[..16])
+}
+
+/// Derive a deterministic DM shared secret from two agent IDs.
+///
+/// Returns a 64-char hex string (256-bit secret) that both agents can
+/// independently reproduce, making DM room credentials self-bootstrapping.
+pub fn dm_secret(agent1: &str, agent2: &str) -> String {
+    let (a, b) = if agent1 <= agent2 { (agent1, agent2) } else { (agent2, agent1) };
+    let combined = format!("{}|{}", a, b);
+    let salt = Salt::new(HKDF_SHA256, b"agora-dm-secret-v1");
+    let prk = salt.extract(combined.as_bytes());
+    let info = [b"agora-dm-key".as_slice()];
+    let okm = prk.expand(&info, HkdfLen(32)).expect("HKDF expand failed");
+    let mut key = [0u8; 32];
+    okm.fill(&mut key).expect("HKDF fill failed");
+    hex::encode(key)
+}
+
 /// Human-readable key fingerprint for out-of-band verification.
 pub fn fingerprint(key: &[u8; 32]) -> String {
     use ring::digest;
@@ -414,5 +442,57 @@ mod tests {
         let parts: Vec<&str> = fp.split(' ').collect();
         assert_eq!(parts.len(), 8);
         assert!(parts.iter().all(|p| p.len() == 4));
+    }
+
+    #[test]
+    fn test_dm_room_id_symmetric() {
+        let id1 = dm_room_id("alice", "bob");
+        let id2 = dm_room_id("bob", "alice");
+        assert_eq!(id1, id2);
+    }
+
+    #[test]
+    fn test_dm_room_id_format() {
+        let id = dm_room_id("alice", "bob");
+        assert!(id.starts_with("dm-"));
+        assert_eq!(id.len(), 19); // "dm-" + 16 hex chars
+    }
+
+    #[test]
+    fn test_dm_room_id_unique_per_pair() {
+        let id1 = dm_room_id("alice", "bob");
+        let id2 = dm_room_id("alice", "carol");
+        assert_ne!(id1, id2);
+    }
+
+    #[test]
+    fn test_dm_secret_symmetric() {
+        let s1 = dm_secret("alice", "bob");
+        let s2 = dm_secret("bob", "alice");
+        assert_eq!(s1, s2);
+    }
+
+    #[test]
+    fn test_dm_secret_length() {
+        let s = dm_secret("alice", "bob");
+        assert_eq!(s.len(), 64);
+    }
+
+    #[test]
+    fn test_dm_secret_unique_per_pair() {
+        let s1 = dm_secret("alice", "bob");
+        let s2 = dm_secret("alice", "carol");
+        assert_ne!(s1, s2);
+    }
+
+    #[test]
+    fn test_dm_encrypt_decrypt_roundtrip() {
+        let room_id = dm_room_id("alice", "bob");
+        let secret = dm_secret("alice", "bob");
+        let room_key = derive_room_key(&secret, &room_id);
+        let (enc_key, _) = derive_message_keys(&room_key);
+        let blob = encrypt(b"Hello Bob!", &enc_key, room_id.as_bytes()).unwrap();
+        let plaintext = decrypt(&blob, &enc_key, room_id.as_bytes()).unwrap();
+        assert_eq!(plaintext, b"Hello Bob!");
     }
 }

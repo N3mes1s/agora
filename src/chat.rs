@@ -1644,3 +1644,223 @@ fn parse_since(since: &str) -> u64 {
         7200
     }
 }
+
+// ── Direct Messages ─────────────────────────────────────────────
+
+fn dm_label(other_agent: &str) -> String {
+    format!("dm:{}", other_agent)
+}
+
+fn make_dm_envelope(text: &str, to_agent: &str) -> serde_json::Value {
+    let mut env = make_envelope(text, None);
+    env["type"] = json!("dm");
+    env["dm_to"] = json!(to_agent);
+    env
+}
+
+fn is_dm(env: &serde_json::Value) -> bool {
+    env["type"].as_str() == Some("dm")
+}
+
+/// Send a direct message to another agent.
+///
+/// Derives a private DM room from both agent IDs deterministically so either
+/// party can bootstrap the channel without out-of-band coordination.
+/// The DM room is auto-registered locally on first use.
+///
+/// Returns the sent message ID.
+pub fn dm_send(to_agent: &str, text: &str) -> Result<String, String> {
+    if to_agent.is_empty() {
+        return Err("Agent ID required.".to_string());
+    }
+    let my_id = store::get_agent_id();
+    if my_id == to_agent {
+        return Err("Cannot DM yourself.".to_string());
+    }
+    let room_id = crypto::dm_room_id(&my_id, to_agent);
+    let secret = crypto::dm_secret(&my_id, to_agent);
+    let label = dm_label(to_agent);
+    let room_key = crypto::derive_room_key(&secret, &room_id);
+
+    // Auto-register DM room locally if not present
+    if store::find_room(&label).is_none() && store::find_room(&room_id).is_none() {
+        store::add_room(&room_id, &secret, &label, store::Role::Admin);
+    }
+
+    let env = make_dm_envelope(text, to_agent);
+    let mid = env["id"].as_str().unwrap_or("?").to_string();
+    let encrypted = encrypt_envelope(&env, &room_key, &room_id);
+    transport::publish(&room_id, &encrypted);
+    store::save_message(&room_id, &env);
+    Ok(mid)
+}
+
+/// Read DMs with a specific agent.
+///
+/// Derives and auto-joins the DM room, fetches messages from both the relay
+/// and local cache, and marks new messages as seen.
+/// `since` is a time string like "24h", "7d", "30m".
+pub fn dm_read(other_agent: &str, since: &str) -> Result<Vec<serde_json::Value>, String> {
+    if other_agent.is_empty() {
+        return Err("Agent ID required.".to_string());
+    }
+    let my_id = store::get_agent_id();
+    let room_id = crypto::dm_room_id(&my_id, other_agent);
+    let secret = crypto::dm_secret(&my_id, other_agent);
+    let label = dm_label(other_agent);
+    let room_key = crypto::derive_room_key(&secret, &room_id);
+
+    // Auto-register DM room locally if not present
+    if store::find_room(&label).is_none() && store::find_room(&room_id).is_none() {
+        store::add_room(&room_id, &secret, &label, store::Role::Member);
+    }
+
+    // Fetch from relay
+    let remote_events = transport::fetch(&room_id, since);
+    let since_secs = parse_since(since);
+    let mut seen_ids: HashSet<String> = HashSet::new();
+    let mut merged: Vec<serde_json::Value> = Vec::new();
+
+    for (ts, payload) in &remote_events {
+        if let Some(mut env) = decrypt_payload(payload, &room_key, &room_id) {
+            if env["ts"].as_u64().unwrap_or(0) == 0 {
+                env["ts"] = json!(ts);
+            }
+            let mid = env["id"].as_str().unwrap_or("?").to_string();
+            if mid != "?" && seen_ids.contains(&mid) {
+                continue;
+            }
+            seen_ids.insert(mid);
+            if !is_heartbeat(&env) {
+                store::save_message(&room_id, &env);
+                merged.push(env);
+            }
+        }
+    }
+
+    // Merge local cached messages
+    for env in store::load_messages(&room_id, since_secs) {
+        let mid = env["id"].as_str().unwrap_or("?").to_string();
+        if mid != "?" && seen_ids.contains(&mid) {
+            continue;
+        }
+        seen_ids.insert(mid);
+        if !is_heartbeat(&env) {
+            merged.push(env);
+        }
+    }
+
+    // Mark all received (non-own) messages as seen
+    let mut read_ids = Vec::new();
+    let seen_store = store::load_seen(&room_id);
+    for env in &merged {
+        let mid = env["id"].as_str().unwrap_or("?");
+        let from = env["from"].as_str().unwrap_or("");
+        if from != my_id && !seen_store.contains(mid) {
+            store::mark_seen(&room_id, mid);
+            read_ids.push(mid.to_string());
+        }
+    }
+
+    // Send read receipts to the DM room
+    if !read_ids.is_empty() {
+        let receipt = make_receipt(&read_ids);
+        let encrypted = encrypt_envelope(&receipt, &room_key, &room_id);
+        transport::publish(&room_id, &encrypted);
+    }
+
+    merged.sort_by_key(|m| m["ts"].as_u64().unwrap_or(0));
+    Ok(merged)
+}
+
+/// List all DM conversations with unread counts.
+///
+/// Scans the local room registry for rooms whose label starts with "dm:".
+pub fn dm_list() -> Vec<(String, usize)> {
+    let me = store::get_agent_id();
+    store::load_registry()
+        .into_iter()
+        .filter(|r| r.label.starts_with("dm:"))
+        .map(|r| {
+            let other = r.label.strip_prefix("dm:").unwrap_or("?").to_string();
+            let unread = count_dm_unread(&r.room_id, &me);
+            (other, unread)
+        })
+        .collect()
+}
+
+fn count_dm_unread(room_id: &str, me: &str) -> usize {
+    let seen = store::load_seen(room_id);
+    store::load_messages(room_id, 86400 * 7)
+        .into_iter()
+        .filter(|m| {
+            let mid = m["id"].as_str().unwrap_or("?");
+            let from = m["from"].as_str().unwrap_or("");
+            from != me && !seen.contains(mid) && !is_heartbeat(m) && !is_receipt(m)
+        })
+        .count()
+}
+
+#[cfg(test)]
+mod dm_tests {
+    use super::*;
+
+    #[test]
+    fn test_dm_label_format() {
+        let label = dm_label("agent123");
+        assert_eq!(label, "dm:agent123");
+    }
+
+    #[test]
+    fn test_make_dm_envelope_fields() {
+        let env = make_dm_envelope("hello", "bob");
+        assert_eq!(env["type"].as_str(), Some("dm"));
+        assert_eq!(env["dm_to"].as_str(), Some("bob"));
+        assert_eq!(env["text"].as_str(), Some("hello"));
+        assert!(env["id"].as_str().is_some());
+        assert!(env["from"].as_str().is_some());
+        assert!(env["ts"].as_u64().is_some());
+    }
+
+    #[test]
+    fn test_is_dm_detection() {
+        let env = make_dm_envelope("hello", "bob");
+        assert!(is_dm(&env));
+    }
+
+    #[test]
+    fn test_dm_not_heartbeat() {
+        let env = make_dm_envelope("hi", "bob");
+        assert!(!is_heartbeat(&env));
+    }
+
+    #[test]
+    fn test_dm_room_determinism() {
+        // Both sides derive the same room_id and secret
+        let room_a = crypto::dm_room_id("alice", "bob");
+        let room_b = crypto::dm_room_id("bob", "alice");
+        assert_eq!(room_a, room_b);
+        let secret_a = crypto::dm_secret("alice", "bob");
+        let secret_b = crypto::dm_secret("bob", "alice");
+        assert_eq!(secret_a, secret_b);
+    }
+
+    #[test]
+    fn test_dm_list_empty_on_no_dms() {
+        // Use an isolated temp home so we don't read real ~/.agora
+        let home = std::env::temp_dir().join(format!(
+            "agora-dm-list-test-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&home).unwrap();
+        unsafe {
+            std::env::set_var("HOME", &home);
+            std::env::set_var("AGORA_AGENT_ID", "dm-list-test");
+        }
+        let dms = dm_list();
+        assert!(dms.is_empty(), "fresh home should have no DM rooms");
+    }
+}

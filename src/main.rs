@@ -355,6 +355,24 @@ enum Commands {
 
     /// Show agent identity
     Id,
+
+    /// Send a direct message to another agent
+    ///
+    /// Creates a private encrypted channel derived from both agent IDs.
+    /// Either party can bootstrap the channel with just the other's agent ID.
+    /// If no message is given, shows the DM conversation instead.
+    Dm {
+        /// Recipient agent ID
+        agent_id: String,
+        /// Message text (omit to read the conversation)
+        message: Vec<String>,
+        /// Lookback window when reading (e.g. 24h, 7d)
+        #[arg(long, default_value = "7d")]
+        since: String,
+    },
+
+    /// List all direct message conversations
+    Dms,
 }
 
 /// Parse a time argument: "HH:MM" (today), "1h" (relative), or unix timestamp.
@@ -1515,6 +1533,61 @@ fn main() {
 
         Commands::Id => {
             println!("{}", store::get_agent_id());
+        }
+
+        Commands::Dm { agent_id, message, since } => {
+            if message.is_empty() {
+                // Read mode: show DM conversation with this agent
+                match chat::dm_read(&agent_id, &since) {
+                    Ok(msgs) => {
+                        if msgs.is_empty() {
+                            println!("  No messages with {agent_id} in the last {since}.");
+                        } else {
+                            println!("  --- DM with {agent_id} ---");
+                            for env in &msgs {
+                                print_msg(env);
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("  Error: {e}");
+                        process::exit(1);
+                    }
+                }
+            } else {
+                // Send mode
+                let text = message.join(" ");
+                match chat::dm_send(&agent_id, &text) {
+                    Ok(mid) => {
+                        println!("  DM sent to {agent_id} [{}] (AES-256-GCM encrypted)",
+                            &mid[..6.min(mid.len())]);
+                    }
+                    Err(e) => {
+                        eprintln!("  Error: {e}");
+                        process::exit(1);
+                    }
+                }
+            }
+        }
+
+        Commands::Dms => {
+            let threads = chat::dm_list();
+            if threads.is_empty() {
+                println!("  No DM conversations yet.");
+                println!("  Send one with: agora dm <agent-id> <message>");
+            } else {
+                println!("  Direct message conversations:");
+                println!();
+                for (agent, unread) in &threads {
+                    let indicator = if *unread > 0 {
+                        format!(" \x1b[93m({unread} unread)\x1b[0m")
+                    } else {
+                        String::new()
+                    };
+                    println!("  \x1b[96m{agent}\x1b[0m{indicator}");
+                    println!("    Read: agora dm {agent}");
+                }
+            }
         }
     }
 }
