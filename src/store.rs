@@ -13,6 +13,9 @@ use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 fn agora_dir() -> PathBuf {
+    if let Ok(dir) = std::env::var("AGORA_DIR") {
+        return PathBuf::from(dir);
+    }
     dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("/tmp"))
         .join(".agora")
@@ -546,6 +549,37 @@ pub fn mark_seen(room_id: &str, msg_id: &str) {
     let mut seen = load_seen(room_id);
     seen.insert(msg_id.to_string());
     let mut ids: Vec<_> = seen.into_iter().collect();
+    ids.sort();
+    if ids.len() > 1000 {
+        ids = ids[ids.len() - 1000..].to_vec();
+    }
+    let _ = fs::write(&path, ids.join("\n"));
+}
+
+// ── Receipted-sent tracking ────────────────────────────────────
+// receipted_sent.txt — IDs of messages we have already sent a receipt for.
+// Prevents duplicate receipts when `agora read` is run multiple times.
+
+pub fn is_receipted_sent(room_id: &str, msg_id: &str) -> bool {
+    let path = agora_dir().join("rooms").join(room_id).join("receipted_sent.txt");
+    if let Ok(data) = fs::read_to_string(&path) {
+        data.lines().any(|s| s == msg_id)
+    } else {
+        false
+    }
+}
+
+pub fn mark_receipted_sent(room_id: &str, msg_id: &str) {
+    let dir = agora_dir().join("rooms").join(room_id);
+    ensure_dir(&dir);
+    let path = dir.join("receipted_sent.txt");
+    let mut sent: HashSet<String> = if let Ok(data) = fs::read_to_string(&path) {
+        data.lines().map(|s| s.to_string()).collect()
+    } else {
+        HashSet::new()
+    };
+    sent.insert(msg_id.to_string());
+    let mut ids: Vec<_> = sent.into_iter().collect();
     ids.sort();
     if ids.len() > 1000 {
         ids = ids[ids.len() - 1000..].to_vec();

@@ -218,6 +218,12 @@ enum Commands {
     /// Show read receipts for your messages
     Status,
 
+    /// Show who has received a specific message
+    Receipts {
+        /// Message ID or unique prefix
+        msg_id: String,
+    },
+
     /// Set your agent profile
     Profile {
         /// Display name
@@ -380,11 +386,20 @@ fn resolve_display_name(agent_id: &str) -> String {
 }
 
 fn print_msg_with_depth(env: &serde_json::Value, depth: usize) {
+    print_msg_with_depth_receipts(env, depth, None);
+}
+
+fn print_msg_with_depth_receipts(
+    env: &serde_json::Value,
+    depth: usize,
+    receipts: Option<&std::collections::HashMap<String, Vec<String>>>,
+) {
     let time = ts(env["ts"].as_u64().unwrap_or(0));
     let sender_id = env["from"].as_str().unwrap_or("?");
     let sender = resolve_display_name(sender_id);
     let text = env["text"].as_str().unwrap_or("");
-    let mid = &env["id"].as_str().unwrap_or("?")[..6.min(env["id"].as_str().unwrap_or("?").len())];
+    let full_mid = env["id"].as_str().unwrap_or("?");
+    let mid = &full_mid[..6.min(full_mid.len())];
     let reply = if let Some(rt) = env["reply_to"].as_str() {
         format!(" ↩{}", &rt[..6.min(rt.len())])
     } else {
@@ -393,7 +408,13 @@ fn print_msg_with_depth(env: &serde_json::Value, depth: usize) {
     let indent = "    ".repeat(depth);
     let me = store::get_agent_id();
     if sender_id == me {
-        println!("  {indent}\x1b[92m[{time}] [{mid}] {sender}: {text}{reply}\x1b[0m");
+        let receipt_indicator = if let Some(r) = receipts {
+            let count = r.get(full_mid).map(|v| v.len()).unwrap_or(0);
+            if count >= 2 { " \u{2713}\u{2713}" } else if count >= 1 { " \u{2713}" } else { "" }
+        } else {
+            ""
+        };
+        println!("  {indent}\x1b[92m[{time}] [{mid}] {sender}: {text}{reply}{receipt_indicator}\x1b[0m");
     } else {
         println!("  {indent}\x1b[96m[{time}]\x1b[0m [{mid}]{reply} {sender}: {text}");
     }
@@ -537,8 +558,18 @@ fn main() {
                             println!();
                         }
                     }
+                    // Load receipts to show ✓/✓✓ on own messages
+                    let receipts = if let Some(r) = if let Some(target) = room {
+                        store::find_room(target)
+                    } else {
+                        store::get_active_room()
+                    } {
+                        store::load_receipts(&r.room_id)
+                    } else {
+                        std::collections::HashMap::new()
+                    };
                     for m in msgs {
-                        print_msg(m);
+                        print_msg_with_depth_receipts(m, 0, Some(&receipts));
                     }
                 }
                 Err(e) => {
@@ -1113,6 +1144,26 @@ fn main() {
                         println!("  [{mid}] {time} {check} {text}");
                         if !readers.is_empty() {
                             println!("         Read by: {readers}");
+                        }
+                    }
+                }
+                Err(e) => {
+                    eprintln!("  Error: {e}");
+                    process::exit(1);
+                }
+            }
+        }
+
+        Commands::Receipts { msg_id } => {
+            match chat::delivery_receipts(&msg_id, room) {
+                Ok(receipts) => {
+                    if receipts.is_empty() {
+                        println!("  No receipts yet for [{}]", &msg_id[..6.min(msg_id.len())]);
+                    } else {
+                        println!("  Receipts for [{}]:", &msg_id[..6.min(msg_id.len())]);
+                        for r in &receipts {
+                            let from = r["from"].as_str().unwrap_or("?");
+                            println!("    \u{2713} {from}");
                         }
                     }
                 }

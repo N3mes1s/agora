@@ -89,6 +89,19 @@ fn is_receipt(env: &serde_json::Value) -> bool {
     env["type"].as_str() == Some("receipt")
 }
 
+/// Send a delivery receipt for a single message.
+/// No-op if we already sent a receipt for this message (idempotent).
+fn send_receipt_for_msg(msg_id: &str, room: &store::RoomEntry) {
+    if store::is_receipted_sent(&room.room_id, msg_id) {
+        return;
+    }
+    let room_key = crypto::derive_room_key(&room.secret, &room.room_id);
+    let receipt = make_receipt(&[msg_id.to_string()]);
+    let encrypted = encrypt_envelope(&receipt, &room_key, &room.room_id);
+    let _ = transport::publish(&room.room_id, &encrypted);
+    store::mark_receipted_sent(&room.room_id, msg_id);
+}
+
 fn make_reaction(target_id: &str, emoji: &str) -> serde_json::Value {
     json!({
         "v": VERSION,
@@ -271,6 +284,7 @@ pub fn read(since: &str, limit: usize, room_label: Option<&str>) -> Result<Vec<s
     let since_secs = parse_since(since);
     let local_msgs = store::load_messages(&room.room_id, since_secs);
 
+    let me = store::get_agent_id();
     let mut seen_ids: HashSet<String> = HashSet::new();
     let mut merged = Vec::new();
     for msg in remote_msgs.into_iter().chain(local_msgs) {
@@ -278,12 +292,28 @@ pub fn read(since: &str, limit: usize, room_label: Option<&str>) -> Result<Vec<s
         if mid != "?" && seen_ids.contains(&mid) {
             continue;
         }
-        seen_ids.insert(mid);
+        seen_ids.insert(mid.clone());
         // Track presence from all messages (including heartbeats)
         track_presence(&room.room_id, &msg);
+        if is_receipt(&msg) {
+            // Process incoming receipt and store it; don't display
+            if let Some(ids) = msg["read_ids"].as_array() {
+                let reader = msg["from"].as_str().unwrap_or("").to_string();
+                let msg_ids: Vec<String> = ids.iter()
+                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                    .collect();
+                store::record_receipts(&room.room_id, &msg_ids, &reader);
+            }
+            continue;
+        }
         // Only persist and display non-heartbeat messages
         if !is_heartbeat(&msg) {
             store::save_message(&room.room_id, &msg);
+            // Auto-send a delivery receipt for messages from other agents
+            let from = msg["from"].as_str().unwrap_or("");
+            if from != me && mid != "?" {
+                send_receipt_for_msg(&mid, &room);
+            }
             merged.push(msg);
         }
     }
@@ -402,6 +432,31 @@ pub fn read_status(room_label: Option<&str>) -> Result<Vec<serde_json::Value>, S
         }));
     }
     Ok(status)
+}
+
+/// Get delivery receipts for a specific message (by ID or unique prefix).
+///
+/// Returns a list of `{ from }` objects — one per agent that has acknowledged
+/// receipt of the message.
+pub fn delivery_receipts(
+    msg_id_prefix: &str,
+    room_label: Option<&str>,
+) -> Result<Vec<serde_json::Value>, String> {
+    let room = resolve_room(room_label)?;
+    let receipts = store::load_receipts(&room.room_id);
+
+    // Find the full message ID that matches the given prefix
+    let full_id = receipts
+        .keys()
+        .find(|k| k.starts_with(msg_id_prefix))
+        .cloned()
+        .unwrap_or_else(|| msg_id_prefix.to_string());
+
+    let readers = receipts.get(&full_id).cloned().unwrap_or_default();
+    Ok(readers
+        .into_iter()
+        .map(|from| json!({ "from": from }))
+        .collect())
 }
 
 /// React to a message with an emoji.
@@ -1131,7 +1186,12 @@ mod tests {
     use crate::store::{self, Role};
     use serde_json::json;
     use std::path::PathBuf;
+    use std::sync::Mutex;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    /// Process-wide mutex for tests that mutate HOME / AGORA_AGENT_ID.
+    /// Acquire before any `set_var` call and hold for the test's lifetime.
+    static TEST_ENV_MUTEX: Mutex<()> = Mutex::new(());
 
     fn temp_home() -> PathBuf {
         let ts = SystemTime::now()
@@ -1151,7 +1211,8 @@ mod tests {
             .unwrap_or(0)
     }
 
-    fn setup_pin_room() -> (PathBuf, String, String) {
+    fn setup_pin_room() -> (PathBuf, String, String, std::sync::MutexGuard<'static, ()>) {
+        let _lock = TEST_ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let home = std::env::temp_dir().join(format!(
             "agora-pin-test-{}",
             SystemTime::now()
@@ -1161,7 +1222,7 @@ mod tests {
         ));
         std::fs::create_dir_all(&home).unwrap();
         unsafe {
-            std::env::set_var("HOME", &home);
+            std::env::set_var("AGORA_DIR", home.join(".agora").to_str().unwrap());
             std::env::set_var("AGORA_AGENT_ID", "pin-test");
         }
 
@@ -1185,15 +1246,16 @@ mod tests {
             "v": "3.0",
         }));
 
-        (home, first, second)
+        (home, first, second, _lock)
     }
 
     #[test]
     fn resolve_room_reports_missing_explicit_target() {
+        let _lock = TEST_ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let home = temp_home();
         std::fs::create_dir_all(&home).unwrap();
         unsafe {
-            std::env::set_var("HOME", &home);
+            std::env::set_var("AGORA_DIR", home.join(".agora").to_str().unwrap());
             std::env::set_var("AGORA_AGENT_ID", "watch-test");
         }
 
@@ -1203,10 +1265,11 @@ mod tests {
 
     #[test]
     fn watch_heartbeat_targets_watched_room_not_active_room() {
+        let _lock = TEST_ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let home = temp_home();
         std::fs::create_dir_all(&home).unwrap();
         unsafe {
-            std::env::set_var("HOME", &home);
+            std::env::set_var("AGORA_DIR", home.join(".agora").to_str().unwrap());
             std::env::set_var("AGORA_AGENT_ID", "watch-test");
         }
 
@@ -1230,7 +1293,7 @@ mod tests {
 
     #[test]
     fn pin_and_unpin_round_trip() {
-        let (_home, first, _second) = setup_pin_room();
+        let (_home, first, _second, _lock) = setup_pin_room();
 
         let (resolved, added) = pin("aaaa", None).unwrap();
         assert_eq!(resolved, first);
