@@ -440,6 +440,56 @@ pub fn get_profile(room_id: &str, agent_id: &str) -> Option<AgentProfile> {
     load_profiles(room_id).into_iter().find(|p| p.agent_id == agent_id)
 }
 
+// ── Agent Capability Cards ─────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct AgentCapabilityCard {
+    pub agent_id: String,
+    #[serde(default)]
+    pub capabilities: Vec<String>,
+    #[serde(default)]
+    pub summary: Option<String>,
+    pub updated_at: u64,
+    #[serde(default = "default_card_auth")]
+    pub auth: String,
+}
+
+fn default_card_auth() -> String {
+    "unsigned".to_string()
+}
+
+pub fn load_capability_cards(room_id: &str) -> Vec<AgentCapabilityCard> {
+    let path = agora_dir().join("rooms").join(room_id).join("cards.json");
+    if let Ok(data) = fs::read_to_string(&path) {
+        serde_json::from_str(&data).unwrap_or_default()
+    } else {
+        Vec::new()
+    }
+}
+
+pub fn save_capability_cards(room_id: &str, cards: &[AgentCapabilityCard]) {
+    let dir = agora_dir().join("rooms").join(room_id);
+    ensure_dir(&dir);
+    let data = serde_json::to_string_pretty(cards).unwrap();
+    let _ = fs::write(dir.join("cards.json"), data);
+}
+
+pub fn upsert_capability_card(room_id: &str, card: &AgentCapabilityCard) {
+    let mut cards = load_capability_cards(room_id);
+    if let Some(existing) = cards.iter_mut().find(|c| c.agent_id == card.agent_id) {
+        *existing = card.clone();
+    } else {
+        cards.push(card.clone());
+    }
+    save_capability_cards(room_id, &cards);
+}
+
+pub fn get_capability_card(room_id: &str, agent_id: &str) -> Option<AgentCapabilityCard> {
+    load_capability_cards(room_id)
+        .into_iter()
+        .find(|c| c.agent_id == agent_id)
+}
+
 // ── Muted Agents ──────────────────────────────────────────────
 
 pub fn load_muted(room_id: &str) -> HashSet<String> {
@@ -550,6 +600,52 @@ pub fn take_notify_flag(room_id: &str) -> bool {
         let _ = fs::remove_file(path);
     }
     exists
+}
+
+// ── Capability Cards ───────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CapabilityCard {
+    pub agent_id: String,
+    pub capabilities: Vec<String>,
+    pub available: bool,
+    pub description: Option<String>,
+    pub updated_at: u64,
+}
+
+pub fn save_card(card: &CapabilityCard) {
+    let dir = agora_dir();
+    ensure_dir(&dir);
+    let data = serde_json::to_string_pretty(card).unwrap();
+    let _ = fs::write(dir.join("card.json"), data);
+}
+
+pub fn load_card() -> Option<CapabilityCard> {
+    let path = agora_dir().join("card.json");
+    fs::read_to_string(&path).ok().and_then(|d| serde_json::from_str(&d).ok())
+}
+
+pub fn save_peer_card(room_id: &str, card: &CapabilityCard) {
+    let dir = agora_dir().join("rooms").join(room_id).join("cards");
+    ensure_dir(&dir);
+    let data = serde_json::to_string_pretty(card).unwrap();
+    let _ = fs::write(dir.join(format!("{}.json", card.agent_id)), data);
+}
+
+pub fn load_peer_cards(room_id: &str) -> Vec<CapabilityCard> {
+    let dir = agora_dir().join("rooms").join(room_id).join("cards");
+    if !dir.exists() { return Vec::new(); }
+    let mut cards = Vec::new();
+    if let Ok(entries) = fs::read_dir(&dir) {
+        for entry in entries.flatten() {
+            if let Ok(data) = fs::read_to_string(entry.path()) {
+                if let Ok(card) = serde_json::from_str::<CapabilityCard>(&data) {
+                    cards.push(card);
+                }
+            }
+        }
+    }
+    cards
 }
 
 // ── Task Queue ─────────────────────────────────────────────────
