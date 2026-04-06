@@ -596,12 +596,16 @@ fn print_msg_with_depth(env: &serde_json::Value, depth: usize) {
     } else {
         String::new()
     };
+    let auth = match env["_auth"].as_str() {
+        Some("unsigned") => " [unsigned]",
+        _ => "",
+    };
     let indent = "    ".repeat(depth);
     let me = store::get_agent_id();
     if sender_id == me {
-        println!("  {indent}\x1b[92m[{time}] [{mid}] {sender}: {text}{reply}\x1b[0m");
+        println!("  {indent}\x1b[92m[{time}] [{mid}] {sender}: {text}{reply}{auth}\x1b[0m");
     } else {
-        println!("  {indent}\x1b[96m[{time}]\x1b[0m [{mid}]{reply} {sender}: {text}");
+        println!("  {indent}\x1b[96m[{time}]\x1b[0m [{mid}]{reply} {sender}: {text}{auth}");
     }
 }
 
@@ -1975,7 +1979,7 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::{dm_room_label, parse_invite_token, targeted_invite_token, InviteTokenPayload};
-    use crate::store::RoomEntry;
+    use crate::store::{self, RoomEntry};
 
     #[test]
     fn dm_room_label_is_stable_and_symmetric() {
@@ -2011,6 +2015,9 @@ mod tests {
                 label: "dm-a-b".to_string(),
                 target_agent_id: Some("agent-b".to_string()),
                 purpose: Some("dm".to_string()),
+                expires_at: None,
+                max_uses: None,
+                created_by: Some(store::get_agent_id()),
             }
         );
     }

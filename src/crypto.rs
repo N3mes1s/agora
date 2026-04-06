@@ -11,6 +11,7 @@ use ring::aead::{self, Aad, LessSafeKey, Nonce, UnboundKey, NONCE_LEN};
 use ring::hkdf::{self, Salt, HKDF_SHA256};
 use ring::hmac;
 use ring::rand::{SecureRandom, SystemRandom};
+use ring::signature::{ED25519, Ed25519KeyPair, KeyPair, UnparsedPublicKey};
 
 /// Errors from crypto operations.
 #[derive(Debug)]
@@ -19,6 +20,7 @@ pub enum CryptoError {
     DecryptionFailed,
     InvalidKey,
     RngFailed,
+    SignatureFailed,
 }
 
 impl std::fmt::Display for CryptoError {
@@ -28,6 +30,7 @@ impl std::fmt::Display for CryptoError {
             Self::DecryptionFailed => write!(f, "decryption failed (wrong key or tampered)"),
             Self::InvalidKey => write!(f, "invalid key material"),
             Self::RngFailed => write!(f, "random number generation failed"),
+            Self::SignatureFailed => write!(f, "signature operation failed"),
         }
     }
 }
@@ -198,6 +201,29 @@ pub fn zkp_verify(
     data.extend_from_slice(nonce);
     data.extend_from_slice(challenge);
     hmac::verify(&hmac_key, &data, response).is_ok()
+}
+
+// ── Message Signing ─────────────────────────────────────────────
+
+pub fn generate_signing_keypair_pkcs8() -> Result<Vec<u8>, CryptoError> {
+    let rng = SystemRandom::new();
+    let pkcs8 = Ed25519KeyPair::generate_pkcs8(&rng).map_err(|_| CryptoError::SignatureFailed)?;
+    Ok(pkcs8.as_ref().to_vec())
+}
+
+pub fn signing_public_key(pkcs8: &[u8]) -> Result<Vec<u8>, CryptoError> {
+    let pair = Ed25519KeyPair::from_pkcs8(pkcs8).map_err(|_| CryptoError::InvalidKey)?;
+    Ok(pair.public_key().as_ref().to_vec())
+}
+
+pub fn sign_message(pkcs8: &[u8], message: &[u8]) -> Result<Vec<u8>, CryptoError> {
+    let pair = Ed25519KeyPair::from_pkcs8(pkcs8).map_err(|_| CryptoError::InvalidKey)?;
+    Ok(pair.sign(message).as_ref().to_vec())
+}
+
+pub fn verify_message_signature(public_key: &[u8], message: &[u8], signature: &[u8]) -> bool {
+    let verifier = UnparsedPublicKey::new(&ED25519, public_key);
+    verifier.verify(message, signature).is_ok()
 }
 
 // ── Utilities ───────────────────────────────────────────────────
@@ -392,6 +418,25 @@ mod tests {
         let challenge = zkp_create_challenge().unwrap();
         let response = zkp_respond(&k1, &nonce, &challenge);
         assert!(!zkp_verify(&k2, &nonce, &challenge, &response));
+    }
+
+    #[test]
+    fn test_sign_and_verify_roundtrip() {
+        let pkcs8 = generate_signing_keypair_pkcs8().unwrap();
+        let public_key = signing_public_key(&pkcs8).unwrap();
+        let msg = b"agora signed payload";
+        let sig = sign_message(&pkcs8, msg).unwrap();
+        assert!(verify_message_signature(&public_key, msg, &sig));
+    }
+
+    #[test]
+    fn test_wrong_signing_key_fails_verification() {
+        let pkcs8_a = generate_signing_keypair_pkcs8().unwrap();
+        let pkcs8_b = generate_signing_keypair_pkcs8().unwrap();
+        let public_key_b = signing_public_key(&pkcs8_b).unwrap();
+        let msg = b"agora signed payload";
+        let sig_a = sign_message(&pkcs8_a, msg).unwrap();
+        assert!(!verify_message_signature(&public_key_b, msg, &sig_a));
     }
 
     #[test]

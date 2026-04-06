@@ -6,8 +6,9 @@
 //!   rooms.json                — room registry
 //!   identity.json             — agent identity
 
+use crate::crypto;
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -67,6 +68,51 @@ pub fn get_agent_id() -> String {
     let json = serde_json::json!({"agent_id": agent_id});
     let _ = fs::write(&id_file, serde_json::to_string_pretty(&json).unwrap());
     agent_id
+}
+
+fn signing_keys_dir() -> PathBuf {
+    agora_dir().join("signing-keys")
+}
+
+pub fn load_or_create_signing_keypair(agent_id: &str) -> Result<Vec<u8>, String> {
+    let dir = signing_keys_dir();
+    ensure_dir(&dir);
+    let path = dir.join(format!("{agent_id}.pkcs8"));
+    if let Ok(data) = fs::read(&path) {
+        return Ok(data);
+    }
+
+    let pkcs8 = crypto::generate_signing_keypair_pkcs8().map_err(|e| e.to_string())?;
+    fs::write(&path, &pkcs8).map_err(|e| format!("failed to persist signing key: {e}"))?;
+    Ok(pkcs8)
+}
+
+// ── Trusted Signing Keys (TOFU) ────────────────────────────────
+
+pub fn load_trusted_signing_keys() -> HashMap<String, String> {
+    let path = agora_dir().join("trusted_signing_keys.json");
+    if let Ok(data) = fs::read_to_string(&path) {
+        serde_json::from_str(&data).unwrap_or_default()
+    } else {
+        HashMap::new()
+    }
+}
+
+pub fn save_trusted_signing_keys(keys: &HashMap<String, String>) {
+    let dir = agora_dir();
+    ensure_dir(&dir);
+    let data = serde_json::to_string_pretty(keys).unwrap();
+    let _ = fs::write(dir.join("trusted_signing_keys.json"), data);
+}
+
+pub fn get_trusted_signing_key(agent_id: &str) -> Option<String> {
+    load_trusted_signing_keys().get(agent_id).cloned()
+}
+
+pub fn trust_signing_key(agent_id: &str, signing_pubkey: &str) {
+    let mut keys = load_trusted_signing_keys();
+    keys.insert(agent_id.to_string(), signing_pubkey.to_string());
+    save_trusted_signing_keys(&keys);
 }
 
 // ── Room Registry ───────────────────────────────────────────────
