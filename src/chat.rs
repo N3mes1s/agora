@@ -688,19 +688,54 @@ pub fn soma_query(subject: &str, room_label: Option<&str>) -> Result<Vec<serde_j
     }).collect())
 }
 
+fn resolve_soma_belief<'a>(
+    msgs: &'a [serde_json::Value],
+    needle: &str,
+) -> Result<&'a serde_json::Value, String> {
+    let matches: Vec<&serde_json::Value> = msgs
+        .iter()
+        .filter(|m| m["type"].as_str() == Some("soma_belief"))
+        .filter(|m| {
+            m["id"]
+                .as_str()
+                .map(|id| id == needle || id.starts_with(needle))
+                .unwrap_or(false)
+        })
+        .collect();
+
+    match matches.len() {
+        0 => Err(format!("Belief '{needle}' not found in local cache.")),
+        1 => Ok(matches[0]),
+        _ => Err(format!(
+            "Belief ID '{needle}' is ambiguous: {}",
+            matches
+                .into_iter()
+                .filter_map(|m| m["id"].as_str())
+                .take(5)
+                .collect::<Vec<_>>()
+                .join(", ")
+        )),
+    }
+}
+
 pub fn soma_correct(belief_id: &str, new_predicate: &str, reason: Option<&str>, room_label: Option<&str>) -> Result<String, String> {
     let room = resolve_room(room_label)?;
     let room_key = crypto::derive_room_key(&room.secret, &room.room_id);
     let msgs = store::load_messages(&room.room_id, 604800);
-    let subject = msgs.iter()
-        .find(|m| m["id"].as_str().unwrap_or("").starts_with(belief_id) && m["type"].as_str() == Some("soma_belief"))
-        .and_then(|m| m["subject"].as_str()).unwrap_or("unknown").to_string();
+    let belief = resolve_soma_belief(&msgs, belief_id)?;
+    let resolved_belief_id = belief["id"]
+        .as_str()
+        .ok_or_else(|| format!("Belief '{belief_id}' is missing an ID."))?;
+    let subject = belief["subject"]
+        .as_str()
+        .ok_or_else(|| format!("Belief '{resolved_belief_id}' is missing a subject."))?
+        .to_string();
     let id = msg_id();
     let reason_str = reason.unwrap_or("no reason given");
     let env = json!({
         "v": VERSION, "id": id, "from": store::get_agent_id(), "ts": now(),
-        "type": "soma_correction", "corrects": belief_id, "subject": subject,
-        "predicate": new_predicate, "reason": reason_str, "reply_to": belief_id,
+        "type": "soma_correction", "corrects": resolved_belief_id, "subject": subject,
+        "predicate": new_predicate, "reason": reason_str, "reply_to": resolved_belief_id,
         "text": format!("[soma correction] {subject}: {new_predicate} (reason: {reason_str})"),
     });
     let encrypted = encrypt_envelope(&env, &room_key, &room.room_id);
@@ -1689,7 +1724,7 @@ pub fn download_file(file_id: &str, out_path: Option<&str>, room_label: Option<&
 #[cfg(test)]
 mod tests {
     use base64::Engine;
-    use super::{pin, pins, resolve_room, send_watch_heartbeat, unpin};
+    use super::{pin, pins, resolve_room, send_watch_heartbeat, soma_correct, unpin};
     use super::{
         count_invite_redemptions_in_envs, decrypt_payload, encrypt_envelope, make_envelope,
         make_invite_redemption, signing_message_bytes, SignedWirePayload, SIGNED_WIRE_VERSION,
@@ -1756,6 +1791,32 @@ mod tests {
         (home, first, second)
     }
 
+    fn setup_soma_room() -> (PathBuf, store::RoomEntry) {
+        let home = std::env::temp_dir().join(format!(
+            "agora-soma-test-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&home).unwrap();
+        unsafe {
+            std::env::set_var("HOME", &home);
+            std::env::set_var("AGORA_AGENT_ID", "soma-test");
+        }
+
+        let room = store::add_room("ag-soma-test", "secret-soma", "soma", Role::Admin);
+        store::set_active_room("soma");
+        (home, room)
+    }
+
+    fn current_ts() -> u64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+    }
+
     #[test]
     fn resolve_room_reports_missing_explicit_target() {
         let _guard = store::test_env_lock().lock().unwrap();
@@ -1818,6 +1879,74 @@ mod tests {
         assert_eq!(unpinned, first);
         assert!(removed);
         assert!(pins(None).unwrap().is_empty());
+    }
+
+    #[test]
+    fn soma_correct_uses_canonical_belief_id() {
+        let _guard = store::test_env_lock().lock().unwrap();
+        let (_home, room) = setup_soma_room();
+        let belief_id = "abcd1234".to_string();
+        store::save_message(&room.room_id, &json!({
+            "id": belief_id,
+            "from": "soma-test",
+            "ts": current_ts(),
+            "type": "soma_belief",
+            "subject": "src/chat.rs:soma_correct",
+            "predicate": "returns success for unknown belief ids",
+            "confidence": 0.7,
+            "v": "3.0",
+            "text": "[soma] src/chat.rs:soma_correct: returns success for unknown belief ids",
+        }));
+
+        let correction_id =
+            soma_correct("abcd", "rejects unknown belief ids", Some("regression fix"), None)
+                .unwrap();
+        let msgs = store::load_messages(&room.room_id, u64::MAX);
+        let correction = msgs
+            .iter()
+            .find(|m| m["id"].as_str() == Some(correction_id.as_str()))
+            .unwrap();
+
+        assert_eq!(correction["corrects"].as_str(), Some("abcd1234"));
+        assert_eq!(correction["reply_to"].as_str(), Some("abcd1234"));
+        assert_eq!(
+            correction["subject"].as_str(),
+            Some("src/chat.rs:soma_correct")
+        );
+    }
+
+    #[test]
+    fn soma_correct_rejects_missing_belief() {
+        let _guard = store::test_env_lock().lock().unwrap();
+        let (_home, _room) = setup_soma_room();
+
+        let err = soma_correct("deadbeef", "new predicate", Some("missing"), None).unwrap_err();
+        assert_eq!(err, "Belief 'deadbeef' not found in local cache.");
+    }
+
+    #[test]
+    fn soma_correct_rejects_ambiguous_belief_prefix() {
+        let _guard = store::test_env_lock().lock().unwrap();
+        let (_home, room) = setup_soma_room();
+        let base_ts = current_ts();
+        for (id, ts) in [("abcd1111", base_ts), ("abcd2222", base_ts + 1)] {
+            store::save_message(&room.room_id, &json!({
+                "id": id,
+                "from": "soma-test",
+                "ts": ts,
+                "type": "soma_belief",
+                "subject": "src/main.rs",
+                "predicate": "placeholder",
+                "confidence": 0.6,
+                "v": "3.0",
+                "text": "[soma] src/main.rs: placeholder",
+            }));
+        }
+
+        let err = soma_correct("abcd", "new predicate", Some("ambiguous"), None).unwrap_err();
+        assert!(err.starts_with("Belief ID 'abcd' is ambiguous:"));
+        assert!(err.contains("abcd1111"));
+        assert!(err.contains("abcd2222"));
     }
 
     #[test]
