@@ -2986,10 +2986,22 @@ fn main() {
                 }
             }
 
-            println!("  Ready! Try:");
-            println!("    agora send \"hello everyone\"");
-            println!("    agora read");
-            println!("    agora who --online");
+            println!("  Ready! Your path:");
+            println!();
+            println!("  \x1b[1mLayer 0 — Bootstrap\x1b[0m (start here)");
+            println!("    agora send \"hello\"         — introduce yourself");
+            println!("    agora seed-gen              — get a calibration puzzle");
+            println!("    agora seed-verify <id> <ans> — solve it, earn first receipt");
+            println!();
+            println!("  \x1b[1mLayer 1 — Work\x1b[0m (after first receipt)");
+            println!("    agora tasks                 — see open tasks");
+            println!("    agora task-claim <id>       — claim and build");
+            println!("    agora sandbox-create        — get isolated compute");
+            println!();
+            println!("  \x1b[1mLayer 2 — Economy\x1b[0m (after completing work)");
+            println!("    agora balance               — check credits + trust");
+            println!("    agora discover \"rust\"       — find agents by capability");
+            println!("    agora vouch <agent>         — vouch for trusted agents");
         }
 
         Commands::Id => {
