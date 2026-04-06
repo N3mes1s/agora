@@ -251,6 +251,30 @@ enum Commands {
     /// Show read receipts for your messages
     Status,
 
+    /// Add a task to the room queue
+    TaskAdd {
+        /// Task title
+        title: Vec<String>,
+    },
+
+    /// Claim an open task
+    TaskClaim {
+        /// Task ID or prefix
+        task_id: String,
+    },
+
+    /// Mark a task as done
+    TaskDone {
+        /// Task ID or prefix
+        task_id: String,
+        /// Completion notes (branch, PR, etc)
+        #[arg(long)]
+        notes: Option<String>,
+    },
+
+    /// List tasks in the room
+    Tasks,
+
     /// Set your agent profile
     Profile {
         /// Display name
@@ -1419,6 +1443,66 @@ fn main() {
                     eprintln!("  Error: {e}");
                     process::exit(1);
                 }
+            }
+        }
+
+        Commands::TaskAdd { title } => {
+            let t = title.join(" ");
+            if t.is_empty() { eprintln!("Usage: agora task-add <title>"); process::exit(1); }
+            match chat::task_add(&t, room) {
+                Ok(id) => println!("  Task [{id}] created: {t}"),
+                Err(e) => { eprintln!("  Error: {e}"); process::exit(1); }
+            }
+        }
+
+        Commands::TaskClaim { task_id } => {
+            match chat::task_claim(&task_id, room) {
+                Ok(id) => println!("  Claimed task [{id}]."),
+                Err(e) => { eprintln!("  Error: {e}"); process::exit(1); }
+            }
+        }
+
+        Commands::TaskDone { task_id, notes } => {
+            match chat::task_done(&task_id, notes.as_deref(), room) {
+                Ok(id) => println!("  Task [{id}] marked done."),
+                Err(e) => { eprintln!("  Error: {e}"); process::exit(1); }
+            }
+        }
+
+        Commands::Tasks => {
+            match chat::task_list(room) {
+                Ok(tasks) => {
+                    if tasks.is_empty() {
+                        println!("  (no tasks)");
+                        return;
+                    }
+                    let open: Vec<_> = tasks.iter().filter(|t| t.status == "open").collect();
+                    let claimed: Vec<_> = tasks.iter().filter(|t| t.status == "claimed").collect();
+                    let done: Vec<_> = tasks.iter().filter(|t| t.status == "done").collect();
+
+                    if !open.is_empty() {
+                        println!("  Open ({}):", open.len());
+                        for t in &open {
+                            println!("    [{}] {}", &t.id[..6.min(t.id.len())], t.title);
+                        }
+                    }
+                    if !claimed.is_empty() {
+                        println!("  In Progress ({}):", claimed.len());
+                        for t in &claimed {
+                            let by = t.claimed_by.as_deref().unwrap_or("?");
+                            let name = resolve_display_name(by);
+                            println!("    [{}] {} (by {name})", &t.id[..6.min(t.id.len())], t.title);
+                        }
+                    }
+                    if !done.is_empty() {
+                        println!("  Done ({}):", done.len());
+                        for t in &done {
+                            let note = t.notes.as_deref().unwrap_or("");
+                            println!("    [{}] {} {}", &t.id[..6.min(t.id.len())], t.title, if note.is_empty() { String::new() } else { format!("— {note}") });
+                        }
+                    }
+                }
+                Err(e) => { eprintln!("  Error: {e}"); process::exit(1); }
             }
         }
 

@@ -484,6 +484,36 @@ pub fn take_notify_flag(room_id: &str) -> bool {
     exists
 }
 
+// ── Task Queue ─────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Task {
+    pub id: String,
+    pub title: String,
+    pub status: String, // open, claimed, done
+    pub created_by: String,
+    pub claimed_by: Option<String>,
+    pub created_at: u64,
+    pub updated_at: u64,
+    pub notes: Option<String>,
+}
+
+pub fn load_tasks(room_id: &str) -> Vec<Task> {
+    let path = agora_dir().join("rooms").join(room_id).join("tasks.json");
+    if let Ok(data) = fs::read_to_string(&path) {
+        serde_json::from_str(&data).unwrap_or_default()
+    } else {
+        Vec::new()
+    }
+}
+
+pub fn save_tasks(room_id: &str, tasks: &[Task]) {
+    let dir = agora_dir().join("rooms").join(room_id);
+    ensure_dir(&dir);
+    let data = serde_json::to_string_pretty(tasks).unwrap();
+    let _ = fs::write(dir.join("tasks.json"), data);
+}
+
 // ── Aliases ────────────────────────────────────────────────────
 // Global agent aliases, stored at ~/.agora/aliases.json
 

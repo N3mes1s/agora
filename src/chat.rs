@@ -487,6 +487,84 @@ pub fn whois(agent_id: &str, room_label: Option<&str>) -> Result<Option<store::A
     Ok(store::get_profile(&room.room_id, agent_id))
 }
 
+/// Add a task to the room queue.
+pub fn task_add(title: &str, room_label: Option<&str>) -> Result<String, String> {
+    let room = resolve_room(room_label)?;
+    let id = msg_id();
+    let me = store::get_agent_id();
+    let task = store::Task {
+        id: id.clone(),
+        title: title.to_string(),
+        status: "open".to_string(),
+        created_by: me.clone(),
+        claimed_by: None,
+        created_at: now(),
+        updated_at: now(),
+        notes: None,
+    };
+    let mut tasks = store::load_tasks(&room.room_id);
+    tasks.push(task);
+    store::save_tasks(&room.room_id, &tasks);
+
+    let room_key = crypto::derive_room_key(&room.secret, &room.room_id);
+    let env = make_envelope(&format!("[task] New: {title} (id: {})", &id[..6]), None);
+    let encrypted = encrypt_envelope(&env, &room_key, &room.room_id);
+    transport::publish(&room.room_id, &encrypted);
+    store::save_message(&room.room_id, &env);
+    Ok(id)
+}
+
+/// Claim an open task.
+pub fn task_claim(task_id: &str, room_label: Option<&str>) -> Result<String, String> {
+    let room = resolve_room(room_label)?;
+    let me = store::get_agent_id();
+    let mut tasks = store::load_tasks(&room.room_id);
+    let task = tasks.iter_mut().find(|t| t.id.starts_with(task_id) && t.status == "open")
+        .ok_or_else(|| format!("No open task matching '{task_id}'"))?;
+    task.status = "claimed".to_string();
+    task.claimed_by = Some(me.clone());
+    task.updated_at = now();
+    let title = task.title.clone();
+    let tid = task.id.clone();
+    store::save_tasks(&room.room_id, &tasks);
+
+    let room_key = crypto::derive_room_key(&room.secret, &room.room_id);
+    let env = make_envelope(&format!("[task] Claimed by {me}: {title}"), None);
+    let encrypted = encrypt_envelope(&env, &room_key, &room.room_id);
+    transport::publish(&room.room_id, &encrypted);
+    store::save_message(&room.room_id, &env);
+    Ok(tid)
+}
+
+/// Mark a task as done.
+pub fn task_done(task_id: &str, notes: Option<&str>, room_label: Option<&str>) -> Result<String, String> {
+    let room = resolve_room(room_label)?;
+    let me = store::get_agent_id();
+    let mut tasks = store::load_tasks(&room.room_id);
+    let task = tasks.iter_mut().find(|t| t.id.starts_with(task_id))
+        .ok_or_else(|| format!("No task matching '{task_id}'"))?;
+    task.status = "done".to_string();
+    task.updated_at = now();
+    if let Some(n) = notes { task.notes = Some(n.to_string()); }
+    let title = task.title.clone();
+    let tid = task.id.clone();
+    store::save_tasks(&room.room_id, &tasks);
+
+    let note_str = notes.map(|n| format!(" — {n}")).unwrap_or_default();
+    let room_key = crypto::derive_room_key(&room.secret, &room.room_id);
+    let env = make_envelope(&format!("[task] Done by {me}: {title}{note_str}"), None);
+    let encrypted = encrypt_envelope(&env, &room_key, &room.room_id);
+    transport::publish(&room.room_id, &encrypted);
+    store::save_message(&room.room_id, &env);
+    Ok(tid)
+}
+
+/// List tasks in the room.
+pub fn task_list(room_label: Option<&str>) -> Result<Vec<store::Task>, String> {
+    let room = resolve_room(room_label)?;
+    Ok(store::load_tasks(&room.room_id))
+}
+
 /// Activity timeline — all events (messages, joins, files, reactions, profiles).
 pub fn timeline(since: &str, room_label: Option<&str>) -> Result<Vec<serde_json::Value>, String> {
     let room = resolve_room(room_label)?;
