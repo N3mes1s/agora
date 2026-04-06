@@ -372,6 +372,11 @@ pub fn check(since: &str, room_label: Option<&str>) -> Result<Vec<serde_json::Va
         transport::publish(&room.room_id, &encrypted);
     }
 
+    // Fire webhooks for new messages
+    if !new_msgs.is_empty() {
+        fire_webhooks(&room.room_id, &new_msgs);
+    }
+
     // Deliver any due scheduled messages
     let _ = deliver_scheduled(room_label);
 
@@ -480,6 +485,48 @@ pub fn set_profile(name: Option<&str>, role: Option<&str>, room_label: Option<&s
 pub fn whois(agent_id: &str, room_label: Option<&str>) -> Result<Option<store::AgentProfile>, String> {
     let room = resolve_room(room_label)?;
     Ok(store::get_profile(&room.room_id, agent_id))
+}
+
+/// Add a webhook URL to a room.
+pub fn add_webhook(url: &str, room_label: Option<&str>) -> Result<String, String> {
+    let room = resolve_room(room_label)?;
+    Ok(store::add_webhook(&room.room_id, url))
+}
+
+/// Remove a webhook.
+pub fn remove_webhook(webhook_id: &str, room_label: Option<&str>) -> Result<bool, String> {
+    let room = resolve_room(room_label)?;
+    Ok(store::remove_webhook(&room.room_id, webhook_id))
+}
+
+/// List webhooks for a room.
+pub fn list_webhooks(room_label: Option<&str>) -> Result<Vec<store::Webhook>, String> {
+    let room = resolve_room(room_label)?;
+    Ok(store::load_webhooks(&room.room_id))
+}
+
+/// Fire webhooks for new messages (called from check).
+fn fire_webhooks(room_id: &str, msgs: &[serde_json::Value]) {
+    let hooks = store::load_webhooks(room_id);
+    if hooks.is_empty() || msgs.is_empty() {
+        return;
+    }
+    let client = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+        .unwrap_or_else(|_| reqwest::blocking::Client::new());
+
+    for hook in &hooks {
+        let payload = json!({
+            "room_id": room_id,
+            "messages": msgs,
+            "count": msgs.len(),
+        });
+        let _ = client.post(&hook.url)
+            .header("Content-Type", "application/json")
+            .body(serde_json::to_string(&payload).unwrap())
+            .send();
+    }
 }
 
 /// Find messages where an agent was @mentioned.

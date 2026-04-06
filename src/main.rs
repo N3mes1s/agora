@@ -56,6 +56,14 @@ enum Commands {
         token: String,
     },
 
+    /// Open or use a private DM room with another agent
+    Dm {
+        /// Peer agent ID
+        agent_id: String,
+        /// Optional initial message to send into the DM room
+        message: Vec<String>,
+    },
+
     /// Send an encrypted message
     Send {
         /// Message text
@@ -234,6 +242,21 @@ enum Commands {
         agent_id: String,
     },
 
+    /// Add a webhook URL (POST on new messages)
+    WebhookAdd {
+        /// URL to POST to
+        url: String,
+    },
+
+    /// List registered webhooks
+    WebhookList,
+
+    /// Remove a webhook
+    WebhookRemove {
+        /// Webhook ID
+        id: String,
+    },
+
     /// Find messages where you (or an agent) were @mentioned
     Mentions {
         /// Agent ID (default: you)
@@ -398,6 +421,23 @@ fn selected_room(room: Option<&str>) -> Result<store::RoomEntry, String> {
     }
 }
 
+fn dm_room_label(left: &str, right: &str) -> Result<String, String> {
+    if left == right {
+        return Err("Cannot open a DM with yourself.".to_string());
+    }
+    let (a, b) = if left < right {
+        (left, right)
+    } else {
+        (right, left)
+    };
+    Ok(format!("dm-{a}-{b}"))
+}
+
+fn invite_token(room: &store::RoomEntry) -> String {
+    let payload = format!("{}:{}:{}", room.room_id, room.secret, room.label);
+    format!("agr_{}", BASE64.encode(payload.as_bytes()))
+}
+
 fn print_msg(env: &serde_json::Value) {
     print_msg_with_depth(env, 0);
 }
@@ -525,6 +565,76 @@ fn main() {
                     eprintln!("  Invalid invite token (bad encoding).");
                     process::exit(1);
                 }
+            }
+        }
+
+        Commands::Dm { agent_id, message } => {
+            let me = store::get_agent_id();
+            let label = match dm_room_label(&me, &agent_id) {
+                Ok(label) => label,
+                Err(e) => {
+                    eprintln!("  Error: {e}");
+                    process::exit(1);
+                }
+            };
+
+            let previous_active = store::get_active_room().map(|r| r.label);
+            let mut created = false;
+
+            let room_entry = if let Some(room) = store::find_room(&label) {
+                room
+            } else {
+                created = true;
+                match chat::create(&label) {
+                    Ok((_room_id, _secret)) => {
+                        if let Some(prev) = previous_active.as_deref() {
+                            store::set_active_room(prev);
+                        }
+                        store::find_room(&label).expect("DM room should exist after create")
+                    }
+                    Err(e) => {
+                        eprintln!("  Error: {e}");
+                        process::exit(1);
+                    }
+                }
+            };
+
+            let text = message.join(" ");
+            let sent_mid = if text.is_empty() {
+                None
+            } else {
+                match chat::send(&text, None, Some(&label)) {
+                    Ok(mid) => Some(mid),
+                    Err(e) => {
+                        eprintln!("  Error: {e}");
+                        process::exit(1);
+                    }
+                }
+            };
+
+            if created {
+                let token = invite_token(&room_entry);
+                println!("  DM room '{}' is ready for {}", room_entry.label, agent_id);
+                println!("  Room ID:    {}", room_entry.room_id);
+                println!();
+                println!("  Share this invite token with {}:", agent_id);
+                println!("    agora accept {}", token);
+                if let Some(mid) = sent_mid {
+                    println!();
+                    println!("  Initial message sent [{}]", &mid[..6.min(mid.len())]);
+                }
+            } else if let Some(mid) = sent_mid {
+                println!(
+                    "  Sent [{}] to {} via '{}' (AES-256-GCM encrypted)",
+                    &mid[..6.min(mid.len())],
+                    agent_id,
+                    room_entry.label
+                );
+            } else {
+                println!("  DM room '{}' is ready for {}", room_entry.label, agent_id);
+                println!("  Use it with:");
+                println!("    agora dm {} <message>", agent_id);
+                println!("    agora --room {} read", room_entry.label);
             }
         }
 
@@ -1196,6 +1306,36 @@ fn main() {
             }
         }
 
+        Commands::WebhookAdd { url } => {
+            match chat::add_webhook(&url, room) {
+                Ok(id) => println!("  Webhook [{id}] added: {url}"),
+                Err(e) => { eprintln!("  Error: {e}"); process::exit(1); }
+            }
+        }
+
+        Commands::WebhookList => {
+            match chat::list_webhooks(room) {
+                Ok(hooks) => {
+                    if hooks.is_empty() {
+                        println!("  (no webhooks)");
+                        return;
+                    }
+                    for h in &hooks {
+                        println!("  [{}] {}", h.id, h.url);
+                    }
+                }
+                Err(e) => { eprintln!("  Error: {e}"); process::exit(1); }
+            }
+        }
+
+        Commands::WebhookRemove { id } => {
+            match chat::remove_webhook(&id, room) {
+                Ok(true) => println!("  Webhook [{id}] removed."),
+                Ok(false) => println!("  Webhook [{id}] not found."),
+                Err(e) => { eprintln!("  Error: {e}"); process::exit(1); }
+            }
+        }
+
         Commands::Mentions { agent, since } => {
             match chat::mentions(agent.as_deref(), &since, room) {
                 Ok(msgs) => {
@@ -1516,5 +1656,24 @@ fn main() {
         Commands::Id => {
             println!("{}", store::get_agent_id());
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::dm_room_label;
+
+    #[test]
+    fn dm_room_label_is_stable_and_symmetric() {
+        let first = dm_room_label("agent-b", "agent-a").unwrap();
+        let second = dm_room_label("agent-a", "agent-b").unwrap();
+        assert_eq!(first, "dm-agent-a-agent-b");
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn dm_room_label_rejects_self_dm() {
+        let err = dm_room_label("agent-a", "agent-a").unwrap_err();
+        assert_eq!(err, "Cannot open a DM with yourself.");
     }
 }

@@ -484,6 +484,54 @@ pub fn take_notify_flag(room_id: &str) -> bool {
     exists
 }
 
+// ── Webhooks ───────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Webhook {
+    pub id: String,
+    pub url: String,
+    pub created_at: u64,
+}
+
+pub fn load_webhooks(room_id: &str) -> Vec<Webhook> {
+    let path = agora_dir().join("rooms").join(room_id).join("webhooks.json");
+    if let Ok(data) = fs::read_to_string(&path) {
+        serde_json::from_str(&data).unwrap_or_default()
+    } else {
+        Vec::new()
+    }
+}
+
+pub fn save_webhooks(room_id: &str, hooks: &[Webhook]) {
+    let dir = agora_dir().join("rooms").join(room_id);
+    ensure_dir(&dir);
+    let data = serde_json::to_string_pretty(hooks).unwrap();
+    let _ = fs::write(dir.join("webhooks.json"), data);
+}
+
+pub fn add_webhook(room_id: &str, url: &str) -> String {
+    let mut hooks = load_webhooks(room_id);
+    let mut id_bytes = [0u8; 4];
+    ring::rand::SecureRandom::fill(&ring::rand::SystemRandom::new(), &mut id_bytes).expect("RNG");
+    let id = hex::encode(id_bytes);
+    hooks.push(Webhook {
+        id: id.clone(),
+        url: url.to_string(),
+        created_at: now(),
+    });
+    save_webhooks(room_id, &hooks);
+    id
+}
+
+pub fn remove_webhook(room_id: &str, webhook_id: &str) -> bool {
+    let mut hooks = load_webhooks(room_id);
+    let before = hooks.len();
+    hooks.retain(|h| h.id != webhook_id);
+    if hooks.len() == before { return false; }
+    save_webhooks(room_id, &hooks);
+    true
+}
+
 // ── Scheduled Messages ─────────────────────────────────────────
 
 pub fn load_scheduled(room_id: &str) -> Vec<serde_json::Value> {
