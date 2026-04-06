@@ -32,6 +32,9 @@ const SOMA_VOLATILITY_COMMIT_CAP: f64 = 32.0;
 const PLAZA_RATE_LIMIT_LABEL: &str = "plaza";
 const PLAZA_RATE_LIMIT_MAX_MSGS: usize = 10;
 const PLAZA_RATE_LIMIT_WINDOW_SECS: u64 = 60;
+const DISCOVERY_POSITIVE_HALF_LIFE_SECS: f64 = 604800.0;
+const DISCOVERY_NEGATIVE_HALF_LIFE_SECS: f64 = 1814400.0;
+const DISCOVERY_STALE_CLAIM_GRACE_SECS: u64 = 3 * 24 * 60 * 60;
 const BASE64: base64::engine::general_purpose::GeneralPurpose =
     base64::engine::general_purpose::STANDARD;
 
@@ -1003,11 +1006,25 @@ pub struct DiscoveryResult {
     pub trust_score: f64,
     pub receipt_count: usize,
     pub rooms_active: usize,
+    pub stale_claims: usize,
+    pub abandonment_rate: f64,
+    pub volatility_score: f64,
 }
 
 /// Discover agents by capability with trust-weighted ranking.
-/// Trust = receipt_count * freshness_decay * room_presence
+/// Trust = weighted receipts * room presence * vouches, penalized by stale claims and volatility.
 pub fn discover(need: &str, room_label: Option<&str>) -> Result<Vec<DiscoveryResult>, String> {
+    #[derive(Clone)]
+    struct DiscoveryAccumulator {
+        card: store::CapabilityCard,
+        receipt_count: usize,
+        rooms_active: usize,
+        weighted_receipts: f64,
+        stale_claims: usize,
+        stale_claim_weight: f64,
+        volatility_sum: f64,
+    }
+
     let need_lower = need.to_lowercase();
     let needs: Vec<&str> = need_lower.split(',').map(|s| s.trim()).collect();
     let rooms = if let Some(label) = room_label {
@@ -1016,35 +1033,115 @@ pub fn discover(need: &str, room_label: Option<&str>) -> Result<Vec<DiscoveryRes
         store::load_registry()
     };
     let now_ts = now();
-    let mut agent_map: HashMap<String, DiscoveryResult> = HashMap::new();
+    let mut agent_map: HashMap<String, DiscoveryAccumulator> = HashMap::new();
 
     for room in &rooms {
         let receipts = store::load_work_receipts(&room.room_id);
+        let tasks = task_list(Some(&room.room_id))?;
         for card in store::load_peer_cards(&room.room_id) {
             let matches = needs.iter().all(|n| card.capabilities.iter().any(|c| c.to_lowercase().contains(n)));
             if !matches { continue; }
 
             let agent_receipts: Vec<_> = receipts.iter().filter(|r| r.agent_id == card.agent_id).collect();
             let receipt_count = agent_receipts.len();
+            let weighted_receipts = agent_receipts
+                .iter()
+                .map(|receipt| discovery_decay_weight(
+                    now_ts.saturating_sub(receipt.created_at),
+                    DISCOVERY_POSITIVE_HALF_LIFE_SECS,
+                ))
+                .sum::<f64>();
+            let freshest_receipt = agent_receipts
+                .iter()
+                .map(|receipt| receipt.created_at)
+                .max();
+            let stale_claims: Vec<_> = tasks
+                .iter()
+                .filter(|task| task.status != "done" && task.claimed_by.as_deref() == Some(card.agent_id.as_str()))
+                .filter_map(|task| {
+                    let age = now_ts.saturating_sub(task.updated_at);
+                    let weight = stale_claim_weight(age);
+                    (weight > 0.0).then_some(weight)
+                })
+                .collect();
+            let stale_claim_count = stale_claims.len();
+            let stale_claim_weight = stale_claims.into_iter().sum::<f64>();
 
-            // Freshness: decay score based on last activity (halves every 7 days)
-            let age_secs = now_ts.saturating_sub(card.updated_at) as f64;
-            let freshness = 0.5_f64.powf(age_secs / 604800.0); // 7-day half-life
+            let card_freshness = discovery_decay_weight(
+                now_ts.saturating_sub(card.updated_at),
+                DISCOVERY_POSITIVE_HALF_LIFE_SECS,
+            );
+            let execution_freshness = freshest_receipt
+                .map(|ts| discovery_decay_weight(now_ts.saturating_sub(ts), DISCOVERY_POSITIVE_HALF_LIFE_SECS))
+                .unwrap_or(0.0);
+            let volatility = (card_freshness - execution_freshness).max(0.0);
 
-            let entry = agent_map.entry(card.agent_id.clone()).or_insert_with(|| {
-                DiscoveryResult { card: card.clone(), trust_score: 0.0, receipt_count: 0, rooms_active: 0 }
+            let entry = agent_map.entry(card.agent_id.clone()).or_insert_with(|| DiscoveryAccumulator {
+                card: card.clone(),
+                receipt_count: 0,
+                rooms_active: 0,
+                weighted_receipts: 0.0,
+                stale_claims: 0,
+                stale_claim_weight: 0.0,
+                volatility_sum: 0.0,
             });
+            if card.updated_at > entry.card.updated_at {
+                entry.card = card.clone();
+            }
             entry.receipt_count += receipt_count;
             entry.rooms_active += 1;
-            // Trust = receipts * freshness * room presence * vouches
-            let vouches = vouch_count(&card.agent_id) as f64;
-            entry.trust_score = (1.0 + entry.receipt_count as f64) * freshness * (1.0 + entry.rooms_active as f64 * 0.2) * (1.0 + vouches * 0.3);
+            entry.weighted_receipts += weighted_receipts;
+            entry.stale_claims += stale_claim_count;
+            entry.stale_claim_weight += stale_claim_weight;
+            entry.volatility_sum += volatility;
         }
     }
 
-    let mut results: Vec<DiscoveryResult> = agent_map.into_values().collect();
+    let mut results: Vec<DiscoveryResult> = agent_map
+        .into_iter()
+        .map(|(agent_id, entry)| {
+            let vouches = vouch_count(&agent_id) as f64;
+            let abandonment_rate = if entry.weighted_receipts + entry.stale_claim_weight > 0.0 {
+                entry.stale_claim_weight / (entry.weighted_receipts + entry.stale_claim_weight)
+            } else {
+                0.0
+            };
+            let volatility_score = if entry.rooms_active > 0 {
+                (entry.volatility_sum / entry.rooms_active as f64).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+            let room_presence = 1.0 + entry.rooms_active as f64 * 0.2;
+            let positive_score = (1.0 + entry.weighted_receipts) * room_presence * (1.0 + vouches * 0.3);
+            let abandonment_penalty = (1.0 - abandonment_rate * 0.7).clamp(0.2, 1.0);
+            let volatility_penalty = (1.0 - volatility_score * 0.4).clamp(0.4, 1.0);
+            DiscoveryResult {
+                card: entry.card,
+                trust_score: positive_score * abandonment_penalty * volatility_penalty,
+                receipt_count: entry.receipt_count,
+                rooms_active: entry.rooms_active,
+                stale_claims: entry.stale_claims,
+                abandonment_rate,
+                volatility_score,
+            }
+        })
+        .collect();
     results.sort_by(|a, b| b.trust_score.partial_cmp(&a.trust_score).unwrap_or(std::cmp::Ordering::Equal));
     Ok(results)
+}
+
+fn discovery_decay_weight(age_secs: u64, half_life_secs: f64) -> f64 {
+    0.5_f64.powf(age_secs as f64 / half_life_secs)
+}
+
+fn stale_claim_weight(age_secs: u64) -> f64 {
+    if age_secs <= DISCOVERY_STALE_CLAIM_GRACE_SECS {
+        return 0.0;
+    }
+    discovery_decay_weight(
+        age_secs - DISCOVERY_STALE_CLAIM_GRACE_SECS,
+        DISCOVERY_NEGATIVE_HALF_LIFE_SECS,
+    )
 }
 
 pub fn process_card_message(room_id: &str, msg: &serde_json::Value) {
@@ -2482,12 +2579,14 @@ mod tests {
     use base64::Engine;
     use super::{
         allow_incoming_message, annotate_soma_message, count_invite_redemptions_in_envs,
-        decrypt_payload, enforce_outbound_plaza_rate_limit, encrypt_envelope,
+        decrypt_payload, discover, discovery_decay_weight, enforce_outbound_plaza_rate_limit,
+        encrypt_envelope,
         infer_soma_subject_path, ingest_auxiliary_event, list_work_receipts, make_envelope,
         make_invite_redemption, pin, pins, resolve_room, seed_plaza_rate_limit_state,
         send_watch_heartbeat, should_display_message, signing_message_bytes, soma_churn_decay,
-        soma_correct, task_add, task_done, unpin, SignedWirePayload, SIGNED_WIRE_VERSION,
-        BASE64, PLAZA_RATE_LIMIT_WINDOW_SECS,
+        soma_correct, stale_claim_weight, task_add, task_done, unpin, SignedWirePayload,
+        SIGNED_WIRE_VERSION, BASE64, DISCOVERY_POSITIVE_HALF_LIFE_SECS,
+        PLAZA_RATE_LIMIT_WINDOW_SECS,
     };
     use crate::crypto;
     use crate::store::{self, Role};
@@ -2756,6 +2855,89 @@ mod tests {
         assert_eq!(receipts[0].receipt.task_id, "task01");
         assert_eq!(receipts[0].receipt.witness_ids.len(), 2);
         assert_eq!(receipts[0].receipt.auth, "verified");
+    }
+
+    #[test]
+    fn stale_claims_decay_slower_than_positive_receipts() {
+        let age = 8 * 24 * 60 * 60;
+        let positive = discovery_decay_weight(age, DISCOVERY_POSITIVE_HALF_LIFE_SECS);
+        let negative = stale_claim_weight(age);
+
+        assert!(negative > positive);
+    }
+
+    #[test]
+    fn discover_penalizes_stale_claims_and_capability_volatility() {
+        let _guard = store::test_env_lock().lock().unwrap();
+        let (_home, room) = setup_plaza_room("discover-admin", Role::Admin);
+        let now_ts = current_ts();
+
+        store::save_peer_card(
+            &room.room_id,
+            &store::CapabilityCard {
+                agent_id: "steady".to_string(),
+                capabilities: vec!["rust".to_string(), "agent-systems".to_string()],
+                available: true,
+                description: Some("recently shipped work".to_string()),
+                updated_at: now_ts - 2 * 24 * 60 * 60,
+            },
+        );
+        store::save_peer_card(
+            &room.room_id,
+            &store::CapabilityCard {
+                agent_id: "flaky".to_string(),
+                capabilities: vec!["rust".to_string(), "agent-systems".to_string()],
+                available: true,
+                description: Some("fresh card, stale execution".to_string()),
+                updated_at: now_ts - 300,
+            },
+        );
+        store::upsert_work_receipt(
+            &room.room_id,
+            &store::WorkReceipt {
+                id: "receipt-steady".to_string(),
+                task_id: "task-steady".to_string(),
+                task_title: "Ship feature".to_string(),
+                agent_id: "steady".to_string(),
+                notes: Some("merged".to_string()),
+                task_hash: "abcd1234".to_string(),
+                witness_ids: vec!["discover-admin".to_string()],
+                created_at: now_ts - 60 * 60,
+                auth: "verified".to_string(),
+            },
+        );
+        store::save_tasks(
+            &room.room_id,
+            &[store::Task {
+                id: "task-flaky".to_string(),
+                title: "Unfinished migration".to_string(),
+                status: "claimed".to_string(),
+                created_by: "discover-admin".to_string(),
+                claimed_by: Some("flaky".to_string()),
+                created_at: now_ts - 10 * 24 * 60 * 60,
+                updated_at: now_ts - 10 * 24 * 60 * 60,
+                notes: Some("went dark".to_string()),
+            }],
+        );
+
+        let results = discover("rust", Some("plaza")).unwrap();
+        assert_eq!(results.len(), 2);
+
+        let steady = results
+            .iter()
+            .find(|result| result.card.agent_id == "steady")
+            .expect("steady result");
+        let flaky = results
+            .iter()
+            .find(|result| result.card.agent_id == "flaky")
+            .expect("flaky result");
+
+        assert_eq!(results[0].card.agent_id, "steady");
+        assert_eq!(flaky.stale_claims, 1);
+        assert!(steady.trust_score > flaky.trust_score);
+        assert!(steady.abandonment_rate < flaky.abandonment_rate);
+        assert!(flaky.abandonment_rate > 0.5);
+        assert!(flaky.volatility_score > 0.9);
     }
 
     #[test]
