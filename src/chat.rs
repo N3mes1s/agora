@@ -18,6 +18,8 @@ use base64::Engine;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::{HashMap, HashSet};
+use std::path::Path;
+use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use ring::rand::SecureRandom;
@@ -26,6 +28,7 @@ use crate::{crypto, store, transport};
 
 const VERSION: &str = "3.0";
 const SIGNED_WIRE_VERSION: &str = "3.1";
+const SOMA_VOLATILITY_COMMIT_CAP: f64 = 32.0;
 const BASE64: base64::engine::general_purpose::GeneralPurpose =
     base64::engine::general_purpose::STANDARD;
 
@@ -36,6 +39,15 @@ struct SignedWirePayload {
     payload: String,
     signing_pubkey: String,
     sig: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct SomaVolatility {
+    path: Option<String>,
+    git_ref: Option<String>,
+    churn_commits: Option<u64>,
+    churn_decay: Option<f64>,
+    effective_confidence: Option<f64>,
 }
 
 fn now() -> u64 {
@@ -661,15 +673,146 @@ pub fn whois(agent_id: &str, room_label: Option<&str>) -> Result<Option<store::A
 
 // ── SOMA — Shared Observable Memory for Agents ─────────────────
 
+fn infer_soma_subject_path(subject: &str) -> Option<String> {
+    let candidate = subject.split(':').next()?.trim();
+    if candidate.is_empty() || !Path::new(candidate).exists() {
+        return None;
+    }
+    Some(candidate.to_string())
+}
+
+fn current_git_head() -> Option<String> {
+    let output = Command::new("git").args(["rev-parse", "HEAD"]).output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let head = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if head.is_empty() {
+        None
+    } else {
+        Some(head)
+    }
+}
+
+fn git_churn_commits_since(git_ref: &str, path: &str) -> Option<u64> {
+    let range = format!("{git_ref}..HEAD");
+    let output = Command::new("git")
+        .args(["log", "--follow", "--format=%H", &range, "--", path])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    Some(
+        String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .count() as u64,
+    )
+}
+
+fn soma_churn_decay(churn_commits: u64) -> f64 {
+    if churn_commits == 0 {
+        return 0.0;
+    }
+    let capped = (churn_commits as f64).min(SOMA_VOLATILITY_COMMIT_CAP);
+    (capped + 1.0).log2() / (SOMA_VOLATILITY_COMMIT_CAP + 1.0).log2()
+}
+
+fn soma_effective_confidence(confidence: f64, churn_decay: f64) -> f64 {
+    (confidence * (1.0 - churn_decay)).clamp(0.0, 1.0)
+}
+
+fn compute_soma_volatility(
+    subject: &str,
+    confidence: Option<f64>,
+    git_ref: Option<&str>,
+    stored_path: Option<&str>,
+) -> SomaVolatility {
+    let path = stored_path
+        .map(str::to_string)
+        .or_else(|| infer_soma_subject_path(subject));
+    let git_ref = git_ref.map(str::to_string);
+
+    let (Some(path), Some(git_ref)) = (path.clone(), git_ref.clone()) else {
+        return SomaVolatility {
+            path,
+            git_ref,
+            churn_commits: None,
+            churn_decay: None,
+            effective_confidence: None,
+        };
+    };
+
+    let Some(churn_commits) = git_churn_commits_since(&git_ref, &path) else {
+        return SomaVolatility {
+            path: Some(path),
+            git_ref: Some(git_ref),
+            churn_commits: None,
+            churn_decay: None,
+            effective_confidence: None,
+        };
+    };
+
+    let churn_decay = soma_churn_decay(churn_commits);
+    let effective_confidence = confidence.map(|conf| soma_effective_confidence(conf, churn_decay));
+
+    SomaVolatility {
+        path: Some(path),
+        git_ref: Some(git_ref),
+        churn_commits: Some(churn_commits),
+        churn_decay: Some(churn_decay),
+        effective_confidence,
+    }
+}
+
+fn annotate_soma_message(msg: &mut serde_json::Value) {
+    let volatility = compute_soma_volatility(
+        msg["subject"].as_str().unwrap_or(""),
+        msg["confidence"].as_f64(),
+        msg["git_ref"].as_str(),
+        msg["volatility_path"].as_str(),
+    );
+
+    if let Some(path) = volatility.path {
+        msg["volatility_path"] = json!(path);
+    }
+    if let Some(git_ref) = volatility.git_ref {
+        msg["git_ref"] = json!(git_ref);
+    }
+    if let Some(churn_commits) = volatility.churn_commits {
+        msg["churn_commits"] = json!(churn_commits);
+    }
+    if let Some(churn_decay) = volatility.churn_decay {
+        msg["churn_decay"] = json!(churn_decay);
+    }
+    if let Some(effective_confidence) = volatility.effective_confidence {
+        msg["effective_confidence"] = json!(effective_confidence);
+    }
+}
+
 pub fn soma_assert(subject: &str, predicate: &str, confidence: Option<f64>, git_ref: Option<&str>, room_label: Option<&str>) -> Result<String, String> {
     let room = resolve_room(room_label)?;
     let room_key = crypto::derive_room_key(&room.secret, &room.room_id);
     let id = msg_id();
     let conf = confidence.unwrap_or(0.8);
+    let resolved_git_ref = git_ref.map(str::to_string).or_else(current_git_head);
+    let volatility_path = infer_soma_subject_path(subject);
+    let volatility = compute_soma_volatility(
+        subject,
+        Some(conf),
+        resolved_git_ref.as_deref(),
+        volatility_path.as_deref(),
+    );
     let env = json!({
         "v": VERSION, "id": id, "from": store::get_agent_id(), "ts": now(),
         "type": "soma_belief", "subject": subject, "predicate": predicate,
-        "confidence": conf, "git_ref": git_ref,
+        "confidence": conf,
+        "git_ref": resolved_git_ref,
+        "volatility_path": volatility.path,
+        "churn_commits": volatility.churn_commits,
+        "churn_decay": volatility.churn_decay,
+        "effective_confidence": volatility.effective_confidence,
         "text": format!("[soma] {subject}: {predicate} (confidence: {:.0}%)", conf * 100.0),
     });
     let encrypted = encrypt_envelope(&env, &room_key, &room.room_id);
@@ -682,10 +825,14 @@ pub fn soma_query(subject: &str, room_label: Option<&str>) -> Result<Vec<serde_j
     let room = resolve_room(room_label)?;
     let msgs = store::load_messages(&room.room_id, 604800);
     let q = subject.to_lowercase();
-    Ok(msgs.into_iter().filter(|m| {
+    let mut beliefs: Vec<serde_json::Value> = msgs.into_iter().filter(|m| {
         (m["type"].as_str() == Some("soma_belief") || m["type"].as_str() == Some("soma_correction")) &&
         m["subject"].as_str().unwrap_or("").to_lowercase().contains(&q)
-    }).collect())
+    }).collect();
+    for belief in &mut beliefs {
+        annotate_soma_message(belief);
+    }
+    Ok(beliefs)
 }
 
 fn resolve_soma_belief<'a>(
@@ -730,11 +877,27 @@ pub fn soma_correct(belief_id: &str, new_predicate: &str, reason: Option<&str>, 
         .as_str()
         .ok_or_else(|| format!("Belief '{resolved_belief_id}' is missing a subject."))?
         .to_string();
+    let git_ref = belief["git_ref"].as_str().map(str::to_string);
+    let volatility_path = belief["volatility_path"]
+        .as_str()
+        .map(str::to_string)
+        .or_else(|| infer_soma_subject_path(&subject));
+    let volatility = compute_soma_volatility(
+        &subject,
+        belief["confidence"].as_f64(),
+        git_ref.as_deref(),
+        volatility_path.as_deref(),
+    );
     let id = msg_id();
     let reason_str = reason.unwrap_or("no reason given");
     let env = json!({
         "v": VERSION, "id": id, "from": store::get_agent_id(), "ts": now(),
         "type": "soma_correction", "corrects": resolved_belief_id, "subject": subject,
+        "git_ref": git_ref,
+        "volatility_path": volatility.path,
+        "churn_commits": volatility.churn_commits,
+        "churn_decay": volatility.churn_decay,
+        "effective_confidence": volatility.effective_confidence,
         "predicate": new_predicate, "reason": reason_str, "reply_to": resolved_belief_id,
         "text": format!("[soma correction] {subject}: {new_predicate} (reason: {reason_str})"),
     });
@@ -1728,11 +1891,11 @@ pub fn download_file(file_id: &str, out_path: Option<&str>, room_label: Option<&
 #[cfg(test)]
 mod tests {
     use base64::Engine;
-    use super::{pin, pins, resolve_room, send_watch_heartbeat, soma_correct, unpin};
     use super::{
-        count_invite_redemptions_in_envs, decrypt_payload, encrypt_envelope, make_envelope,
-        make_invite_redemption, signing_message_bytes, SignedWirePayload, SIGNED_WIRE_VERSION,
-        BASE64,
+        annotate_soma_message, count_invite_redemptions_in_envs, decrypt_payload,
+        encrypt_envelope, infer_soma_subject_path, make_envelope, make_invite_redemption, pin,
+        pins, resolve_room, send_watch_heartbeat, signing_message_bytes, soma_churn_decay,
+        soma_correct, unpin, SignedWirePayload, SIGNED_WIRE_VERSION, BASE64,
     };
     use crate::crypto;
     use crate::store::{self, Role};
@@ -1819,6 +1982,14 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_secs()
+    }
+
+    fn run_git(cwd: &std::path::Path, args: &[&str]) -> std::process::Output {
+        std::process::Command::new("git")
+            .args(args)
+            .current_dir(cwd)
+            .output()
+            .unwrap()
     }
 
     #[test]
@@ -1951,6 +2122,75 @@ mod tests {
         assert!(err.starts_with("Belief ID 'abcd' is ambiguous:"));
         assert!(err.contains("abcd1111"));
         assert!(err.contains("abcd2222"));
+    }
+
+    #[test]
+    fn infer_soma_subject_path_uses_existing_file_prefix() {
+        assert_eq!(
+            infer_soma_subject_path("src/chat.rs:soma_assert"),
+            Some("src/chat.rs".to_string())
+        );
+        assert_eq!(infer_soma_subject_path("not-a-real-file:thing"), None);
+    }
+
+    #[test]
+    fn soma_churn_decay_scales_and_caps() {
+        assert_eq!(soma_churn_decay(0), 0.0);
+        assert!(soma_churn_decay(1) > 0.0);
+        assert!(soma_churn_decay(8) > soma_churn_decay(2));
+        assert!(soma_churn_decay(100) <= 1.0);
+    }
+
+    #[test]
+    fn annotate_soma_message_adds_git_churn_metadata() {
+        let _guard = store::test_env_lock().lock().unwrap();
+        let repo = std::env::temp_dir().join(format!(
+            "agora-soma-git-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&repo).unwrap();
+
+        assert!(run_git(&repo, &["init"]).status.success());
+        assert!(run_git(&repo, &["config", "user.email", "soma@test.local"]).status.success());
+        assert!(run_git(&repo, &["config", "user.name", "Soma Test"]).status.success());
+        assert!(run_git(&repo, &["config", "commit.gpgsign", "false"]).status.success());
+
+        let tracked = repo.join("tracked.txt");
+        std::fs::write(&tracked, "v1\n").unwrap();
+        assert!(run_git(&repo, &["add", "tracked.txt"]).status.success());
+        assert!(run_git(&repo, &["commit", "-m", "initial"]).status.success());
+
+        let base_ref = String::from_utf8_lossy(&run_git(&repo, &["rev-parse", "HEAD"]).stdout)
+            .trim()
+            .to_string();
+
+        std::fs::write(&tracked, "v2\n").unwrap();
+        assert!(run_git(&repo, &["commit", "-am", "second"]).status.success());
+        std::fs::write(&tracked, "v3\n").unwrap();
+        assert!(run_git(&repo, &["commit", "-am", "third"]).status.success());
+
+        let original_cwd = std::env::current_dir().unwrap();
+        std::env::set_current_dir(&repo).unwrap();
+
+        let mut msg = json!({
+            "id": "belief01",
+            "subject": "tracked.txt:line-1",
+            "predicate": "stays stable",
+            "confidence": 0.8,
+            "git_ref": base_ref,
+            "type": "soma_belief",
+        });
+        annotate_soma_message(&mut msg);
+
+        std::env::set_current_dir(original_cwd).unwrap();
+
+        assert_eq!(msg["volatility_path"].as_str(), Some("tracked.txt"));
+        assert_eq!(msg["churn_commits"].as_u64(), Some(2));
+        assert!(msg["churn_decay"].as_f64().unwrap() > 0.0);
+        assert!(msg["effective_confidence"].as_f64().unwrap() < 0.8);
     }
 
     #[test]
