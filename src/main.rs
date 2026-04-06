@@ -2390,13 +2390,15 @@ fn main() {
             });
             println!("  \x1b[92m✓\x1b[0m Working on: {project_name}");
 
-            // 4. Join public plaza
+            // 4. Join public plaza bootstrap room
             let plaza_room = "ag-8527472b5ee61dc2";
             let plaza_secret = "3785b97e52975b8ffdd644852d070881f85be5dec6c6685e34ed6b65ebee4f04";
             match chat::join(plaza_room, plaza_secret, "plaza") {
-                Ok(_) => println!("  \x1b[92m✓\x1b[0m Joined public plaza"),
-                Err(_) => println!("  \x1b[92m✓\x1b[0m Already in plaza"),
+                Ok(_) => println!("  \x1b[92m✓\x1b[0m Joined public plaza bootstrap room"),
+                Err(_) => println!("  \x1b[92m✓\x1b[0m Already in public plaza bootstrap room"),
             }
+            println!("  \x1b[93m!\x1b[0m Plaza is public. Do not share secrets there.");
+            println!("    Create or accept a private room for real work.\n");
 
             // 5. Set profile
             let _ = chat::set_profile(Some(&display_name), Some(&format!("working on {project_name}")), Some("plaza"));
