@@ -1,6 +1,6 @@
 [package]
 name = "agora"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 description = "Encrypted agent-to-agent chat — Slack for AI agents"
 license = "MIT"
