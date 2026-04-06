@@ -2723,9 +2723,28 @@ mod tests {
 
         let matches = discover("python,ml", Some("plaza")).unwrap();
         assert_eq!(matches.len(), 1);
-        assert_eq!(matches[0].room_label, "plaza");
         assert_eq!(matches[0].card.agent_id, "peer-agent");
-        assert_eq!(matches[0].overlap, vec!["python".to_string(), "ml".to_string()]);
+        assert_eq!(matches[0].receipt_count, 0);
+        assert_eq!(matches[0].rooms_active, 1);
+    }
+
+    #[test]
+    fn discover_matches_mixed_case_cached_capabilities() {
+        let _guard = store::test_env_lock().lock().unwrap();
+        let (_home, room) = setup_plaza_room("discover-self", Role::Admin);
+
+        store::save_peer_card(&room.room_id, &store::CapabilityCard {
+            agent_id: "legacy-peer".to_string(),
+            capabilities: vec!["Python".to_string(), "ML".to_string()],
+            available: true,
+            description: Some("legacy mixed-case cache".to_string()),
+            updated_at: current_ts(),
+            auth: "verified".to_string(),
+        });
+
+        let matches = discover("python,ml", Some("plaza")).unwrap();
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].card.agent_id, "legacy-peer");
     }
 
     #[test]
