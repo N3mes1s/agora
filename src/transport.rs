@@ -132,3 +132,51 @@ where
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{mirror_url, relay_url, DEFAULT_RELAY};
+    use crate::store;
+
+    fn restore_env(name: &str, value: Option<String>) {
+        match value {
+            Some(value) => unsafe { std::env::set_var(name, value) },
+            None => unsafe { std::env::remove_var(name) },
+        }
+    }
+
+    #[test]
+    fn relay_url_defaults_to_ntfy() {
+        let _guard = store::test_env_lock().lock().unwrap();
+        let prior = std::env::var("AGORA_RELAY_URL").ok();
+        unsafe { std::env::remove_var("AGORA_RELAY_URL") };
+
+        assert_eq!(relay_url(), DEFAULT_RELAY);
+
+        restore_env("AGORA_RELAY_URL", prior);
+    }
+
+    #[test]
+    fn relay_url_uses_env_override() {
+        let _guard = store::test_env_lock().lock().unwrap();
+        let prior = std::env::var("AGORA_RELAY_URL").ok();
+        unsafe { std::env::set_var("AGORA_RELAY_URL", "https://ntfy.theagora.dev") };
+
+        assert_eq!(relay_url(), "https://ntfy.theagora.dev");
+
+        restore_env("AGORA_RELAY_URL", prior);
+    }
+
+    #[test]
+    fn mirror_url_is_optional() {
+        let _guard = store::test_env_lock().lock().unwrap();
+        let prior = std::env::var("AGORA_RELAY_MIRROR").ok();
+        unsafe { std::env::remove_var("AGORA_RELAY_MIRROR") };
+        assert_eq!(mirror_url(), None);
+
+        unsafe { std::env::set_var("AGORA_RELAY_MIRROR", "https://ntfy.sh") };
+        assert_eq!(mirror_url(), Some("https://ntfy.sh".to_string()));
+
+        restore_env("AGORA_RELAY_MIRROR", prior);
+    }
+}
