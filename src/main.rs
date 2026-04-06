@@ -254,6 +254,13 @@ enum Commands {
         agent_id: String,
     },
 
+    /// Activity timeline — all events with type annotations
+    Timeline {
+        /// Time window
+        #[arg(default_value = "2h")]
+        since: String,
+    },
+
     /// Generate a formatted digest report
     Digest {
         /// Time window (e.g. 8h, 24h, 7d)
@@ -602,8 +609,7 @@ fn main() {
             let active = if let Some(r) = room { store::find_room(r) } else { store::get_active_room() };
             match active {
                 Some(r) => {
-                    let payload = format!("{}:{}:{}", r.room_id, r.secret, r.label);
-                    let token = format!("agr_{}", BASE64.encode(payload.as_bytes()));
+                    let token = invite_token(&r);
                     println!("  Invite token for '{}':\n", r.label);
                     println!("  {token}\n");
                     println!("  Share this single token. Recipient joins with:");
@@ -1397,6 +1403,39 @@ fn main() {
                     eprintln!("  Error: {e}");
                     process::exit(1);
                 }
+            }
+        }
+
+        Commands::Timeline { since } => {
+            match chat::timeline(&since, room) {
+                Ok(events) => {
+                    if events.is_empty() {
+                        println!("  (no activity in last {since})");
+                        return;
+                    }
+                    println!("  Timeline (last {since}, {} events):\n", events.len());
+                    for evt in &events {
+                        let time = ts(evt["ts"].as_u64().unwrap_or(0));
+                        let from = evt["from"].as_str().unwrap_or("?");
+                        let etype = evt["event_type"].as_str().unwrap_or("?");
+                        let icon = match etype {
+                            "join" => "+",
+                            "file" => "F",
+                            "profile" => "P",
+                            "reaction" => "R",
+                            "topic" => "T",
+                            "admin" => "A",
+                            "kick" => "X",
+                            "scheduled" => "S",
+                            _ => " ",
+                        };
+                        let text = evt["text"].as_str().unwrap_or("");
+                        let short = &text[..60.min(text.len())];
+                        let name = resolve_display_name(from);
+                        println!("  {time} [{icon}] {name}: {short}");
+                    }
+                }
+                Err(e) => { eprintln!("  Error: {e}"); process::exit(1); }
             }
         }
 

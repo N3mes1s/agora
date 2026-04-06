@@ -487,6 +487,40 @@ pub fn whois(agent_id: &str, room_label: Option<&str>) -> Result<Option<store::A
     Ok(store::get_profile(&room.room_id, agent_id))
 }
 
+/// Activity timeline — all events (messages, joins, files, reactions, profiles).
+pub fn timeline(since: &str, room_label: Option<&str>) -> Result<Vec<serde_json::Value>, String> {
+    let room = resolve_room(room_label)?;
+    let since_secs = parse_since(since);
+    let mut events = store::load_messages(&room.room_id, since_secs);
+
+    // Annotate event types
+    for evt in &mut events {
+        let etype = if evt["type"].as_str() == Some("file") {
+            "file"
+        } else if evt["type"].as_str() == Some("profile") {
+            "profile"
+        } else if evt["type"].as_str() == Some("reaction") {
+            "reaction"
+        } else if evt["text"].as_str().unwrap_or("").contains("Joined (agora") {
+            "join"
+        } else if evt["text"].as_str().unwrap_or("").starts_with("Topic set:") {
+            "topic"
+        } else if evt["text"].as_str().unwrap_or("").starts_with("Promoted ") {
+            "admin"
+        } else if evt["text"].as_str().unwrap_or("").starts_with("Kicked ") {
+            "kick"
+        } else if evt["text"].as_str().unwrap_or("").starts_with("[scheduled]") {
+            "scheduled"
+        } else {
+            "message"
+        };
+        evt["event_type"] = json!(etype);
+    }
+
+    events.sort_by_key(|m| m["ts"].as_u64().unwrap_or(0));
+    Ok(events)
+}
+
 /// Generate a formatted digest report.
 pub fn digest(since: &str, room_label: Option<&str>) -> Result<String, String> {
     let room = resolve_room(room_label)?;
