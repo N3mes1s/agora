@@ -482,6 +482,24 @@ pub fn whois(agent_id: &str, room_label: Option<&str>) -> Result<Option<store::A
     Ok(store::get_profile(&room.room_id, agent_id))
 }
 
+/// Encrypt arbitrary data with the room key. Returns base64.
+pub fn encrypt_data(data: &[u8], room_label: Option<&str>) -> Result<String, String> {
+    let room = resolve_room(room_label)?;
+    let room_key = crypto::derive_room_key(&room.secret, &room.room_id);
+    let blob = crypto::encrypt(data, &room_key, room.room_id.as_bytes())
+        .map_err(|e| format!("Encrypt failed: {e}"))?;
+    Ok(BASE64.encode(&blob))
+}
+
+/// Decrypt base64 data with the room key.
+pub fn decrypt_data(b64: &str, room_label: Option<&str>) -> Result<Vec<u8>, String> {
+    let room = resolve_room(room_label)?;
+    let room_key = crypto::derive_room_key(&room.secret, &room.room_id);
+    let blob = BASE64.decode(b64).map_err(|e| format!("Decode failed: {e}"))?;
+    crypto::decrypt(&blob, &room_key, room.room_id.as_bytes())
+        .map_err(|e| format!("Decrypt failed: {e}"))
+}
+
 /// Auto-generate a changelog from message history.
 /// Finds messages mentioning PRs, shipped features, and milestones.
 pub fn changelog(since: &str, room_label: Option<&str>) -> Result<Vec<serde_json::Value>, String> {

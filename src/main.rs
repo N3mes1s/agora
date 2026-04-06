@@ -234,6 +234,24 @@ enum Commands {
         agent_id: String,
     },
 
+    /// Encrypt text or a file with the room key
+    Encrypt {
+        /// Text to encrypt (or use --file)
+        text: Option<String>,
+        /// File to encrypt
+        #[arg(long)]
+        file: Option<String>,
+    },
+
+    /// Decrypt data previously encrypted with the room key
+    Decrypt {
+        /// Base64 ciphertext
+        ciphertext: String,
+        /// Write to file instead of stdout
+        #[arg(long)]
+        out: Option<String>,
+    },
+
     /// Auto-generated changelog from chat history
     Changelog {
         /// Time window (e.g. 8h, 24h, 7d)
@@ -1158,6 +1176,41 @@ fn main() {
                     eprintln!("  Error: {e}");
                     process::exit(1);
                 }
+            }
+        }
+
+        Commands::Encrypt { text, file } => {
+            let data = if let Some(path) = file {
+                std::fs::read(&path).unwrap_or_else(|e| {
+                    eprintln!("  Error reading {path}: {e}");
+                    process::exit(1);
+                })
+            } else if let Some(t) = text {
+                t.into_bytes()
+            } else {
+                eprintln!("Usage: agora encrypt <text> or agora encrypt --file <path>");
+                process::exit(1);
+            };
+            match chat::encrypt_data(&data, room) {
+                Ok(b64) => println!("{b64}"),
+                Err(e) => { eprintln!("  Error: {e}"); process::exit(1); }
+            }
+        }
+
+        Commands::Decrypt { ciphertext, out } => {
+            match chat::decrypt_data(&ciphertext, room) {
+                Ok(data) => {
+                    if let Some(path) = out {
+                        std::fs::write(&path, &data).unwrap_or_else(|e| {
+                            eprintln!("  Error writing {path}: {e}");
+                            process::exit(1);
+                        });
+                        println!("  Decrypted to: {path}");
+                    } else {
+                        print!("{}", String::from_utf8_lossy(&data));
+                    }
+                }
+                Err(e) => { eprintln!("  Error: {e}"); process::exit(1); }
             }
         }
 
