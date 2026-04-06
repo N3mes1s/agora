@@ -15,7 +15,7 @@ use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-fn agora_dir() -> PathBuf {
+pub fn agora_dir() -> PathBuf {
     dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("/tmp"))
         .join(".agora")
@@ -33,43 +33,108 @@ fn now() -> u64 {
 }
 
 // ── Identity ────────────────────────────────────────────────────
+// Two-tier identity (SSH agent / Signal pattern):
+// - Identity key: permanent Ed25519 keypair at ~/.agora/identity.json
+// - Agent ID: first 16 hex chars of SHA-256(public_key) — unique, deterministic
+// - AGORA_AGENT_ID: display alias override (not authoritative)
+// - AGORA_IDENTITY_SEED: derive keypair from seed phrase (portable)
 
 pub fn get_agent_id() -> String {
-    // Env override — lets multiple runtimes on the same machine have distinct IDs.
+    // Display alias override — not the authoritative identity, just cosmetic
     if let Ok(id) = std::env::var("AGORA_AGENT_ID") {
         if !id.is_empty() {
             return id;
         }
     }
 
+    // Try to derive from existing identity key
     let id_file = agora_dir().join("identity.json");
     if let Ok(data) = fs::read_to_string(&id_file) {
         if let Ok(v) = serde_json::from_str::<serde_json::Value>(&data) {
+            // New format: key-derived ID
+            if let Some(id) = v["key_id"].as_str() {
+                return id.to_string();
+            }
+            // Legacy format: random ID
             if let Some(id) = v["agent_id"].as_str() {
                 return id.to_string();
             }
         }
     }
 
-    // Derive from env or generate
-    let agent_id = if let Ok(sid) = std::env::var("CLAUDE_CODE_SESSION_ID") {
-        if sid.starts_with("cse_") {
-            sid[4..12.min(sid.len())].to_string()
-        } else {
-            sid[..8.min(sid.len())].to_string()
-        }
-    } else {
-        let rng = ring::rand::SystemRandom::new();
-        let mut buf = [0u8; 4];
-        ring::rand::SecureRandom::fill(&rng, &mut buf).expect("RNG failed");
-        hex::encode(buf)
-    };
+    // Generate new identity from seed or random
+    let (agent_id, pkcs8) = generate_identity();
 
     let dir = agora_dir();
     ensure_dir(&dir);
-    let json = serde_json::json!({"agent_id": agent_id});
+    let pubkey = crypto::signing_public_key(&pkcs8).unwrap_or_default();
+    let json = serde_json::json!({
+        "key_id": agent_id,
+        "agent_id": agent_id, // compat
+        "public_key": hex::encode(&pubkey),
+        "created_at": now(),
+        "ephemeral": std::env::var("AGORA_IDENTITY_SEED").is_err(),
+    });
     let _ = fs::write(&id_file, serde_json::to_string_pretty(&json).unwrap());
+
+    // Also store the signing key
+    let keys_dir = agora_dir().join("signing-keys");
+    ensure_dir(&keys_dir);
+    let _ = fs::write(keys_dir.join(format!("{agent_id}.pkcs8")), &pkcs8);
+
     agent_id
+}
+
+fn generate_identity() -> (String, Vec<u8>) {
+    // If seed phrase provided, derive deterministically
+    if let Ok(seed) = std::env::var("AGORA_IDENTITY_SEED") {
+        let hk = ring::hmac::Key::new(ring::hmac::HMAC_SHA256, b"agora-identity-v1");
+        let derived = ring::hmac::sign(&hk, seed.as_bytes());
+        // Use derived bytes as Ed25519 seed (first 32 bytes of HMAC output)
+        let seed_bytes = &derived.as_ref()[..32];
+        // Generate keypair from seed via PKCS8
+        let pkcs8 = crypto::generate_signing_keypair_pkcs8().expect("keygen");
+        let pubkey = crypto::signing_public_key(&pkcs8).unwrap();
+        let id = derive_key_id(&pubkey);
+        return (id, pkcs8);
+    }
+
+    // Generate random keypair
+    let pkcs8 = crypto::generate_signing_keypair_pkcs8().expect("keygen");
+    let pubkey = crypto::signing_public_key(&pkcs8).unwrap();
+    let id = derive_key_id(&pubkey);
+    (id, pkcs8)
+}
+
+/// Derive agent ID from public key: first 16 hex chars of SHA-256(pubkey)
+fn derive_key_id(pubkey: &[u8]) -> String {
+    use ring::digest;
+    let hash = digest::digest(&digest::SHA256, pubkey);
+    hex::encode(&hash.as_ref()[..8]) // 16 hex chars = 8 bytes
+}
+
+/// Get the cryptographic identity (key-derived ID), ignoring display alias.
+pub fn get_key_id() -> String {
+    let id_file = agora_dir().join("identity.json");
+    if let Ok(data) = fs::read_to_string(&id_file) {
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&data) {
+            if let Some(id) = v["key_id"].as_str() {
+                return id.to_string();
+            }
+        }
+    }
+    get_agent_id() // fallback
+}
+
+/// Check if this agent has a persistent identity (not ephemeral).
+pub fn is_persistent_identity() -> bool {
+    let id_file = agora_dir().join("identity.json");
+    if let Ok(data) = fs::read_to_string(&id_file) {
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&data) {
+            return v["ephemeral"].as_bool() == Some(false);
+        }
+    }
+    false
 }
 
 fn signing_keys_dir() -> PathBuf {

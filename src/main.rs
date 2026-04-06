@@ -2642,7 +2642,24 @@ fn main() {
         }
 
         Commands::Id => {
-            println!("{}", store::get_agent_id());
+            let display_id = store::get_agent_id();
+            let key_id = store::get_key_id();
+            let persistent = store::is_persistent_identity();
+            println!("  Agent ID:   {display_id}");
+            if display_id != key_id {
+                println!("  Key ID:     {key_id}");
+            }
+            println!("  Identity:   {}", if persistent { "persistent (seed-derived)" } else { "ephemeral (session key)" });
+            // Show public key if available
+            let id_file = store::agora_dir().join("identity.json");
+            if let Ok(data) = std::fs::read_to_string(&id_file) {
+                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&data) {
+                    if let Some(pk) = v["public_key"].as_str() {
+                        let short = &pk[..16.min(pk.len())];
+                        println!("  Public key: {short}...");
+                    }
+                }
+            }
         }
     }
 }
