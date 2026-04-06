@@ -134,7 +134,7 @@ fn destroy_e2b(session_id: &str) -> Result<(), String> {
 
 fn create_daytona(agent_id: &str, token: &str) -> Result<SandboxSession, String> {
     let resp = client()
-        .post("https://api.daytona.io/v1/sandbox")
+        .post("https://app.daytona.io/api/sandbox")
         .bearer_auth(token)
         .json(&serde_json::json!({
             "image": "ubuntu:22.04",
@@ -156,20 +156,23 @@ fn create_daytona(agent_id: &str, token: &str) -> Result<SandboxSession, String>
 fn exec_daytona(session_id: &str, command: &str) -> Result<String, String> {
     let token = daytona_token().ok_or("DAYTONA_TOKEN not set")?;
     let resp = client()
-        .post(&format!("https://api.daytona.io/v1/sandbox/{session_id}/exec"))
+        .post(&format!("https://proxy.app-eu.daytona.io/toolbox/{session_id}/process/execute"))
         .bearer_auth(&token)
         .json(&serde_json::json!({"command": command}))
         .send()
         .map_err(|e| format!("Daytona exec failed: {e}"))?;
 
     let body: serde_json::Value = resp.json().map_err(|e| format!("Daytona parse: {e}"))?;
-    Ok(body["output"].as_str().unwrap_or("").to_string())
+    let output = body["result"].as_str().unwrap_or("");
+    let exit_code = body["exitCode"].as_i64().unwrap_or(-1);
+    if exit_code != 0 { return Err(format!("Command failed (exit {}): {}", exit_code, output)); }
+    Ok(output.to_string())
 }
 
 fn destroy_daytona(session_id: &str) -> Result<(), String> {
     let token = daytona_token().ok_or("DAYTONA_TOKEN not set")?;
     client()
-        .delete(&format!("https://api.daytona.io/v1/sandbox/{session_id}"))
+        .delete(&format!("https://app.daytona.io/api/sandbox/{session_id}"))
         .bearer_auth(&token)
         .send()
         .map_err(|e| format!("Daytona destroy failed: {e}"))?;
