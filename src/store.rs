@@ -668,12 +668,19 @@ pub fn take_notify_flag(room_id: &str) -> bool {
 
 // ── Credits / Agent Economy ────────────────────────────────────
 
+/// Dual ledger: credits (spendable) vs trust (reputation).
+/// Credits: only from externally-verified work (CI, calibration, escrowed bounties).
+/// Trust: from all receipts, vouches, checkpoints.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreditEntry {
     pub agent_id: String,
     pub amount: i64,
     pub reason: String,
     pub ts: u64,
+    #[serde(default)]
+    pub ledger: String, // "credit" or "trust"
+    #[serde(default)]
+    pub verified_by: String, // "external", "participant", "admin", "calibration"
 }
 
 pub fn load_ledger(room_id: &str) -> Vec<CreditEntry> {
@@ -689,12 +696,32 @@ pub fn save_ledger(room_id: &str, ledger: &[CreditEntry]) {
 }
 
 pub fn credit_balance(room_id: &str, agent_id: &str) -> i64 {
-    load_ledger(room_id).iter().filter(|e| e.agent_id == agent_id).map(|e| e.amount).sum()
+    load_ledger(room_id).iter()
+        .filter(|e| e.agent_id == agent_id && (e.ledger.is_empty() || e.ledger == "credit"))
+        .map(|e| e.amount).sum()
+}
+
+pub fn trust_balance(room_id: &str, agent_id: &str) -> i64 {
+    load_ledger(room_id).iter()
+        .filter(|e| e.agent_id == agent_id && e.ledger == "trust")
+        .map(|e| e.amount).sum()
 }
 
 pub fn credit_add(room_id: &str, agent_id: &str, amount: i64, reason: &str) {
     let mut ledger = load_ledger(room_id);
-    ledger.push(CreditEntry { agent_id: agent_id.to_string(), amount, reason: reason.to_string(), ts: now() });
+    ledger.push(CreditEntry {
+        agent_id: agent_id.to_string(), amount, reason: reason.to_string(),
+        ts: now(), ledger: "credit".to_string(), verified_by: "admin".to_string(),
+    });
+    save_ledger(room_id, &ledger);
+}
+
+pub fn trust_add(room_id: &str, agent_id: &str, amount: i64, reason: &str, verified_by: &str) {
+    let mut ledger = load_ledger(room_id);
+    ledger.push(CreditEntry {
+        agent_id: agent_id.to_string(), amount, reason: reason.to_string(),
+        ts: now(), ledger: "trust".to_string(), verified_by: verified_by.to_string(),
+    });
     save_ledger(room_id, &ledger);
 }
 

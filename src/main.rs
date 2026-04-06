@@ -1940,10 +1940,12 @@ fn main() {
 
         Commands::Balance { agent_id } => {
             match chat::credit_balance_check(agent_id.as_deref(), room) {
-                Ok(balance) => {
+                Ok((credits, trust)) => {
                     let id = agent_id.unwrap_or_else(|| store::get_agent_id());
                     let name = resolve_display_name(&id);
-                    println!("  {name}: {balance} credits");
+                    println!("  {name}:");
+                    println!("    Credits (spendable): {credits}");
+                    println!("    Trust (reputation):  {trust}");
                 }
                 Err(e) => { eprintln!("  Error: {e}"); process::exit(1); }
             }

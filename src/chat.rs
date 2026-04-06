@@ -1012,10 +1012,10 @@ pub fn credit_grant(agent_id: &str, amount: i64, reason: &str, room_label: Optio
     Ok(balance)
 }
 
-pub fn credit_balance_check(agent_id: Option<&str>, room_label: Option<&str>) -> Result<i64, String> {
+pub fn credit_balance_check(agent_id: Option<&str>, room_label: Option<&str>) -> Result<(i64, i64), String> {
     let room = resolve_room(room_label)?;
     let id = agent_id.unwrap_or(&store::get_agent_id()).to_string();
-    Ok(store::credit_balance(&room.room_id, &id))
+    Ok((store::credit_balance(&room.room_id, &id), store::trust_balance(&room.room_id, &id)))
 }
 
 pub fn credit_spend(amount: i64, reason: &str, room_label: Option<&str>) -> Result<i64, String> {
