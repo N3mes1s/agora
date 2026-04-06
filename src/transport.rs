@@ -94,6 +94,7 @@ pub fn publish(topic: &str, payload: &str) -> bool {
 }
 
 /// Fetch recent messages from the relay topic.
+/// Falls back to mirror relay if primary fails.
 /// Returns vec of (timestamp, raw_payload).
 pub fn fetch(topic: &str, since: &str) -> Vec<(u64, String)> {
     let base = relay_url();
@@ -101,9 +102,27 @@ pub fn fetch(topic: &str, since: &str) -> Vec<(u64, String)> {
     let body = match apply_auth(client().get(&url)).send() {
         Ok(resp) => match resp.text() {
             Ok(s) => s,
-            Err(_) => return vec![],
+            Err(_) => String::new(),
         },
-        Err(_) => return vec![],
+        Err(e) => {
+            eprintln!("  [warn] primary relay fetch failed: {e}");
+            String::new()
+        }
+    };
+
+    // Failover: if primary returned nothing, try mirror
+    let body = if body.trim().is_empty() || !body.contains("message") {
+        if let Some(mirror) = mirror_url() {
+            let mirror_url = format!("{mirror}/{topic}/json?poll=1&since={since}");
+            match client().get(&mirror_url).send() {
+                Ok(resp) => resp.text().unwrap_or(body),
+                Err(_) => body,
+            }
+        } else {
+            body
+        }
+    } else {
+        body
     };
 
     let mut events = Vec::new();

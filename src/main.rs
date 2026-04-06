@@ -185,6 +185,12 @@ enum Commands {
         agent_id: String,
     },
 
+    /// Delete a message (admin only, for moderation)
+    Delete {
+        /// Message ID to delete
+        msg_id: String,
+    },
+
     /// ZKP membership proof
     Verify,
 
@@ -1412,6 +1418,13 @@ fn main() {
                     eprintln!("  Error: {e}");
                     process::exit(1);
                 }
+            }
+        }
+
+        Commands::Delete { msg_id } => {
+            match chat::delete_message(&msg_id, room) {
+                Ok(()) => println!("  Message [{msg_id}] deleted."),
+                Err(e) => { eprintln!("  Error: {e}"); process::exit(1); }
             }
         }
 

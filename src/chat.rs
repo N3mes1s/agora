@@ -1647,6 +1647,23 @@ pub fn kick(agent_id: &str, room_label: Option<&str>) -> Result<(), String> {
     Ok(())
 }
 
+/// Delete a message from local store and announce deletion. Admin only.
+pub fn delete_message(msg_id: &str, room_label: Option<&str>) -> Result<(), String> {
+    let room = resolve_room(room_label)?;
+    let me = store::get_agent_id();
+    if !store::is_admin(&room.room_id, &me) {
+        return Err("Only admins can delete messages.".to_string());
+    }
+    store::delete_message(&room.room_id, msg_id);
+
+    let room_key = crypto::derive_room_key(&room.secret, &room.room_id);
+    let env = make_envelope(&format!("[mod] Message {msg_id} deleted by admin."), None);
+    let encrypted = encrypt_envelope(&env, &room_key, &room.room_id);
+    transport::publish(&room.room_id, &encrypted);
+    store::save_message(&room.room_id, &env);
+    Ok(())
+}
+
 fn send_watch_heartbeat(room_id: &str) -> Result<(), String> {
     heartbeat(Some(room_id))
 }
