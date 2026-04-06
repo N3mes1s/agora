@@ -254,6 +254,7 @@ pub fn send(message: &str, reply_to: Option<&str>, room_label: Option<&str>) -> 
 pub fn read(since: &str, limit: usize, room_label: Option<&str>) -> Result<Vec<serde_json::Value>, String> {
     let room = resolve_room(room_label)?;
     let room_key = crypto::derive_room_key(&room.secret, &room.room_id);
+    let me = store::get_agent_id();
 
     // Fetch from relay
     let remote_events = transport::fetch(&room.room_id, since);
@@ -273,18 +274,52 @@ pub fn read(since: &str, limit: usize, room_label: Option<&str>) -> Result<Vec<s
 
     let mut seen_ids: HashSet<String> = HashSet::new();
     let mut merged = Vec::new();
+    let mut to_ack: Vec<String> = Vec::new();
+
     for msg in remote_msgs.into_iter().chain(local_msgs) {
         let mid = msg["id"].as_str().unwrap_or("?").to_string();
         if mid != "?" && seen_ids.contains(&mid) {
             continue;
         }
-        seen_ids.insert(mid);
+        seen_ids.insert(mid.clone());
         // Track presence from all messages (including heartbeats)
         track_presence(&room.room_id, &msg);
-        // Only persist and display non-heartbeat messages
-        if !is_heartbeat(&msg) {
-            store::save_message(&room.room_id, &msg);
-            merged.push(msg);
+
+        if is_heartbeat(&msg) {
+            continue;
+        }
+
+        // Process incoming receipts silently — record them, don't display
+        if is_receipt(&msg) {
+            if let Some(ids) = msg["read_ids"].as_array() {
+                let reader = msg["from"].as_str().unwrap_or("").to_string();
+                let msg_ids: Vec<String> = ids
+                    .iter()
+                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                    .collect();
+                store::record_receipts(&room.room_id, &msg_ids, &reader);
+            }
+            continue;
+        }
+
+        store::save_message(&room.room_id, &msg);
+
+        // Queue an ACK for messages from other agents not yet receipted
+        let from = msg["from"].as_str().unwrap_or("");
+        if from != me && mid != "?" && !store::is_receipt_sent(&room.room_id, &mid) {
+            to_ack.push(mid.clone());
+        }
+
+        merged.push(msg);
+    }
+
+    // Send a single batched delivery receipt for all newly-seen messages
+    if !to_ack.is_empty() {
+        let receipt = make_receipt(&to_ack);
+        let encrypted = encrypt_envelope(&receipt, &room_key, &room.room_id);
+        let _ = transport::publish(&room.room_id, &encrypted);
+        for mid in &to_ack {
+            store::mark_receipt_sent(&room.room_id, mid);
         }
     }
 
@@ -402,6 +437,23 @@ pub fn read_status(room_label: Option<&str>) -> Result<Vec<serde_json::Value>, S
         }));
     }
     Ok(status)
+}
+
+/// List agents that have sent a delivery receipt for a given message ID prefix.
+///
+/// Matches by prefix so callers can use the 6-char short ID shown in brackets.
+pub fn delivery_receipts(msg_id_prefix: &str, room_label: Option<&str>) -> Result<Vec<String>, String> {
+    let room = resolve_room(room_label)?;
+    let receipts = store::load_receipts(&room.room_id);
+
+    // Resolve prefix → full stored ID (or fall back to using it as-is)
+    let full_id = receipts
+        .keys()
+        .find(|k| k.starts_with(msg_id_prefix))
+        .cloned()
+        .unwrap_or_else(|| msg_id_prefix.to_string());
+
+    Ok(receipts.get(&full_id).cloned().unwrap_or_default())
 }
 
 /// React to a message with an emoji.
@@ -1247,6 +1299,55 @@ mod tests {
         assert_eq!(unpinned, first);
         assert!(removed);
         assert!(pins(None).unwrap().is_empty());
+    }
+
+    #[test]
+    fn mark_receipt_sent_is_idempotent() {
+        let home = std::env::temp_dir().join(format!(
+            "agora-receipt-test-{}",
+            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        std::fs::create_dir_all(&home).unwrap();
+        unsafe { std::env::set_var("HOME", &home); }
+
+        let room_id = "ag-receipt-test";
+        let msg_id = "aabbccdd";
+
+        assert!(!store::is_receipt_sent(room_id, msg_id));
+        store::mark_receipt_sent(room_id, msg_id);
+        assert!(store::is_receipt_sent(room_id, msg_id));
+        // Second call must not panic and result must remain true
+        store::mark_receipt_sent(room_id, msg_id);
+        assert!(store::is_receipt_sent(room_id, msg_id));
+    }
+
+    #[test]
+    fn delivery_receipts_prefix_lookup() {
+        let home = std::env::temp_dir().join(format!(
+            "agora-drprefix-test-{}",
+            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        std::fs::create_dir_all(&home).unwrap();
+        unsafe {
+            std::env::set_var("HOME", &home);
+            std::env::set_var("AGORA_AGENT_ID", "drtest");
+        }
+
+        let room = store::add_room("ag-dr-prefix", "secret-dr", "drtest", Role::Admin);
+        store::set_active_room("drtest");
+        let full_id = "deadbeef12345678";
+        store::record_receipts(&room.room_id, &[full_id.to_string()], "agent-alice");
+        store::record_receipts(&room.room_id, &[full_id.to_string()], "agent-bob");
+
+        // Lookup by 6-char prefix
+        let readers = super::delivery_receipts("deadbe", None).unwrap();
+        assert_eq!(readers.len(), 2);
+        assert!(readers.contains(&"agent-alice".to_string()));
+        assert!(readers.contains(&"agent-bob".to_string()));
+
+        // Unknown prefix returns empty
+        let empty = super::delivery_receipts("ffffff", None).unwrap();
+        assert!(empty.is_empty());
     }
 }
 

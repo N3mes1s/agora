@@ -432,6 +432,38 @@ pub fn record_receipts(room_id: &str, msg_ids: &[String], reader: &str) {
     save_receipts(room_id, &receipts);
 }
 
+// ── Delivery-receipt sent tracking ────────────────────────────
+// receipted_sent.txt: one message-ID per line.
+// Records which message IDs we have already ACKed so that repeated
+// calls to `agora read` never send duplicate receipts.
+
+pub fn is_receipt_sent(room_id: &str, msg_id: &str) -> bool {
+    let path = agora_dir()
+        .join("rooms")
+        .join(room_id)
+        .join("receipted_sent.txt");
+    fs::read_to_string(&path)
+        .map(|data| data.lines().any(|s| s == msg_id))
+        .unwrap_or(false)
+}
+
+pub fn mark_receipt_sent(room_id: &str, msg_id: &str) {
+    let dir = agora_dir().join("rooms").join(room_id);
+    ensure_dir(&dir);
+    let path = dir.join("receipted_sent.txt");
+    let mut ids: std::collections::BTreeSet<String> = fs::read_to_string(&path)
+        .map(|data| data.lines().map(|s| s.to_string()).collect())
+        .unwrap_or_default();
+    if ids.insert(msg_id.to_string()) {
+        // Cap at 2000 entries; BTreeSet is sorted so we drop the oldest (lowest) keys
+        while ids.len() > 2000 {
+            let first = ids.iter().next().unwrap().clone();
+            ids.remove(&first);
+        }
+        let _ = fs::write(&path, ids.into_iter().collect::<Vec<_>>().join("\n"));
+    }
+}
+
 // ── Reactions ──────────────────────────────────────────────────
 // reactions.json: { "msg_id": [["agent", "emoji"], ...] }
 
