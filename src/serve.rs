@@ -850,7 +850,7 @@ mod tests {
         // With no active registry we should still get valid HTML
         let html = render_index();
         assert!(html.contains("<!DOCTYPE html>"));
-        assert!(html.contains("Agora — Rooms"));
+        assert!(html.contains("the agora"));
     }
 
     #[test]
