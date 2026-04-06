@@ -27,6 +27,12 @@ struct InviteTokenPayload {
     target_agent_id: Option<String>,
     #[serde(default)]
     purpose: Option<String>,
+    #[serde(default)]
+    expires_at: Option<u64>,
+    #[serde(default)]
+    max_uses: Option<u32>,
+    #[serde(default)]
+    created_by: Option<String>,
 }
 
 #[derive(Parser)]
@@ -60,7 +66,14 @@ enum Commands {
     },
 
     /// Generate a single invite token for the active room
-    Invite,
+    Invite {
+        /// Token expires after this duration (e.g. 1h, 24h, 7d)
+        #[arg(long)]
+        expires: Option<String>,
+        /// Maximum number of uses (default: unlimited)
+        #[arg(long)]
+        max_uses: Option<u32>,
+    },
 
     /// Join a room from an invite token
     Accept {
@@ -485,6 +498,9 @@ fn targeted_invite_token(room: &store::RoomEntry, target_agent_id: &str, purpose
         label: room.label.clone(),
         target_agent_id: Some(target_agent_id.to_string()),
         purpose: Some(purpose.to_string()),
+        expires_at: None,
+        max_uses: None,
+        created_by: Some(store::get_agent_id()),
     };
     format!(
         "agr_{}",
@@ -518,6 +534,9 @@ fn parse_invite_token(token: &str) -> Result<InviteTokenPayload, String> {
         },
         target_agent_id: None,
         purpose: None,
+        expires_at: None,
+        max_uses: None,
+        created_by: None,
     })
 }
 
@@ -605,14 +624,39 @@ fn main() {
             }
         }
 
-        Commands::Invite => {
+        Commands::Invite { expires, max_uses } => {
             let active = if let Some(r) = room { store::find_room(r) } else { store::get_active_room() };
             match active {
                 Some(r) => {
-                    let token = invite_token(&r);
+                    let now_ts = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+                    let expires_at = expires.as_ref().and_then(|e| {
+                        let secs = if let Some(h) = e.strip_suffix('h') { h.parse::<u64>().ok().map(|v| v * 3600) }
+                        else if let Some(d) = e.strip_suffix('d') { d.parse::<u64>().ok().map(|v| v * 86400) }
+                        else if let Some(m) = e.strip_suffix('m') { m.parse::<u64>().ok().map(|v| v * 60) }
+                        else { None };
+                        secs.map(|s| now_ts + s)
+                    });
+                    let payload = InviteTokenPayload {
+                        room_id: r.room_id.clone(),
+                        secret: r.secret.clone(),
+                        label: r.label.clone(),
+                        target_agent_id: None,
+                        purpose: None,
+                        expires_at,
+                        max_uses,
+                        created_by: Some(store::get_agent_id()),
+                    };
+                    let token = format!("agr_{}", BASE64.encode(serde_json::to_vec(&payload).unwrap()));
                     println!("  Invite token for '{}':\n", r.label);
                     println!("  {token}\n");
-                    println!("  Share this single token. Recipient joins with:");
+                    if let Some(exp) = &expires {
+                        println!("  Expires in: {exp}");
+                    }
+                    if let Some(mu) = max_uses {
+                        println!("  Max uses: {mu}");
+                    }
+                    println!("  Recipient joins with:");
                     println!("    agora accept {token}");
                 }
                 None => {
@@ -625,6 +669,16 @@ fn main() {
         Commands::Accept { token } => {
             match parse_invite_token(&token) {
                 Ok(payload) => {
+                    // Check expiry
+                    if let Some(expires_at) = payload.expires_at {
+                        let now_ts = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+                        if now_ts > expires_at {
+                            eprintln!("  Error: invite token has expired.");
+                            process::exit(1);
+                        }
+                    }
+
                     if let Some(target) = payload.target_agent_id.as_deref() {
                         let me = store::get_agent_id();
                         if me != target {
