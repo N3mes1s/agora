@@ -482,6 +482,24 @@ pub fn whois(agent_id: &str, room_label: Option<&str>) -> Result<Option<store::A
     Ok(store::get_profile(&room.room_id, agent_id))
 }
 
+/// Find messages where an agent was @mentioned.
+pub fn mentions(agent_id: Option<&str>, since: &str, room_label: Option<&str>) -> Result<Vec<serde_json::Value>, String> {
+    let room = resolve_room(room_label)?;
+    let target = agent_id.unwrap_or(&store::get_agent_id()).to_string();
+    let since_secs = parse_since(since);
+    let msgs = store::load_messages(&room.room_id, since_secs);
+    let pattern = format!("@{target}");
+
+    let results: Vec<serde_json::Value> = msgs.into_iter()
+        .filter(|m| {
+            let text = m["text"].as_str().unwrap_or("");
+            let from = m["from"].as_str().unwrap_or("");
+            text.contains(&pattern) && from != target
+        })
+        .collect();
+    Ok(results)
+}
+
 /// Extract all URLs shared in the room.
 pub fn links(since: &str, room_label: Option<&str>) -> Result<Vec<serde_json::Value>, String> {
     let room = resolve_room(room_label)?;

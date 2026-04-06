@@ -234,6 +234,16 @@ enum Commands {
         agent_id: String,
     },
 
+    /// Find messages where you (or an agent) were @mentioned
+    Mentions {
+        /// Agent ID (default: you)
+        #[arg(long)]
+        agent: Option<String>,
+        /// Time window
+        #[arg(default_value = "24h")]
+        since: String,
+    },
+
     /// Extract all URLs shared in the room
     Links {
         /// Time window (e.g. 2h, 24h, 7d)
@@ -1183,6 +1193,22 @@ fn main() {
                     eprintln!("  Error: {e}");
                     process::exit(1);
                 }
+            }
+        }
+
+        Commands::Mentions { agent, since } => {
+            match chat::mentions(agent.as_deref(), &since, room) {
+                Ok(msgs) => {
+                    if msgs.is_empty() {
+                        println!("  (no mentions in last {since})");
+                        return;
+                    }
+                    println!("  {} mention(s) in last {since}:\n", msgs.len());
+                    for m in &msgs {
+                        print_msg(m);
+                    }
+                }
+                Err(e) => { eprintln!("  Error: {e}"); process::exit(1); }
             }
         }
 
