@@ -3012,6 +3012,7 @@ mod tests {
                 task_id: "task-steady".to_string(),
                 task_title: "Ship feature".to_string(),
                 agent_id: "steady".to_string(),
+                status: "done".to_string(),
                 notes: Some("merged".to_string()),
                 task_hash: "abcd1234".to_string(),
                 witness_ids: vec!["discover-admin".to_string()],
