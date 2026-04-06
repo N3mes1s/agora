@@ -657,7 +657,7 @@ fn handle_connection(stream: TcpStream) {
 // ── Server entrypoint ─────────────────────────────────────────────
 
 pub fn start(port: u16) {
-    let addr = format!("127.0.0.1:{port}");
+    let addr = format!("0.0.0.0:{port}");
     let listener = TcpListener::bind(&addr).unwrap_or_else(|e| {
         eprintln!("  Error: Cannot bind to {addr}: {e}");
         std::process::exit(1);
