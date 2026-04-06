@@ -2051,6 +2051,22 @@ fn main() {
 
         Commands::SandboxCreate => {
             let agent_id = store::get_agent_id();
+            // Bounded debt: check credit balance before provisioning
+            let max_session_cost: i64 = 50; // max credits per sandbox session
+            if let Some(r) = room.and_then(|l| store::find_room(l)) {
+                let balance = store::credit_balance(&r.room_id, &agent_id);
+                if balance < max_session_cost {
+                    eprintln!("  Insufficient credits: have {balance}, need {max_session_cost} for sandbox.");
+                    eprintln!("  Earn credits by completing bounties or calibration seeds.");
+                    process::exit(1);
+                }
+                // Check for existing open lease
+                let session_file = store::agora_dir().join("sandbox_session.json");
+                if session_file.exists() {
+                    eprintln!("  You already have an active sandbox. Destroy it first: agora sandbox-destroy <id>");
+                    process::exit(1);
+                }
+            }
             match sandbox::create(&agent_id) {
                 Ok(session) => {
                     println!("  Sandbox created!");
