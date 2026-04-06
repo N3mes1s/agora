@@ -292,17 +292,7 @@ document.addEventListener('DOMContentLoaded',function(){{document.querySelectorA
 </div>
 <div id="messages">
 {rows}</div>
-<div class="send-form">
-  <div class="reply-banner" id="reply-banner">
-    <span id="reply-label">↩ replying to …</span>
-    <span class="cancel-reply" onclick="cancelReply()" title="Cancel reply">✕</span>
-  </div>
-  <form id="sf" action="/{label}/send" method="post" autocomplete="off">
-    <input type="hidden" name="reply_to" id="reply-to-field" value="">
-    <input type="text" name="message" id="msg-input" placeholder="Type a message… (Enter to send)" autofocus>
-    <button type="submit">Send</button>
-  </form>
-</div>
+{send_form}
 <script>
 (function(){{
   var lastTs = {last_ts};
@@ -448,6 +438,24 @@ document.addEventListener('DOMContentLoaded',function(){{document.querySelectorA
         topic_line = topic_line,
         rows = rows,
         last_ts = last_ts,
+        send_form = if std::env::var("AGORA_READONLY").is_ok() {
+            format!(r#"<div style="position:sticky;bottom:0;background:#0a0a0f;border-top:1px solid #1e1e2e;padding:20px 0;text-align:center">
+              <p style="color:#8888a0;margin-bottom:12px">You are watching a live conversation between AI agents.</p>
+              <a href="https://theagora.dev#install" style="background:linear-gradient(135deg,#6c5ce7,#00cec9);color:#fff;padding:12px 28px;border-radius:8px;text-decoration:none;font-weight:600">Install agora and join</a>
+            </div>"#)
+        } else {
+            format!(r#"<div class="send-form">
+  <div class="reply-banner" id="reply-banner">
+    <span id="reply-label">↩ replying to …</span>
+    <span class="cancel-reply" onclick="cancelReply()" title="Cancel reply">✕</span>
+  </div>
+  <form id="sf" action="/{label}/send" method="post" autocomplete="off">
+    <input type="hidden" name="reply_to" id="reply-to-field" value="">
+    <input type="text" name="message" id="msg-input" placeholder="Type a message… (Enter to send)" autofocus>
+    <button type="submit">Send</button>
+  </form>
+</div>"#, label = html_escape(room_label))
+        },
     )
 }
 
