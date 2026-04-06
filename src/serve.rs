@@ -131,8 +131,24 @@ pub fn render_message_html(m: &serde_json::Value, me: &str, room_id: &str) -> St
         format!(r#"<div class="reactions">{reactions}</div>"#)
     };
 
+    let actions = format!(
+        r#"<span class="msg-actions"><span class="msg-wrap"><button onclick="openEmojiPicker(this,'{mid_short}')" title="React">😀</button><div class="emoji-picker" id="ep-{mid_short}">
+<button onclick="sendReact('{mid_short}','👍')">👍</button>
+<button onclick="sendReact('{mid_short}','👎')">👎</button>
+<button onclick="sendReact('{mid_short}','❤️')">❤️</button>
+<button onclick="sendReact('{mid_short}','🔥')">🔥</button>
+<button onclick="sendReact('{mid_short}','✅')">✅</button>
+<button onclick="sendReact('{mid_short}','👀')">👀</button>
+<button onclick="sendReact('{mid_short}','🎉')">🎉</button>
+<button onclick="sendReact('{mid_short}','🤔')">🤔</button>
+</div></span><button onclick="setReply('{mid_short}','{from_raw}')" title="Reply">↩</button></span>"#,
+        mid_short = mid_short,
+        from_raw = m["from"].as_str().unwrap_or("?"),
+    );
+
     format!(
-        r#"<div class="{class}" id="m-{mid_short}"><span class="time">{dt}</span> <span class="id">[{mid_short}]</span> <span class="sender">{from}</span>: {reply_badge}<span class="text">{text}</span>{receipt}{reactions_row}</div>"#
+        r#"<div class="{class}" id="m-{mid_short}" data-text="{text_lower}"><span class="time">{dt}</span> <span class="id">[{mid_short}]</span> <span class="sender">{from}</span>: {reply_badge}<span class="text">{text}</span>{receipt}{reactions_row}{actions}</div>"#,
+        text_lower = html_escape(&m["text"].as_str().unwrap_or("").to_lowercase()),
     )
 }
 
@@ -146,13 +162,16 @@ h1{color:#58a6ff;font-size:1.2em;border-bottom:1px solid #30363d;padding-bottom:
 .nav a{margin-right:12px;padding:4px 8px;background:#21262d;border-radius:4px;text-decoration:none;color:#58a6ff}
 .nav a:hover{background:#30363d}
 .nav a.active{background:#388bfd;color:#fff}
-.msg{padding:3px 0;line-height:1.5}
+.msg{padding:3px 0;line-height:1.5;position:relative}
+.msg:hover .msg-actions{opacity:1}
 .msg.me{color:#7ee787}
 .msg.other{color:#c9d1d9}
+.msg.hidden{display:none}
 .time{color:#8b949e}
 .id{color:#6e7681;font-size:.82em}
 .sender{color:#58a6ff;font-weight:bold}
-.reply-to{color:#8b949e;font-size:.82em;background:#161b22;padding:1px 4px;border-radius:3px;margin-right:4px}
+.reply-to{color:#8b949e;font-size:.82em;background:#161b22;padding:1px 4px;border-radius:3px;margin-right:4px;cursor:pointer}
+.reply-to:hover{background:#21262d}
 .receipt{font-size:.8em;margin-left:4px}
 .receipt.seen2{color:#3fb950}
 .receipt.seen1{color:#8b949e}
@@ -169,6 +188,22 @@ a{color:#58a6ff}
 .conn-status{font-size:.75em;color:#8b949e;margin-left:8px}
 .conn-status.live{color:#3fb950}
 .conn-status.reconnecting{color:#d29922}
+.msg-actions{opacity:0;transition:opacity .15s;display:inline-flex;gap:4px;margin-left:6px;vertical-align:middle}
+.msg-actions button{background:#21262d;border:1px solid #30363d;color:#8b949e;border-radius:4px;padding:1px 5px;font-size:.78em;cursor:pointer;font-family:inherit;line-height:1.4}
+.msg-actions button:hover{background:#30363d;color:#c9d1d9}
+.reply-banner{background:#161b22;border-left:3px solid #388bfd;padding:4px 8px;font-size:.85em;color:#8b949e;margin-bottom:6px;display:none;align-items:center;gap:8px;border-radius:0 4px 4px 0}
+.reply-banner.active{display:flex}
+.reply-banner .cancel-reply{cursor:pointer;color:#f85149;margin-left:auto;padding:0 4px;font-size:1.1em}
+.search-bar{display:flex;gap:8px;margin-bottom:10px;align-items:center}
+.search-bar input{background:#161b22;border:1px solid #30363d;color:#c9d1d9;padding:5px 10px;border-radius:6px;font-family:inherit;font-size:.9em;width:260px}
+.search-bar input:focus{outline:none;border-color:#388bfd}
+.search-bar .clear-search{background:none;border:none;color:#8b949e;cursor:pointer;font-size:.9em;padding:0 4px}
+.search-bar .match-count{color:#8b949e;font-size:.82em}
+.emoji-picker{display:none;position:absolute;left:0;top:calc(100% + 2px);background:#161b22;border:1px solid #30363d;border-radius:8px;padding:6px;z-index:100;flex-wrap:wrap;gap:2px;width:200px}
+.emoji-picker.open{display:flex}
+.emoji-picker button{background:none;border:none;font-size:1.1em;cursor:pointer;padding:2px 4px;border-radius:4px}
+.emoji-picker button:hover{background:#21262d}
+.msg-wrap{position:relative;display:inline}
 "#;
 
 fn render_nav(active: &str) -> String {
@@ -223,10 +258,20 @@ fn render_room_page(room_label: &str) -> String {
 {topic_line}
 <div class="stats">{count} messages shown (last 24 h). <a href="/">All rooms</a></div>
 <div class="nav">{nav}</div>
+<div class="search-bar">
+  <input type="text" id="search-input" placeholder="Search messages…" oninput="filterMessages(this.value)" autocomplete="off">
+  <button class="clear-search" onclick="clearSearch()" title="Clear search">✕</button>
+  <span class="match-count" id="match-count"></span>
+</div>
 <div id="messages">
 {rows}</div>
 <div class="send-form">
+  <div class="reply-banner" id="reply-banner">
+    <span id="reply-label">↩ replying to …</span>
+    <span class="cancel-reply" onclick="cancelReply()" title="Cancel reply">✕</span>
+  </div>
   <form id="sf" action="/{label}/send" method="post" autocomplete="off">
+    <input type="hidden" name="reply_to" id="reply-to-field" value="">
     <input type="text" name="message" id="msg-input" placeholder="Type a message… (Enter to send)" autofocus>
     <button type="submit">Send</button>
   </form>
@@ -237,20 +282,98 @@ fn render_room_page(room_label: &str) -> String {
   var conn = document.getElementById('conn');
   var messages = document.getElementById('messages');
   var input = document.getElementById('msg-input');
+  var replyField = document.getElementById('reply-to-field');
+  var replyBanner = document.getElementById('reply-banner');
+  var replyLabel = document.getElementById('reply-label');
 
-  // Submit form via fetch so page doesn't reload
+  // ── Reply ──────────────────────────────────────────────────────
+  window.setReply = function(msgId, sender) {{
+    replyField.value = msgId;
+    replyLabel.textContent = '↩ replying to ' + sender + ' [' + msgId + ']';
+    replyBanner.classList.add('active');
+    input.focus();
+  }};
+
+  window.cancelReply = function() {{
+    replyField.value = '';
+    replyBanner.classList.remove('active');
+  }};
+
+  // ── Emoji picker ───────────────────────────────────────────────
+  window.openEmojiPicker = function(btn, msgId) {{
+    var picker = document.getElementById('ep-' + msgId);
+    if (!picker) return;
+    var isOpen = picker.classList.contains('open');
+    // Close all open pickers first
+    document.querySelectorAll('.emoji-picker.open').forEach(function(p) {{
+      p.classList.remove('open');
+    }});
+    if (!isOpen) picker.classList.add('open');
+  }};
+
+  // Close pickers when clicking outside
+  document.addEventListener('click', function(e) {{
+    if (!e.target.closest('.msg-wrap')) {{
+      document.querySelectorAll('.emoji-picker.open').forEach(function(p) {{
+        p.classList.remove('open');
+      }});
+    }}
+  }});
+
+  window.sendReact = function(msgId, emoji) {{
+    document.querySelectorAll('.emoji-picker.open').forEach(function(p) {{
+      p.classList.remove('open');
+    }});
+    fetch('/{label}/react', {{
+      method: 'POST',
+      headers: {{'Content-Type': 'application/x-www-form-urlencoded'}},
+      body: 'message_id=' + encodeURIComponent(msgId) + '&emoji=' + encodeURIComponent(emoji)
+    }}).catch(function() {{}});
+  }};
+
+  // ── Search / filter ─────────────────────────────────────────────
+  window.filterMessages = function(query) {{
+    var q = query.toLowerCase().trim();
+    var msgs = messages.querySelectorAll('.msg');
+    var shown = 0;
+    msgs.forEach(function(m) {{
+      if (!q || (m.dataset.text && m.dataset.text.includes(q))) {{
+        m.classList.remove('hidden');
+        shown++;
+      }} else {{
+        m.classList.add('hidden');
+      }}
+    }});
+    var counter = document.getElementById('match-count');
+    counter.textContent = q ? shown + ' match' + (shown === 1 ? '' : 'es') : '';
+  }};
+
+  window.clearSearch = function() {{
+    var si = document.getElementById('search-input');
+    si.value = '';
+    filterMessages('');
+    si.focus();
+  }};
+
+  // ── Send form (fetch, no reload) ───────────────────────────────
   document.getElementById('sf').addEventListener('submit', function(e) {{
     e.preventDefault();
     var text = input.value.trim();
     if (!text) return;
+    var body = 'message=' + encodeURIComponent(text);
+    if (replyField.value) {{
+      body += '&reply_to=' + encodeURIComponent(replyField.value);
+    }}
     fetch('/{label}/send', {{
       method: 'POST',
       headers: {{'Content-Type': 'application/x-www-form-urlencoded'}},
-      body: 'message=' + encodeURIComponent(text)
+      body: body
     }}).catch(function() {{}});
     input.value = '';
+    cancelReply();
   }});
 
+  // ── SSE live tail ───────────────────────────────────────────────
   function connectSSE() {{
     var url = '/{label}/events?since=' + lastTs;
     var es = new EventSource(url);
@@ -267,8 +390,15 @@ fn render_room_page(room_label: &str) -> String {
       var div = document.createElement('div');
       div.innerHTML = evt.data;
       var el = div.firstElementChild || div;
+      // Apply active search filter to new message
+      var q = document.getElementById('search-input').value.toLowerCase().trim();
+      if (q && el.dataset && el.dataset.text && !el.dataset.text.includes(q)) {{
+        el.classList.add('hidden');
+      }}
       messages.appendChild(el);
-      el.scrollIntoView({{behavior: 'smooth', block: 'end'}});
+      if (!el.classList.contains('hidden')) {{
+        el.scrollIntoView({{behavior: 'smooth', block: 'end'}});
+      }}
     }};
 
     es.onerror = function() {{
@@ -280,8 +410,6 @@ fn render_room_page(room_label: &str) -> String {
   }}
 
   connectSSE();
-
-  // Scroll to bottom on load
   window.scrollTo(0, document.body.scrollHeight);
 }})();
 </script>
@@ -490,6 +618,24 @@ fn handle_connection(stream: TcpStream) {
             send_redirect(stream, &format!("/{room_label}"));
         }
 
+        // POST /:room/react — add emoji reaction (called by web UI via fetch)
+        ("POST", [room_label, "react"]) => {
+            if let (Some(msg_id), Some(emoji)) = (
+                form_field(body, "message_id"),
+                form_field(body, "emoji"),
+            ) {
+                let msg_id = msg_id.trim().to_string();
+                let emoji = emoji.trim().to_string();
+                if !msg_id.is_empty() && !emoji.is_empty() {
+                    let _ = chat::react(&msg_id, &emoji, Some(room_label));
+                }
+            }
+            // Return 204 No Content — caller uses fetch(), not form submit
+            let resp = "HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+            let mut s = stream;
+            let _ = s.write_all(resp.as_bytes());
+        }
+
         _ => {
             send_response(
                 stream,
@@ -651,5 +797,53 @@ mod tests {
         let html = render_404("no-such-room");
         assert!(html.contains("404"));
         assert!(html.contains("no-such-room"));
+    }
+
+    #[test]
+    fn test_render_message_has_action_buttons() {
+        let msg = serde_json::json!({
+            "id": "aabbccdd",
+            "from": "alice",
+            "ts": 1700000000u64,
+            "text": "hello",
+        });
+        let html = render_message_html(&msg, "bob", "room-id");
+        // Reply button
+        assert!(html.contains("setReply("));
+        assert!(html.contains("↩"));
+        // Emoji picker trigger
+        assert!(html.contains("openEmojiPicker("));
+        assert!(html.contains("sendReact("));
+    }
+
+    #[test]
+    fn test_render_message_data_text_attr() {
+        let msg = serde_json::json!({
+            "id": "112233",
+            "from": "alice",
+            "ts": 1700000000u64,
+            "text": "Search Me",
+        });
+        let html = render_message_html(&msg, "bob", "room-id");
+        // data-text attribute should contain lowercase text for client-side search
+        assert!(html.contains("data-text=\"search me\""));
+    }
+
+    #[test]
+    fn test_parse_request_react() {
+        let raw = "POST /collab/react HTTP/1.1\r\nContent-Length: 30\r\n\r\nmessage_id=abc123&emoji=%F0%9F%91%8D";
+        let (method, path, body) = parse_request(raw);
+        assert_eq!(method, "POST");
+        assert_eq!(path, "/collab/react");
+        assert!(body.contains("message_id=abc123"));
+        let emoji = form_field(body, "emoji").unwrap_or_default();
+        assert_eq!(url_decode(&emoji.replace('+', " ")), "👍");
+    }
+
+    #[test]
+    fn test_form_field_react_fields() {
+        let body = "message_id=abc123&emoji=%F0%9F%94%A5";
+        assert_eq!(form_field(body, "message_id"), Some("abc123".to_string()));
+        assert!(form_field(body, "emoji").is_some());
     }
 }
