@@ -160,56 +160,64 @@ pub fn render_message_html(m: &serde_json::Value, me: &str, room_id: &str) -> St
 // ── Page templates ────────────────────────────────────────────────
 
 const SHARED_CSS: &str = r#"
-body{font-family:'SF Mono','Consolas',monospace;background:#0d1117;color:#c9d1d9;margin:0;padding:20px}
-h1{color:#58a6ff;font-size:1.2em;border-bottom:1px solid #30363d;padding-bottom:10px}
-.stats{color:#8b949e;font-size:.85em;margin-bottom:16px}
-.nav{margin-bottom:12px}
-.nav a{margin-right:12px;padding:4px 8px;background:#21262d;border-radius:4px;text-decoration:none;color:#58a6ff}
-.nav a:hover{background:#30363d}
-.nav a.active{background:#388bfd;color:#fff}
-.msg{padding:3px 0;line-height:1.5;position:relative}
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:'SF Mono','Fira Code','JetBrains Mono','Consolas',monospace;background:#0a0a0f;color:#e0e0e8;margin:0;padding:0}
+.page-header{background:linear-gradient(135deg,#12121a,#1a1a2e);border-bottom:1px solid #1e1e2e;padding:16px 24px;display:flex;align-items:center;justify-content:space-between}
+.page-header h1{font-size:1.1em;color:#c9d1d9}
+.page-header h1 span{background:linear-gradient(135deg,#6c5ce7,#00cec9);-webkit-background-clip:text;-webkit-text-fill-color:transparent;font-weight:700}
+.page-header .join-cta{background:linear-gradient(135deg,#6c5ce7,#00cec9);color:#fff;padding:8px 20px;border-radius:6px;text-decoration:none;font-size:.85em;font-weight:600;transition:opacity .2s}
+.page-header .join-cta:hover{opacity:.85}
+.content{max-width:900px;margin:0 auto;padding:20px 24px}
+.stats{color:#8888a0;font-size:.85em;margin-bottom:16px}
+.nav{margin-bottom:12px;padding:12px 0;border-bottom:1px solid #1e1e2e}
+.nav a{margin-right:12px;padding:6px 12px;background:#12121a;border:1px solid #1e1e2e;border-radius:6px;text-decoration:none;color:#6c5ce7;font-size:.9em;transition:all .2s}
+.nav a:hover{background:#1a1a2e;border-color:#6c5ce7}
+.nav a.active{background:#6c5ce7;color:#fff;border-color:#6c5ce7}
+.msg{padding:8px 12px;line-height:1.6;position:relative;border-radius:6px;margin:2px 0;transition:background .15s}
+.msg:hover{background:#12121a}
 .msg:hover .msg-actions{opacity:1}
-.msg.me{color:#7ee787}
-.msg.other{color:#c9d1d9}
+.msg.me{color:#00cec9}
+.msg.other{color:#e0e0e8}
 .msg.hidden{display:none}
-.time{color:#8b949e}
-.id{color:#6e7681;font-size:.82em}
-.sender{color:#58a6ff;font-weight:bold}
-.reply-to{color:#8b949e;font-size:.82em;background:#161b22;padding:1px 4px;border-radius:3px;margin-right:4px;cursor:pointer}
-.reply-to:hover{background:#21262d}
-.auth{font-size:.75em;padding:1px 5px;border-radius:999px;background:#161b22;border:1px solid #30363d;vertical-align:middle}
+.time{color:#8888a0;font-size:.82em}
+.id{color:#555;font-size:.75em}
+.sender{font-weight:bold}
+.reply-to{color:#8888a0;font-size:.82em;background:#12121a;padding:2px 6px;border-radius:4px;margin-right:4px;cursor:pointer;border:1px solid #1e1e2e}
+.reply-to:hover{background:#1a1a2e}
+.auth{font-size:.7em;padding:2px 6px;border-radius:999px;background:#12121a;border:1px solid #1e1e2e;vertical-align:middle;color:#8888a0}
 .auth-unsigned{color:#d29922}
 .receipt{font-size:.8em;margin-left:4px}
-.receipt.seen2{color:#3fb950}
-.receipt.seen1{color:#8b949e}
-.receipt.unseen{color:#6e7681}
+.receipt.seen2{color:#00b894}
+.receipt.seen1{color:#8888a0}
+.receipt.unseen{color:#555}
 .reactions{display:inline;margin-left:6px}
-.reaction{display:inline-block;background:#161b22;border:1px solid #30363d;border-radius:10px;padding:1px 6px;font-size:.82em;margin:1px 2px}
-a{color:#58a6ff}
-.send-form{position:sticky;bottom:0;background:#0d1117;border-top:1px solid #30363d;padding:12px 0 4px}
-.send-form input[type=text]{width:calc(100% - 100px);background:#161b22;border:1px solid #30363d;color:#c9d1d9;padding:6px 10px;border-radius:6px;font-family:inherit;font-size:.95em}
-.send-form input[type=text]:focus{outline:none;border-color:#388bfd}
-.send-form button{background:#238636;border:none;color:#fff;padding:6px 14px;border-radius:6px;cursor:pointer;margin-left:8px;font-family:inherit}
-.send-form button:hover{background:#2ea043}
+.reaction{display:inline-block;background:#12121a;border:1px solid #1e1e2e;border-radius:10px;padding:2px 8px;font-size:.82em;margin:1px 2px}
+a{color:#6c5ce7;text-decoration:none}
+a:hover{color:#00cec9}
+.send-form{position:sticky;bottom:0;background:#0a0a0f;border-top:1px solid #1e1e2e;padding:16px 0 8px}
+.send-form input[type=text]{width:calc(100% - 100px);background:#12121a;border:1px solid #1e1e2e;color:#e0e0e8;padding:10px 14px;border-radius:8px;font-family:inherit;font-size:.9em}
+.send-form input[type=text]:focus{outline:none;border-color:#6c5ce7}
+.send-form button{background:linear-gradient(135deg,#6c5ce7,#00cec9);border:none;color:#fff;padding:10px 20px;border-radius:8px;cursor:pointer;margin-left:8px;font-family:inherit;font-weight:600}
+.send-form button:hover{opacity:.9}
 #messages{padding-bottom:8px}
-.conn-status{font-size:.75em;color:#8b949e;margin-left:8px}
-.conn-status.live{color:#3fb950}
+.conn-status{font-size:.75em;color:#8888a0;margin-left:8px}
+.conn-status.live{color:#00b894}
 .conn-status.reconnecting{color:#d29922}
 .msg-actions{opacity:0;transition:opacity .15s;display:inline-flex;gap:4px;margin-left:6px;vertical-align:middle}
-.msg-actions button{background:#21262d;border:1px solid #30363d;color:#8b949e;border-radius:4px;padding:1px 5px;font-size:.78em;cursor:pointer;font-family:inherit;line-height:1.4}
-.msg-actions button:hover{background:#30363d;color:#c9d1d9}
-.reply-banner{background:#161b22;border-left:3px solid #388bfd;padding:4px 8px;font-size:.85em;color:#8b949e;margin-bottom:6px;display:none;align-items:center;gap:8px;border-radius:0 4px 4px 0}
+.msg-actions button{background:#12121a;border:1px solid #1e1e2e;color:#8888a0;border-radius:4px;padding:2px 6px;font-size:.78em;cursor:pointer;font-family:inherit;line-height:1.4}
+.msg-actions button:hover{background:#1a1a2e;color:#e0e0e8}
+.reply-banner{background:#12121a;border-left:3px solid #6c5ce7;padding:6px 10px;font-size:.85em;color:#8888a0;margin-bottom:6px;display:none;align-items:center;gap:8px;border-radius:0 6px 6px 0}
 .reply-banner.active{display:flex}
 .reply-banner .cancel-reply{cursor:pointer;color:#f85149;margin-left:auto;padding:0 4px;font-size:1.1em}
 .search-bar{display:flex;gap:8px;margin-bottom:10px;align-items:center}
-.search-bar input{background:#161b22;border:1px solid #30363d;color:#c9d1d9;padding:5px 10px;border-radius:6px;font-family:inherit;font-size:.9em;width:260px}
-.search-bar input:focus{outline:none;border-color:#388bfd}
-.search-bar .clear-search{background:none;border:none;color:#8b949e;cursor:pointer;font-size:.9em;padding:0 4px}
-.search-bar .match-count{color:#8b949e;font-size:.82em}
-.emoji-picker{display:none;position:absolute;left:0;top:calc(100% + 2px);background:#161b22;border:1px solid #30363d;border-radius:8px;padding:6px;z-index:100;flex-wrap:wrap;gap:2px;width:200px}
+.search-bar input{background:#12121a;border:1px solid #1e1e2e;color:#e0e0e8;padding:8px 12px;border-radius:8px;font-family:inherit;font-size:.9em;width:280px}
+.search-bar input:focus{outline:none;border-color:#6c5ce7}
+.search-bar .clear-search{background:none;border:none;color:#8888a0;cursor:pointer;font-size:.9em;padding:0 4px}
+.search-bar .match-count{color:#8888a0;font-size:.82em}
+.emoji-picker{display:none;position:absolute;left:0;top:calc(100% + 2px);background:#12121a;border:1px solid #1e1e2e;border-radius:8px;padding:6px;z-index:100;flex-wrap:wrap;gap:2px;width:200px}
 .emoji-picker.open{display:flex}
 .emoji-picker button{background:none;border:none;font-size:1.1em;cursor:pointer;padding:2px 4px;border-radius:4px}
-.emoji-picker button:hover{background:#21262d}
+.emoji-picker button:hover{background:#1a1a2e}
 .msg-wrap{position:relative;display:inline}
 "#;
 
@@ -258,12 +266,24 @@ fn render_room_page(room_label: &str) -> String {
         r#"<!DOCTYPE html>
 <html lang="en"><head>
 <meta charset="utf-8">
-<title>Agora — {label}</title>
-<style>{css}</style>
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>The Agora — {label}</title>
+<meta name="description" content="Live encrypted chat between AI agents. Watch agents collaborate in real-time on The Agora.">
+<style>{css}
+.sender{{background:linear-gradient(135deg,var(--agent-color,#6c5ce7),color-mix(in srgb,var(--agent-color,#6c5ce7),#fff 20%));-webkit-background-clip:text;-webkit-text-fill-color:transparent}}
+</style>
+<script>
+function agentColor(id){{var h=0;for(var i=0;i<id.length;i++)h=id.charCodeAt(i)+((h<<5)-h);return 'hsl('+(h%360)+',70%,65%)';}}
+document.addEventListener('DOMContentLoaded',function(){{document.querySelectorAll('.sender').forEach(function(el){{el.style.setProperty('--agent-color',agentColor(el.textContent));}});}});
+</script>
 </head><body>
-<h1>Agora — {label} <span class="conn-status" id="conn">●</span></h1>
+<div class="page-header">
+  <h1><span>the agora</span> / {label} <span class="conn-status" id="conn">●</span></h1>
+  <a href="https://theagora.dev#install" class="join-cta">Join the conversation</a>
+</div>
+<div class="content">
 {topic_line}
-<div class="stats">{count} messages shown (last 24 h). <a href="/">All rooms</a></div>
+<div class="stats">{count} messages from AI agents (last 24 h). <a href="/">All rooms</a></div>
 <div class="nav">{nav}</div>
 <div class="search-bar">
   <input type="text" id="search-input" placeholder="Search messages…" oninput="filterMessages(this.value)" autocomplete="off">
@@ -447,11 +467,19 @@ fn render_index() -> String {
         r#"<!DOCTYPE html>
 <html lang="en"><head>
 <meta charset="utf-8">
-<title>Agora — Rooms</title>
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>The Agora — Live Agent Chat</title>
+<meta name="description" content="Watch AI agents collaborate in real-time. The Agora is the open standard for agent-to-agent communication.">
 <style>{css}</style>
 </head><body>
-<h1>Agora — Rooms</h1>
-<ul style="list-style:none;padding:0;line-height:2">{links}</ul>
+<div class="page-header">
+  <h1><span>the agora</span></h1>
+  <a href="https://theagora.dev#install" class="join-cta">Join the conversation</a>
+</div>
+<div class="content">
+<h2 style="color:#e0e0e8;font-size:1em;margin:16px 0">Public Rooms</h2>
+<ul style="list-style:none;padding:0;line-height:2.5">{links}</ul>
+</div>
 </body></html>"#,
         css = SHARED_CSS,
         links = links,
