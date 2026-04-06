@@ -1029,8 +1029,250 @@ pub fn credit_spend(amount: i64, reason: &str, room_label: Option<&str>) -> Resu
     let me = store::get_agent_id();
     let balance = store::credit_balance(&room.room_id, &me);
     if balance < amount { return Err(format!("Insufficient credits: have {balance}, need {amount}")); }
-    store::credit_add(&room.room_id, &me, -amount, reason);
+    store::ledger_add(&room.room_id, &me, -amount, reason, "credit", "self");
     Ok(balance - amount)
+}
+
+fn default_bet_resolver(room: &store::RoomEntry, me: &str) -> Option<String> {
+    if store::is_admin(&room.room_id, me) {
+        return Some(me.to_string());
+    }
+    room.members
+        .iter()
+        .find(|m| m.role == store::Role::Admin)
+        .map(|m| m.agent_id.clone())
+}
+
+fn new_bet_id() -> String {
+    let mut bytes = [0u8; 4];
+    ring::rand::SecureRandom::fill(&ring::rand::SystemRandom::new(), &mut bytes).expect("RNG");
+    hex::encode(bytes)
+}
+
+fn find_bet_index(bets: &[store::BetMarket], bet_id: &str) -> Result<usize, String> {
+    let mut matches = bets
+        .iter()
+        .enumerate()
+        .filter(|(_, bet)| bet.id == bet_id || bet.id.starts_with(bet_id))
+        .map(|(idx, _)| idx);
+    let Some(first) = matches.next() else {
+        return Err(format!("Bet '{bet_id}' not found."));
+    };
+    if matches.next().is_some() {
+        return Err(format!("Bet id '{bet_id}' is ambiguous."));
+    }
+    Ok(first)
+}
+
+pub fn bet_place(
+    question: &str,
+    stake: i64,
+    side: &str,
+    resolver: Option<&str>,
+    room_label: Option<&str>,
+) -> Result<(String, i64), String> {
+    let question = question.trim();
+    if question.is_empty() {
+        return Err("Question cannot be empty.".to_string());
+    }
+    if stake <= 0 {
+        return Err("Stake must be positive.".to_string());
+    }
+
+    let side = match side {
+        "yes" | "no" => side,
+        _ => return Err("Outcome side must be 'yes' or 'no'.".to_string()),
+    };
+
+    let room = resolve_room(room_label)?;
+    let me = store::get_agent_id();
+    let balance = store::credit_balance(&room.room_id, &me);
+    if balance < stake {
+        return Err(format!("Insufficient credits: have {balance}, need {stake}"));
+    }
+
+    let mut bets = store::load_bets(&room.room_id);
+    let idx = if let Some(idx) = bets.iter().position(|bet| {
+        bet.resolved_at.is_none() && bet.question.eq_ignore_ascii_case(question)
+    }) {
+        if let Some(existing) = bets[idx].positions.iter().find(|p| p.agent_id == me) {
+            if existing.side != side {
+                return Err("You already bet the opposite side on this market.".to_string());
+            }
+        }
+        if let Some(explicit_resolver) = resolver {
+            if bets[idx].resolver != explicit_resolver {
+                return Err(format!(
+                    "Bet already exists with resolver '{}'.",
+                    bets[idx].resolver
+                ));
+            }
+        }
+        idx
+    } else {
+        let resolver = resolver
+            .map(|s| s.to_string())
+            .or_else(|| default_bet_resolver(&room, &me))
+            .ok_or_else(|| "No resolver available. Pass --resolver or ensure the room has an admin.".to_string())?;
+        bets.push(store::BetMarket {
+            id: new_bet_id(),
+            question: question.to_string(),
+            created_by: me.clone(),
+            resolver,
+            created_at: store::now_ts(),
+            resolved_at: None,
+            resolved_by: None,
+            outcome: None,
+            positions: vec![],
+        });
+        bets.len() - 1
+    };
+
+    let bet_id = bets[idx].id.clone();
+    bets[idx].positions.push(store::BetPosition {
+        agent_id: me.clone(),
+        side: side.to_string(),
+        stake,
+        created_at: store::now_ts(),
+    });
+    let yes_total: i64 = bets[idx]
+        .positions
+        .iter()
+        .filter(|p| p.side == "yes")
+        .map(|p| p.stake)
+        .sum();
+    let no_total: i64 = bets[idx]
+        .positions
+        .iter()
+        .filter(|p| p.side == "no")
+        .map(|p| p.stake)
+        .sum();
+
+    store::save_bets(&room.room_id, &bets);
+    let remaining = credit_spend(
+        stake,
+        &format!("bet:{bet_id}:{side}:{question}"),
+        Some(&room.label),
+    )?;
+
+    let room_key = crypto::derive_room_key(&room.secret, &room.room_id);
+    let env = make_envelope(
+        &format!(
+            "[bet {bet_id}] {me} staked {stake} on {side}: {question} (yes {yes_total}, no {no_total}, resolver {})",
+            bets[idx].resolver
+        ),
+        None,
+    );
+    let encrypted = encrypt_envelope(&env, &room_key, &room.room_id);
+    transport::publish(&room.room_id, &encrypted);
+    store::save_message(&room.room_id, &env);
+
+    Ok((bet_id, remaining))
+}
+
+pub fn bet_resolve(
+    bet_id: &str,
+    outcome: &str,
+    room_label: Option<&str>,
+) -> Result<String, String> {
+    let outcome = match outcome {
+        "yes" | "no" => outcome,
+        _ => return Err("Outcome must be 'yes' or 'no'.".to_string()),
+    };
+    let room = resolve_room(room_label)?;
+    let me = store::get_agent_id();
+    let mut bets = store::load_bets(&room.room_id);
+    let idx = find_bet_index(&bets, bet_id)?;
+    let bet = bets
+        .get_mut(idx)
+        .ok_or_else(|| format!("Bet '{bet_id}' not found."))?;
+    if bet.resolved_at.is_some() {
+        return Err(format!("Bet '{}' is already resolved.", bet.id));
+    }
+    if me != bet.resolver && !store::is_admin(&room.room_id, &me) {
+        return Err(format!(
+            "Only resolver '{}' or a room admin can resolve this bet.",
+            bet.resolver
+        ));
+    }
+
+    let winning_total: i64 = bet
+        .positions
+        .iter()
+        .filter(|p| p.side == outcome)
+        .map(|p| p.stake)
+        .sum();
+    let losing_total: i64 = bet
+        .positions
+        .iter()
+        .filter(|p| p.side != outcome)
+        .map(|p| p.stake)
+        .sum();
+
+    let result_text = if winning_total == 0 || losing_total == 0 {
+        for pos in &bet.positions {
+            store::ledger_add(
+                &room.room_id,
+                &pos.agent_id,
+                pos.stake,
+                &format!("bet:{} void refund", bet.id),
+                "credit",
+                "bet",
+            );
+        }
+        bet.outcome = Some("void".to_string());
+        format!(
+            "[bet {}] void: no opposing side, refunded {} credits",
+            bet.id,
+            bet.positions.iter().map(|p| p.stake).sum::<i64>()
+        )
+    } else {
+        let mut winners: Vec<_> = bet
+            .positions
+            .iter()
+            .filter(|p| p.side == outcome)
+            .cloned()
+            .collect();
+        let loser_pool = losing_total;
+        let total_winner_stake: i64 = winners.iter().map(|p| p.stake).sum();
+        let mut distributed = 0i64;
+        let winners_len = winners.len();
+        for (idx, pos) in winners.iter_mut().enumerate() {
+            let share = if idx + 1 == winners_len {
+                loser_pool - distributed
+            } else {
+                loser_pool * pos.stake / total_winner_stake
+            };
+            distributed += share;
+            let payout = pos.stake + share;
+            store::ledger_add(
+                &room.room_id,
+                &pos.agent_id,
+                payout,
+                &format!("bet:{} resolved {}", bet.id, outcome),
+                "credit",
+                "bet",
+            );
+        }
+        bet.outcome = Some(outcome.to_string());
+        format!(
+            "[bet {}] resolved {} by {}: winners {} credits, losers {} credits",
+            bet.id, outcome, me, winning_total + losing_total, losing_total
+        )
+    };
+
+    bet.resolved_at = Some(store::now_ts());
+    bet.resolved_by = Some(me);
+    let bet_id = bet.id.clone();
+    store::save_bets(&room.room_id, &bets);
+
+    let room_key = crypto::derive_room_key(&room.secret, &room.room_id);
+    let env = make_envelope(&result_text, None);
+    let encrypted = encrypt_envelope(&env, &room_key, &room.room_id);
+    transport::publish(&room.room_id, &encrypted);
+    store::save_message(&room.room_id, &env);
+
+    Ok(bet_id)
 }
 
 // ── Capability Gaps (v0.7 typed schema from plaza design) ──────
@@ -2978,9 +3220,9 @@ pub fn download_file(file_id: &str, out_path: Option<&str>, room_label: Option<&
 mod tests {
     use base64::Engine;
     use super::{
-        allow_incoming_message, annotate_soma_message, count_invite_redemptions_in_envs,
-        decrypt_payload, discover, discovery_decay_weight, enforce_outbound_plaza_rate_limit,
-        encrypt_envelope,
+        allow_incoming_message, annotate_soma_message, bet_place, bet_resolve,
+        count_invite_redemptions_in_envs, credit_grant, decrypt_payload, discover,
+        discovery_decay_weight, enforce_outbound_plaza_rate_limit, encrypt_envelope,
         infer_soma_subject_path, ingest_auxiliary_event, list_work_receipts, make_envelope,
         make_invite_redemption, pin, pins, resolve_room, seed_plaza_rate_limit_state,
         send_watch_heartbeat, should_display_message, signing_message_bytes, soma_churn_decay,
@@ -3227,6 +3469,59 @@ mod tests {
         assert_eq!(receipt.auth, "verified");
         assert_eq!(receipt.witness_ids, vec!["receipt-admin".to_string()]);
         assert_eq!(receipt.task_hash.len(), 64);
+    }
+
+    #[test]
+    fn bet_resolution_preserves_total_credits() {
+        let _guard = store::test_env_lock().lock().unwrap();
+        let home = std::env::temp_dir().join(format!(
+            "agora-bet-test-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&home).unwrap();
+        unsafe {
+            std::env::set_var("HOME", &home);
+            std::env::set_var("AGORA_AGENT_ID", "bet-admin");
+        }
+
+        let room = store::add_room("ag-bet", "secret-bet", "bets", Role::Admin);
+        store::set_active_room("bets");
+        credit_grant("alice", 100, "seed", None).unwrap();
+        credit_grant("bob", 100, "seed", None).unwrap();
+
+        unsafe { std::env::set_var("AGORA_AGENT_ID", "alice"); }
+        let (bet_id, alice_remaining) =
+            bet_place("PR #80 passes CI", 40, "yes", None, None).unwrap();
+        assert_eq!(alice_remaining, 60);
+
+        unsafe { std::env::set_var("AGORA_AGENT_ID", "bob"); }
+        let (same_id, bob_remaining) =
+            bet_place("PR #80 passes CI", 60, "no", None, None).unwrap();
+        assert_eq!(same_id, bet_id);
+        assert_eq!(bob_remaining, 40);
+        assert_eq!(store::credit_balance(&room.room_id, "alice"), 60);
+        assert_eq!(store::credit_balance(&room.room_id, "bob"), 40);
+
+        unsafe { std::env::set_var("AGORA_AGENT_ID", "bet-admin"); }
+        bet_resolve(&bet_id, "yes", None).unwrap();
+
+        assert_eq!(store::credit_balance(&room.room_id, "alice"), 160);
+        assert_eq!(store::credit_balance(&room.room_id, "bob"), 40);
+        assert_eq!(
+            store::credit_balance(&room.room_id, "alice")
+                + store::credit_balance(&room.room_id, "bob"),
+            200
+        );
+
+        let bets = store::load_bets(&room.room_id);
+        assert_eq!(bets.len(), 1);
+        assert_eq!(bets[0].outcome.as_deref(), Some("yes"));
+        assert!(bets[0].resolved_at.is_some());
+
+        let _ = std::fs::remove_dir_all(home);
     }
 
     #[test]

@@ -695,6 +695,26 @@ pub fn save_ledger(room_id: &str, ledger: &[CreditEntry]) {
     let _ = fs::write(dir.join("ledger.json"), serde_json::to_string_pretty(ledger).unwrap());
 }
 
+pub fn ledger_add(
+    room_id: &str,
+    agent_id: &str,
+    amount: i64,
+    reason: &str,
+    ledger_name: &str,
+    verified_by: &str,
+) {
+    let mut ledger = load_ledger(room_id);
+    ledger.push(CreditEntry {
+        agent_id: agent_id.to_string(),
+        amount,
+        reason: reason.to_string(),
+        ts: now(),
+        ledger: ledger_name.to_string(),
+        verified_by: verified_by.to_string(),
+    });
+    save_ledger(room_id, &ledger);
+}
+
 pub fn credit_balance(room_id: &str, agent_id: &str) -> i64 {
     load_ledger(room_id).iter()
         .filter(|e| e.agent_id == agent_id && (e.ledger.is_empty() || e.ledger == "credit"))
@@ -708,21 +728,52 @@ pub fn trust_balance(room_id: &str, agent_id: &str) -> i64 {
 }
 
 pub fn credit_add(room_id: &str, agent_id: &str, amount: i64, reason: &str) {
-    let mut ledger = load_ledger(room_id);
-    ledger.push(CreditEntry {
-        agent_id: agent_id.to_string(), amount, reason: reason.to_string(),
-        ts: now(), ledger: "credit".to_string(), verified_by: "admin".to_string(),
-    });
-    save_ledger(room_id, &ledger);
+    ledger_add(room_id, agent_id, amount, reason, "credit", "admin");
 }
 
 pub fn trust_add(room_id: &str, agent_id: &str, amount: i64, reason: &str, verified_by: &str) {
-    let mut ledger = load_ledger(room_id);
-    ledger.push(CreditEntry {
-        agent_id: agent_id.to_string(), amount, reason: reason.to_string(),
-        ts: now(), ledger: "trust".to_string(), verified_by: verified_by.to_string(),
-    });
-    save_ledger(room_id, &ledger);
+    ledger_add(room_id, agent_id, amount, reason, "trust", verified_by);
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BetPosition {
+    pub agent_id: String,
+    pub side: String,
+    pub stake: i64,
+    pub created_at: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BetMarket {
+    pub id: String,
+    pub question: String,
+    pub created_by: String,
+    pub resolver: String,
+    pub created_at: u64,
+    pub resolved_at: Option<u64>,
+    pub resolved_by: Option<String>,
+    pub outcome: Option<String>,
+    pub positions: Vec<BetPosition>,
+}
+
+pub fn now_ts() -> u64 {
+    now()
+}
+
+pub fn load_bets(room_id: &str) -> Vec<BetMarket> {
+    let path = agora_dir().join("rooms").join(room_id).join("bets.json");
+    if let Ok(data) = fs::read_to_string(&path) {
+        serde_json::from_str(&data).unwrap_or_default()
+    } else {
+        Vec::new()
+    }
+}
+
+pub fn save_bets(room_id: &str, bets: &[BetMarket]) {
+    let dir = agora_dir().join("rooms").join(room_id);
+    ensure_dir(&dir);
+    let data = serde_json::to_string_pretty(bets).unwrap();
+    let _ = fs::write(dir.join("bets.json"), data);
 }
 
 // ── Capability Cards ───────────────────────────────────────────

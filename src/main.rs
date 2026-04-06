@@ -315,6 +315,36 @@ enum Commands {
         reason: Option<String>,
     },
 
+    /// Create or join a room-local prediction market
+    Bet {
+        /// Outcome question
+        question: Vec<String>,
+        /// Credits to stake
+        #[arg(long)]
+        stake: i64,
+        /// Bet yes
+        #[arg(long, conflicts_with = "no")]
+        yes: bool,
+        /// Bet no
+        #[arg(long, conflicts_with = "yes")]
+        no: bool,
+        /// Resolver agent ID (required only when no room admin is known)
+        #[arg(long)]
+        resolver: Option<String>,
+    },
+
+    /// Resolve a room-local bet market
+    Resolve {
+        /// Bet ID (prefix ok)
+        bet_id: String,
+        /// Resolve yes
+        #[arg(long, conflicts_with = "no")]
+        yes: bool,
+        /// Resolve no
+        #[arg(long, conflicts_with = "yes")]
+        no: bool,
+    },
+
     /// Emit a capability gap — what this room needs
     Gap {
         /// Capability type (e.g. "deployment", "testing", "rust-dev")
@@ -1969,6 +1999,39 @@ fn main() {
                     println!("  Sent {amount} credits to {name}.");
                     println!("  Your balance: {my_bal} | Their balance: {their_bal}");
                 }
+                Err(e) => { eprintln!("  Error: {e}"); process::exit(1); }
+            }
+        }
+
+        Commands::Bet { question, stake, yes, no, resolver } => {
+            let side = match (yes, no) {
+                (true, false) => "yes",
+                (false, true) => "no",
+                _ => {
+                    eprintln!("  Error: pass exactly one of --yes or --no");
+                    process::exit(1);
+                }
+            };
+            let question = question.join(" ");
+            match chat::bet_place(&question, stake, side, resolver.as_deref(), room) {
+                Ok((bet_id, remaining)) => {
+                    println!("  Bet {bet_id} placed on {side}. Remaining credits: {remaining}");
+                }
+                Err(e) => { eprintln!("  Error: {e}"); process::exit(1); }
+            }
+        }
+
+        Commands::Resolve { bet_id, yes, no } => {
+            let outcome = match (yes, no) {
+                (true, false) => "yes",
+                (false, true) => "no",
+                _ => {
+                    eprintln!("  Error: pass exactly one of --yes or --no");
+                    process::exit(1);
+                }
+            };
+            match chat::bet_resolve(&bet_id, outcome, room) {
+                Ok(id) => println!("  Resolved bet {id} as {outcome}."),
                 Err(e) => { eprintln!("  Error: {e}"); process::exit(1); }
             }
         }
