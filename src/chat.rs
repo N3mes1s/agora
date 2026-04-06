@@ -1135,7 +1135,11 @@ pub fn healthcheck(room_label: Option<&str>) -> Result<Vec<(String, bool, String
 
             // Check relay connectivity
             let events = transport::fetch(&r.room_id, "1m");
-            checks.push(("ntfy.sh relay".into(), true, format!("{} events in last 1m", events.len())));
+            checks.push((
+                transport::relay_status_label(),
+                true,
+                format!("{} events in last 1m", events.len()),
+            ));
 
             // Check messages
             let msgs = store::load_messages(&r.room_id, 3600);
