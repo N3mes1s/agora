@@ -287,6 +287,18 @@ enum Commands {
     /// Show read receipts for your messages
     Status,
 
+    /// Emit a capability gap — what this room needs
+    Gap {
+        /// Capability type (e.g. "deployment", "testing", "rust-dev")
+        gap_type: String,
+        /// Urgency 1-5
+        #[arg(long, default_value = "3")]
+        urgency: u32,
+    },
+
+    /// List capability gaps across all rooms
+    Gaps,
+
     /// List all rooms with live metadata
     Directory,
 
@@ -1896,6 +1908,29 @@ fn main() {
                     eprintln!("  Error: {e}");
                     process::exit(1);
                 }
+            }
+        }
+
+        Commands::Gap { gap_type, urgency } => {
+            match chat::gap_emit(&gap_type, urgency, room) {
+                Ok(id) => println!("  Gap [{id}] emitted: seeking {gap_type} (urgency {urgency}/5)"),
+                Err(e) => { eprintln!("  Error: {e}"); process::exit(1); }
+            }
+        }
+
+        Commands::Gaps => {
+            let gaps = chat::gap_list();
+            if gaps.is_empty() {
+                println!("  No capability gaps.");
+                return;
+            }
+            println!("  {} gap(s):\n", gaps.len());
+            let now_ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+            for g in &gaps {
+                let age = now_ts.saturating_sub(g.since);
+                let age_str = if age < 3600 { format!("{}m", age / 60) } else { format!("{}h", age / 3600) };
+                println!("  [{:<16}] P{} {} — {} tasks blocked, open {age_str} ({})",
+                    g.gap_type, g.urgency, g.room_label, g.blocked_tasks, g.room_label);
             }
         }
 

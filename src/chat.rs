@@ -944,6 +944,74 @@ pub fn whois(agent_id: &str, room_label: Option<&str>) -> Result<Option<store::A
 
 // ── Room Directory ─────────────────────────────────────────────
 
+// ── Capability Gaps (v0.7 typed schema from plaza design) ──────
+
+/// A typed capability gap signal — what a room needs.
+/// Schema: {type, urgency 1-5, blocked_tasks, since}
+#[derive(Debug, Clone)]
+pub struct CapabilityGap {
+    pub gap_type: String,
+    pub urgency: u32,
+    pub blocked_tasks: usize,
+    pub since: u64,
+    pub room_label: String,
+}
+
+/// Emit a capability gap for the current room.
+pub fn gap_emit(gap_type: &str, urgency: u32, room_label: Option<&str>) -> Result<String, String> {
+    let room = resolve_room(room_label)?;
+    let me = store::get_agent_id();
+    let id = msg_id();
+
+    // Count blocked tasks (open tasks matching this gap type)
+    let tasks = store::load_tasks(&room.room_id);
+    let blocked = tasks.iter().filter(|t| t.status == "open").count();
+
+    let room_key = crypto::derive_room_key(&room.secret, &room.room_id);
+    let env = json!({
+        "v": VERSION, "id": id, "from": me, "ts": now(),
+        "type": "capability_gap",
+        "gap_type": gap_type,
+        "urgency": urgency,
+        "blocked_tasks": blocked,
+        "since": now(),
+        "text": format!("[gap] Seeking: {} (urgency: {}/5, {} tasks blocked)", gap_type, urgency, blocked),
+    });
+    let encrypted = encrypt_envelope(&env, &room_key, &room.room_id);
+    transport::publish(&room.room_id, &encrypted);
+    store::save_message(&room.room_id, &env);
+    Ok(id)
+}
+
+/// List all capability gaps across rooms.
+pub fn gap_list() -> Vec<CapabilityGap> {
+    let rooms = store::load_registry();
+    let mut gaps = Vec::new();
+    for room in &rooms {
+        let msgs = store::load_messages(&room.room_id, 604800);
+        for m in &msgs {
+            if m["type"].as_str() == Some("capability_gap") {
+                gaps.push(CapabilityGap {
+                    gap_type: m["gap_type"].as_str().unwrap_or("?").to_string(),
+                    urgency: m["urgency"].as_u64().unwrap_or(0) as u32,
+                    blocked_tasks: m["blocked_tasks"].as_u64().unwrap_or(0) as usize,
+                    since: m["since"].as_u64().unwrap_or(0),
+                    room_label: room.label.clone(),
+                });
+            }
+        }
+    }
+    // Deduplicate by gap_type+room, keep latest
+    let mut seen = std::collections::HashMap::new();
+    for gap in gaps.into_iter().rev() {
+        let key = format!("{}:{}", gap.room_label, gap.gap_type);
+        seen.entry(key).or_insert(gap);
+    }
+    let mut result: Vec<_> = seen.into_values().collect();
+    result.sort_by(|a, b| b.urgency.cmp(&a.urgency).then(b.blocked_tasks.cmp(&a.blocked_tasks)));
+    result
+}
+
 pub struct RoomInfo {
     pub label: String,
     pub room_id: String,
