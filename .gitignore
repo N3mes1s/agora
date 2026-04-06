@@ -3,3 +3,4 @@ target/
 .agora-env
 .wake/
 .worker-home/
+.agora-secrets

@@ -6,6 +6,7 @@
 mod chat;
 mod crypto;
 mod mcp;
+mod sandbox;
 mod serve;
 mod store;
 mod transport;
@@ -332,6 +333,24 @@ enum Commands {
 
     /// List open bets
     Bets,
+
+    /// Create a sandbox (isolated compute environment)
+    SandboxCreate,
+
+    /// Execute a command in your sandbox
+    SandboxExec {
+        /// Command to run
+        command: Vec<String>,
+    },
+
+    /// Destroy your sandbox
+    SandboxDestroy {
+        /// Session ID
+        session_id: String,
+    },
+
+    /// List available sandbox providers
+    SandboxProviders,
 
     /// Transfer credits to another agent
     Transfer {
@@ -2027,6 +2046,61 @@ fn main() {
                     }
                 }
                 Err(e) => { eprintln!("  Error: {e}"); process::exit(1); }
+            }
+        }
+
+        Commands::SandboxCreate => {
+            let agent_id = store::get_agent_id();
+            match sandbox::create(&agent_id) {
+                Ok(session) => {
+                    println!("  Sandbox created!");
+                    println!("  Provider: {}", session.provider);
+                    println!("  Session:  {}", session.id);
+                    println!("  Run: agora sandbox-exec <command>");
+                    // Save session for later use
+                    let session_file = store::agora_dir().join("sandbox_session.json");
+                    let _ = std::fs::write(&session_file, serde_json::to_string_pretty(&session).unwrap());
+                }
+                Err(e) => { eprintln!("  Error: {e}"); process::exit(1); }
+            }
+        }
+
+        Commands::SandboxExec { command } => {
+            let cmd = command.join(" ");
+            let session_file = store::agora_dir().join("sandbox_session.json");
+            let session: sandbox::SandboxSession = serde_json::from_str(
+                &std::fs::read_to_string(&session_file).unwrap_or_default()
+            ).map_err(|_| "No active sandbox. Run: agora sandbox-create").unwrap();
+            match sandbox::exec(&session.id, &cmd, &session.provider) {
+                Ok(output) => println!("{output}"),
+                Err(e) => { eprintln!("  Error: {e}"); process::exit(1); }
+            }
+        }
+
+        Commands::SandboxDestroy { session_id } => {
+            let session_file = store::agora_dir().join("sandbox_session.json");
+            let session: sandbox::SandboxSession = serde_json::from_str(
+                &std::fs::read_to_string(&session_file).unwrap_or_default()
+            ).unwrap_or_else(|_| sandbox::SandboxSession {
+                id: session_id.clone(), provider: "e2b".to_string(),
+                agent_id: String::new(), created_at: 0, status: "unknown".to_string(),
+            });
+            match sandbox::destroy(&session.id, &session.provider) {
+                Ok(()) => {
+                    let _ = std::fs::remove_file(&session_file);
+                    println!("  Sandbox destroyed.");
+                }
+                Err(e) => { eprintln!("  Error: {e}"); process::exit(1); }
+            }
+        }
+
+        Commands::SandboxProviders => {
+            let p = sandbox::providers();
+            if p.is_empty() {
+                println!("  No sandbox providers configured.");
+                println!("  Set: E2B_TOKEN, DAYTONA_TOKEN, or SPRITES_TOKEN");
+            } else {
+                println!("  Available providers: {}", p.join(", "));
             }
         }
 
