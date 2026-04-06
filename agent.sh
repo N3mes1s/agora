@@ -17,6 +17,53 @@ export AGORA_AGENT_ID="$AGENT_ID"
 
 log() { echo "[$(date '+%H:%M:%S')] $*"; }
 
+required_check_buckets() {
+    local pr_num="$1"
+    local output=""
+    local status=0
+
+    set +e
+    output=$(gh pr checks "$pr_num" --repo "$REPO" --required --json bucket --jq 'if length == 0 then "none" else (map(.bucket) | unique | join(",")) end' 2>/dev/null)
+    status=$?
+    set -e
+
+    if [ "$status" -eq 8 ]; then
+        echo "pending"
+        return 0
+    fi
+    if [ "$status" -ne 0 ]; then
+        echo "error"
+        return 0
+    fi
+    echo "$output"
+}
+
+should_merge_pr() {
+    local is_draft="$1"
+    local merge_state="$2"
+    local review_decision="$3"
+    local check_buckets="$4"
+
+    if [ "$is_draft" = "true" ]; then
+        return 1
+    fi
+
+    case "$merge_state" in
+        CLEAN|HAS_HOOKS) ;;
+        *) return 1 ;;
+    esac
+
+    case "$review_decision" in
+        CHANGES_REQUESTED|REVIEW_REQUIRED) return 1 ;;
+    esac
+
+    case "$check_buckets" in
+        ""|error|pending|*fail*|*cancel*|*skipping*) return 1 ;;
+    esac
+
+    return 0
+}
+
 log "Autonomous agent starting: $AGENT_ID (poll: ${POLL}s)"
 
 # Set profile
@@ -61,14 +108,23 @@ while true; do
         OPEN_PRS=$(gh pr list --repo "$REPO" --state open --json number,title 2>/dev/null || echo "[]")
         if [ "$OPEN_PRS" != "[]" ] && [ -n "$OPEN_PRS" ]; then
             for PR_NUM in $(echo "$OPEN_PRS" | grep -oP '"number":\K\d+' || true); do
-                CHECKS=$(gh pr checks "$PR_NUM" --repo "$REPO" 2>/dev/null || true)
-                if echo "$CHECKS" | grep -q "fail"; then
-                    log "PR #$PR_NUM has failing checks, skipping"
-                elif echo "$CHECKS" | grep -q "pass"; then
-                    log "PR #$PR_NUM CI passes, merging..."
-                    gh pr merge "$PR_NUM" --repo "$REPO" --merge 2>/dev/null && \
-                        $AGORA --room collab send "AutoAgent merged PR #$PR_NUM (CI passed)" 2>/dev/null || true
+                PR_META=$(gh pr view "$PR_NUM" --repo "$REPO" --json isDraft,mergeStateStatus,reviewDecision --jq '[.isDraft, .mergeStateStatus, (.reviewDecision // "")] | @tsv' 2>/dev/null || true)
+                if [ -z "$PR_META" ]; then
+                    log "PR #$PR_NUM metadata unavailable, skipping"
+                    continue
                 fi
+
+                IFS=$'\t' read -r IS_DRAFT MERGE_STATE REVIEW_DECISION <<<"$PR_META"
+                CHECK_BUCKETS=$(required_check_buckets "$PR_NUM")
+
+                if ! should_merge_pr "$IS_DRAFT" "$MERGE_STATE" "$REVIEW_DECISION" "$CHECK_BUCKETS"; then
+                    log "PR #$PR_NUM not ready (draft=$IS_DRAFT merge=$MERGE_STATE review=${REVIEW_DECISION:-none} checks=$CHECK_BUCKETS), skipping"
+                    continue
+                fi
+
+                log "PR #$PR_NUM ready (merge=$MERGE_STATE review=${REVIEW_DECISION:-none} checks=$CHECK_BUCKETS), merging..."
+                gh pr merge "$PR_NUM" --repo "$REPO" --merge 2>/dev/null && \
+                    $AGORA --room collab send "AutoAgent merged PR #$PR_NUM (required checks green)" 2>/dev/null || true
             done
         fi
     fi
