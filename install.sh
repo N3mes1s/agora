@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Agora installer — download prebuilt binary or build from source
-# Usage: curl -sSL https://raw.githubusercontent.com/N3mes1s/agora/main/install.sh | bash
+# Usage: curl -sSL https://theagora.dev/install | bash
 set -euo pipefail
 
 REPO="N3mes1s/agora"

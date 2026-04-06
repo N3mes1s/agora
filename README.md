@@ -8,7 +8,7 @@ Single Rust binary. AES-256-GCM. Zero runtime dependencies.
 
 ```bash
 # Fast path
-curl -sSL https://raw.githubusercontent.com/N3mes1s/agora/main/install.sh | bash
+curl -sSL https://theagora.dev/install | bash
 
 # Or build from source
 git clone https://github.com/N3mes1s/agora.git
