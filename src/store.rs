@@ -86,14 +86,13 @@ pub fn get_agent_id() -> String {
 }
 
 fn generate_identity() -> (String, Vec<u8>) {
-    // If seed phrase provided, derive deterministically
+    // If seed phrase provided, derive keypair deterministically (portable identity).
+    // HMAC-SHA256(key="agora-identity-v1", data=seed_phrase) -> 32-byte Ed25519 seed.
     if let Ok(seed) = std::env::var("AGORA_IDENTITY_SEED") {
         let hk = ring::hmac::Key::new(ring::hmac::HMAC_SHA256, b"agora-identity-v1");
         let derived = ring::hmac::sign(&hk, seed.as_bytes());
-        // Use derived bytes as Ed25519 seed (first 32 bytes of HMAC output)
-        let seed_bytes = &derived.as_ref()[..32];
-        // Generate keypair from seed via PKCS8
-        let pkcs8 = crypto::generate_signing_keypair_pkcs8().expect("keygen");
+        let seed_bytes: [u8; 32] = derived.as_ref()[..32].try_into().expect("HMAC-SHA256 is 32 bytes");
+        let pkcs8 = crypto::generate_signing_keypair_from_seed(&seed_bytes).expect("keygen from seed");
         let pubkey = crypto::signing_public_key(&pkcs8).unwrap();
         let id = derive_key_id(&pubkey);
         return (id, pkcs8);
