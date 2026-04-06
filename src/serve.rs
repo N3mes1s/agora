@@ -3,6 +3,7 @@
 //! Routes:
 //!   GET  /             — room list
 //!   GET  /:room        — room history + live tail + send form
+//!   GET  /:room/thread/:id — thread view rooted at one cached message
 //!   GET  /:room/events — SSE stream (new messages as HTML fragments)
 //!   POST /:room/send   — send a message, redirect back
 
@@ -59,6 +60,10 @@ fn form_field<'a>(body: &'a str, name: &str) -> Option<String> {
     None
 }
 
+fn thread_href(room_label: &str, message_id: &str) -> String {
+    format!("/{room_label}/thread/{message_id}")
+}
+
 // ── Message rendering ────────────────────────────────────────────
 
 fn reaction_badges(room_id: &str, msg_id: &str) -> String {
@@ -101,7 +106,12 @@ fn receipt_mark(room_id: &str, msg_id: &str, me: &str, sender: &str) -> String {
 }
 
 /// Render a single message as an HTML `<div class="msg ...">`.
-pub fn render_message_html(m: &serde_json::Value, me: &str, room_id: &str) -> String {
+pub fn render_message_html(
+    m: &serde_json::Value,
+    me: &str,
+    room_label: &str,
+    room_id: &str,
+) -> String {
     let ts_epoch = m["ts"].as_u64().unwrap_or(0);
     let dt = chrono::DateTime::from_timestamp(ts_epoch as i64, 0)
         .map(|d| d.format("%H:%M:%S").to_string())
@@ -109,14 +119,18 @@ pub fn render_message_html(m: &serde_json::Value, me: &str, room_id: &str) -> St
     let from = html_escape(m["from"].as_str().unwrap_or("?"));
     let text = html_escape(m["text"].as_str().unwrap_or(""));
     let mid = m["id"].as_str().unwrap_or("?");
+    let mid_attr = html_escape(mid);
     let mid_short = &mid[..6.min(mid.len())];
     let class = if from.as_str() == me { "msg me" } else { "msg other" };
 
-    let reply_badge = if let Some(rt) = m["reply_to"].as_str() {
+    let reply_to = m["reply_to"].as_str().unwrap_or("");
+    let reply_to_attr = html_escape(reply_to);
+    let reply_badge = if !reply_to.is_empty() {
         format!(
-            r#"<span class="reply-to" title="reply to {}">↩ {}</span> "#,
-            html_escape(rt),
-            &rt[..6.min(rt.len())]
+            r#"<a class="reply-to" href="{href}" title="reply to {full}">↩ {short}</a> "#,
+            href = html_escape(&thread_href(room_label, reply_to)),
+            full = reply_to_attr,
+            short = &reply_to[..6.min(reply_to.len())]
         )
     } else {
         String::new()
@@ -134,6 +148,7 @@ pub fn render_message_html(m: &serde_json::Value, me: &str, room_id: &str) -> St
     } else {
         format!(r#"<div class="reactions">{reactions}</div>"#)
     };
+    let thread_link = html_escape(&thread_href(room_label, mid));
 
     let actions = format!(
         r#"<span class="msg-actions"><span class="msg-wrap"><button onclick="openEmojiPicker(this,'{mid_short}')" title="React">😀</button><div class="emoji-picker" id="ep-{mid_short}">
@@ -145,14 +160,18 @@ pub fn render_message_html(m: &serde_json::Value, me: &str, room_id: &str) -> St
 <button onclick="sendReact('{mid_short}','👀')">👀</button>
 <button onclick="sendReact('{mid_short}','🎉')">🎉</button>
 <button onclick="sendReact('{mid_short}','🤔')">🤔</button>
-</div></span><button onclick="setReply('{mid_short}','{from_raw}')" title="Reply">↩</button></span>"#,
+</div></span><button onclick="setReply('{mid_short}','{from_raw}')" title="Reply">↩</button><a class="thread-link" href="{thread_link}" title="Open thread">Thread</a></span>"#,
         mid_short = mid_short,
         from_raw = m["from"].as_str().unwrap_or("?"),
+        thread_link = thread_link,
     );
 
     format!(
-        r#"<div class="{class}" id="m-{mid_short}" data-text="{text_lower}"><span class="time">{dt}</span> <span class="id">[{mid_short}]</span> <span class="sender">{from}</span> {auth_badge}: {reply_badge}<span class="text">{text}</span>{receipt}{reactions_row}{actions}</div>"#,
+        r#"<div class="{class}" id="m-{mid_short}" data-id="{mid_attr}" data-ts="{ts_epoch}" data-reply-to="{reply_to_attr}" data-text="{text_lower}"><span class="time">{dt}</span> <span class="id">[{mid_short}]</span> <span class="sender">{from}</span> {auth_badge}: {reply_badge}<span class="text">{text}</span>{receipt}{reactions_row}{actions}</div>"#,
         auth_badge = auth_badge,
+        mid_attr = mid_attr,
+        ts_epoch = ts_epoch,
+        reply_to_attr = reply_to_attr,
         text_lower = html_escape(&m["text"].as_str().unwrap_or("").to_lowercase()),
     )
 }
@@ -205,7 +224,8 @@ a:hover{color:#00cec9}
 .conn-status.reconnecting{color:#d29922}
 .msg-actions{opacity:0;transition:opacity .15s;display:inline-flex;gap:4px;margin-left:6px;vertical-align:middle}
 .msg-actions button{background:#12121a;border:1px solid #1e1e2e;color:#8888a0;border-radius:4px;padding:2px 6px;font-size:.78em;cursor:pointer;font-family:inherit;line-height:1.4}
-.msg-actions button:hover{background:#1a1a2e;color:#e0e0e8}
+.msg-actions a{background:#12121a;border:1px solid #1e1e2e;color:#8888a0;border-radius:4px;padding:2px 6px;font-size:.78em;line-height:1.4}
+.msg-actions button:hover,.msg-actions a:hover{background:#1a1a2e;color:#e0e0e8}
 .reply-banner{background:#12121a;border-left:3px solid #6c5ce7;padding:6px 10px;font-size:.85em;color:#8888a0;margin-bottom:6px;display:none;align-items:center;gap:8px;border-radius:0 6px 6px 0}
 .reply-banner.active{display:flex}
 .reply-banner .cancel-reply{cursor:pointer;color:#f85149;margin-left:auto;padding:0 4px;font-size:1.1em}
@@ -219,6 +239,11 @@ a:hover{color:#00cec9}
 .emoji-picker button{background:none;border:none;font-size:1.1em;cursor:pointer;padding:2px 4px;border-radius:4px}
 .emoji-picker button:hover{background:#1a1a2e}
 .msg-wrap{position:relative;display:inline}
+.thread-shell{display:grid;gap:16px}
+.thread-note{color:#8888a0;font-size:.85em;line-height:1.6;background:#12121a;border:1px solid #1e1e2e;border-radius:10px;padding:12px 14px}
+.thread-stack{display:grid;gap:8px}
+.thread-item{margin-left:calc(var(--depth,0) * 18px);padding-left:12px;border-left:1px solid #1e1e2e}
+.thread-item.root{margin-left:0;padding-left:0;border-left:none}
 @media(max-width:600px){
   .page-header{padding:12px 16px;flex-wrap:wrap;gap:8px}
   .page-header h1{font-size:.95em}
@@ -236,6 +261,7 @@ a:hover{color:#00cec9}
   .send-form button{padding:8px 12px;font-size:.85em}
   .msg-actions{display:none}
   .stats{font-size:.8em}
+  .thread-item{margin-left:calc(var(--depth,0) * 12px);padding-left:8px}
 }
 "#;
 
@@ -270,7 +296,7 @@ fn render_room_page(room_label: &str) -> String {
 
     let mut rows = String::new();
     for m in &msgs {
-        rows.push_str(&render_message_html(m, &me, &room.room_id));
+        rows.push_str(&render_message_html(m, &me, room_label, &room.room_id));
         rows.push('\n');
     }
 
@@ -430,6 +456,10 @@ document.addEventListener('DOMContentLoaded',function(){{document.querySelectorA
       if (q && el.dataset && el.dataset.text && !el.dataset.text.includes(q)) {{
         el.classList.add('hidden');
       }}
+      var msgTs = parseInt((el.dataset && el.dataset.ts) || '0', 10);
+      if (msgTs > lastTs) {{
+        lastTs = msgTs;
+      }}
       messages.appendChild(el);
       if (!el.classList.contains('hidden')) {{
         el.scrollIntoView({{behavior: 'smooth', block: 'end'}});
@@ -475,6 +505,172 @@ document.addEventListener('DOMContentLoaded',function(){{document.querySelectorA
 </div>"#, label = html_escape(room_label))
         },
     )
+}
+
+fn render_thread_page(room_label: &str, message_id: &str) -> Result<String, String> {
+    let room = store::find_room(room_label)
+        .ok_or_else(|| format!("Room '{room_label}' not found."))?;
+    let me = store::get_agent_id();
+    let items = chat::thread(message_id, Some(room_label))?;
+    if items.is_empty() {
+        return Err("No cached thread messages found.".to_string());
+    }
+
+    let root_id = items
+        .first()
+        .and_then(|item| item.env["id"].as_str())
+        .ok_or_else(|| "Thread root is missing an ID.".to_string())?;
+    let root_id_js = serde_json::to_string(root_id).unwrap_or_else(|_| "\"\"".to_string());
+    let room_label_js =
+        serde_json::to_string(room_label).unwrap_or_else(|_| "\"\"".to_string());
+    let thread_count = items.len();
+    let reply_count = thread_count.saturating_sub(1);
+    let last_ts = items
+        .iter()
+        .map(|item| item.env["ts"].as_u64().unwrap_or(0))
+        .max()
+        .unwrap_or(0);
+
+    let mut rows = String::new();
+    for item in &items {
+        let msg_id = item.env["id"].as_str().unwrap_or("?");
+        let root_class = if item.depth == 0 { " root" } else { "" };
+        rows.push_str(&format!(
+            r#"<div class="thread-item{root_class}" data-id="{msg_id}" data-depth="{depth}" style="--depth:{depth}">{html}</div>"#,
+            msg_id = html_escape(msg_id),
+            depth = item.depth,
+            html = render_message_html(&item.env, &me, room_label, &room.room_id),
+        ));
+        rows.push('\n');
+    }
+
+    let topic_line = room
+        .topic
+        .as_deref()
+        .map(|t| format!(r#"<div class="stats">Topic: {}</div>"#, html_escape(t)))
+        .unwrap_or_default();
+
+    Ok(format!(
+        r#"<!DOCTYPE html>
+<html lang="en"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>The Agora — {label} / thread</title>
+<meta name="description" content="Follow a live Agora message thread and watch replies arrive in real time.">
+<style>{css}
+.sender{{background:linear-gradient(135deg,var(--agent-color,#6c5ce7),color-mix(in srgb,var(--agent-color,#6c5ce7),#fff 20%));-webkit-background-clip:text;-webkit-text-fill-color:transparent}}
+</style>
+<script>
+function agentColor(id){{var h=0;for(var i=0;i<id.length;i++)h=id.charCodeAt(i)+((h<<5)-h);return 'hsl('+(h%360)+',70%,65%)';}}
+document.addEventListener('DOMContentLoaded',function(){{document.querySelectorAll('.sender').forEach(function(el){{el.style.setProperty('--agent-color',agentColor(el.textContent));}});}});
+</script>
+</head><body>
+<div class="page-header">
+  <h1><span>the agora</span> / {label} / thread <span class="conn-status" id="conn">●</span></h1>
+  <a href="https://theagora.dev#install" class="join-cta">Join the conversation</a>
+</div>
+<div class="content">
+{topic_line}
+<div class="stats">{thread_count} message(s) in this thread, {reply_count} repl{reply_suffix}. <a href="/{label}">Back to {label}</a></div>
+<div class="nav">{nav}</div>
+<div class="thread-shell">
+  <div class="thread-note">This view stays scoped to one conversation branch. New room traffic is ignored unless it replies to a message already in this thread.</div>
+  <div class="thread-stack" id="thread-messages">
+{rows}</div>
+</div>
+<script>
+(function(){{
+  var lastTs = {last_ts};
+  var rootId = {root_id_js};
+  var roomLabel = {room_label_js};
+  var conn = document.getElementById('conn');
+  var threadMessages = document.getElementById('thread-messages');
+  var knownDepths = new Map();
+
+  threadMessages.querySelectorAll('.thread-item').forEach(function(node) {{
+    var id = node.dataset.id;
+    var depth = parseInt(node.dataset.depth || '0', 10);
+    if (id) {{
+      knownDepths.set(id, depth);
+    }}
+  }});
+
+  function wrapThreadMessage(el, depth) {{
+    var node = document.createElement('div');
+    node.className = 'thread-item' + (depth === 0 ? ' root' : '');
+    node.dataset.id = (el.dataset && el.dataset.id) || '';
+    node.dataset.depth = String(depth);
+    node.style.setProperty('--depth', depth);
+    node.appendChild(el);
+    return node;
+  }}
+
+  function appendIfThread(el) {{
+    if (!el || !el.dataset) return;
+    var id = el.dataset.id || '';
+    var parentId = el.dataset.replyTo || '';
+    var msgTs = parseInt(el.dataset.ts || '0', 10);
+    if (msgTs > lastTs) {{
+      lastTs = msgTs;
+    }}
+    if (!id || knownDepths.has(id)) return;
+
+    var depth = -1;
+    if (id === rootId) {{
+      depth = 0;
+    }} else if (parentId && knownDepths.has(parentId)) {{
+      depth = (knownDepths.get(parentId) || 0) + 1;
+    }}
+    if (depth < 0) return;
+
+    var node = wrapThreadMessage(el, depth);
+    threadMessages.appendChild(node);
+    knownDepths.set(id, depth);
+    node.scrollIntoView({{behavior: 'smooth', block: 'nearest'}});
+  }}
+
+  function connectSSE() {{
+    var url = '/' + encodeURIComponent(roomLabel) + '/events?since=' + lastTs;
+    var es = new EventSource(url);
+    conn.textContent = '● connecting';
+    conn.className = 'conn-status reconnecting';
+
+    es.onopen = function() {{
+      conn.textContent = '● live';
+      conn.className = 'conn-status live';
+    }};
+
+    es.onmessage = function(evt) {{
+      if (!evt.data || evt.data === 'ping') return;
+      var div = document.createElement('div');
+      div.innerHTML = evt.data;
+      appendIfThread(div.firstElementChild || div);
+    }};
+
+    es.onerror = function() {{
+      conn.textContent = '● reconnecting';
+      conn.className = 'conn-status reconnecting';
+      es.close();
+      setTimeout(connectSSE, 4000);
+    }};
+  }}
+
+  connectSSE();
+}})();
+</script>
+</body></html>"#,
+        label = html_escape(room_label),
+        css = SHARED_CSS,
+        topic_line = topic_line,
+        thread_count = thread_count,
+        reply_count = reply_count,
+        reply_suffix = if reply_count == 1 { "y" } else { "ies" },
+        nav = render_nav(room_label),
+        rows = rows,
+        last_ts = last_ts,
+        root_id_js = root_id_js,
+        room_label_js = room_label_js,
+    ))
 }
 
 fn render_index() -> String {
@@ -613,7 +809,7 @@ fn handle_sse(mut stream: TcpStream, room_label: String, since_ts: u64) {
             .unwrap_or(last_ts);
 
         for msg in &new_msgs {
-            let html = render_message_html(msg, &me, &room.room_id);
+            let html = render_message_html(msg, &me, &room_label, &room.room_id);
             // SSE data field must be single line — collapse newlines.
             let html_flat = html.replace('\n', "");
             let event = format!("data: {html_flat}\n\n");
@@ -651,6 +847,21 @@ fn handle_connection(stream: TcpStream) {
             let label = (*room_label).to_string();
             handle_sse(stream, label, since_ts);
         }
+
+        // GET /:room/thread/:id — thread view
+        ("GET", [room_label, "thread", message_id]) => match render_thread_page(room_label, message_id) {
+            Ok(page) => send_response(stream, "200 OK", "text/html; charset=utf-8", &page),
+            Err(err) => send_response(
+                stream,
+                "404 Not Found",
+                "text/html; charset=utf-8",
+                &format!(
+                    r#"<!DOCTYPE html><html><body style="font-family:monospace;background:#0d1117;color:#c9d1d9;padding:20px"><h1>Thread not found</h1><p>{}</p><p><a href="/{}" style="color:#58a6ff">Back to room</a></p></body></html>"#,
+                    html_escape(&err),
+                    html_escape(room_label),
+                ),
+            ),
+        },
 
         // GET /:room — room history page
         ("GET", [room_label]) => {
@@ -812,7 +1023,7 @@ mod tests {
             "ts": 1700000000u64,
             "text": "Hello <world>",
         });
-        let html = render_message_html(&msg, "bob", "test-room-id");
+        let html = render_message_html(&msg, "bob", "collab", "test-room-id");
         assert!(html.contains("alice"));
         assert!(html.contains("Hello &lt;world&gt;"));
         assert!(html.contains("abcde"));
@@ -827,7 +1038,7 @@ mod tests {
             "ts": 1700000000u64,
             "text": "my message",
         });
-        let html = render_message_html(&msg, "me", "room-id");
+        let html = render_message_html(&msg, "me", "collab", "room-id");
         assert!(html.contains("class=\"msg me\""));
     }
 
@@ -840,9 +1051,10 @@ mod tests {
             "text": "reply text",
             "reply_to": "deadbeef",
         });
-        let html = render_message_html(&msg, "bob", "room-id");
+        let html = render_message_html(&msg, "bob", "collab", "room-id");
         assert!(html.contains("↩"));
         assert!(html.contains("deadbe"));
+        assert!(html.contains("/collab/thread/deadbeef"));
     }
 
     #[test]
@@ -868,13 +1080,14 @@ mod tests {
             "ts": 1700000000u64,
             "text": "hello",
         });
-        let html = render_message_html(&msg, "bob", "room-id");
+        let html = render_message_html(&msg, "bob", "collab", "room-id");
         // Reply button
         assert!(html.contains("setReply("));
         assert!(html.contains("↩"));
         // Emoji picker trigger
         assert!(html.contains("openEmojiPicker("));
         assert!(html.contains("sendReact("));
+        assert!(html.contains(">Thread<"));
     }
 
     #[test]
@@ -885,9 +1098,57 @@ mod tests {
             "ts": 1700000000u64,
             "text": "Search Me",
         });
-        let html = render_message_html(&msg, "bob", "room-id");
+        let html = render_message_html(&msg, "bob", "collab", "room-id");
         // data-text attribute should contain lowercase text for client-side search
         assert!(html.contains("data-text=\"search me\""));
+        assert!(html.contains("data-id=\"112233\""));
+        assert!(html.contains("data-ts=\"1700000000\""));
+    }
+
+    #[test]
+    fn test_render_thread_page_contains_thread_rows() {
+        let _guard = store::test_env_lock().lock().unwrap();
+        let home = std::env::temp_dir().join(format!(
+            "agora-serve-thread-test-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&home).unwrap();
+        unsafe {
+            std::env::set_var("HOME", &home);
+            std::env::set_var("AGORA_AGENT_ID", "serve-test");
+        }
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let room = store::add_room("ag-thread-test", "secret", "collab", store::Role::Admin);
+        store::save_message(&room.room_id, &serde_json::json!({
+            "id": "root1234",
+            "from": "alice",
+            "ts": now,
+            "text": "root",
+            "v": "4.0",
+        }));
+        store::save_message(&room.room_id, &serde_json::json!({
+            "id": "reply5678",
+            "from": "bob",
+            "ts": now + 1,
+            "text": "reply",
+            "reply_to": "root1234",
+            "v": "4.0",
+        }));
+
+        let html = render_thread_page("collab", "root1234").unwrap();
+        assert!(html.contains("message(s) in this thread"));
+        assert!(html.contains("root"));
+        assert!(html.contains("reply"));
+        assert!(html.contains("/collab"));
+        assert!(html.contains("thread-item root"));
+        assert!(html.contains("roomLabel = \"collab\""));
     }
 
     #[test]
