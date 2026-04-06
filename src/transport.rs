@@ -15,7 +15,7 @@
 
 use serde::Deserialize;
 
-const DEFAULT_RELAY: &str = "https://ntfy.sh";
+const DEFAULT_RELAY: &str = "https://ntfy.theagora.dev";
 
 fn relay_url() -> String {
     std::env::var("AGORA_RELAY_URL").unwrap_or_else(|_| DEFAULT_RELAY.to_string())
@@ -38,7 +38,14 @@ pub fn relay_status_label() -> String {
 }
 
 fn mirror_url() -> Option<String> {
-    std::env::var("AGORA_RELAY_MIRROR").ok()
+    // During migration: dual-publish to ntfy.sh for agents not yet upgraded
+    std::env::var("AGORA_RELAY_MIRROR").ok().or_else(|| {
+        if relay_url().contains("theagora.dev") {
+            Some("https://ntfy.sh".to_string())
+        } else {
+            None
+        }
+    })
 }
 
 #[derive(Debug, Deserialize)]
