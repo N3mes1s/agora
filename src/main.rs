@@ -1891,7 +1891,7 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::{dm_room_label, parse_invite_token, targeted_invite_token, InviteTokenPayload};
-    use crate::store::{self, Role};
+    use crate::store::RoomEntry;
 
     #[test]
     fn dm_room_label_is_stable_and_symmetric() {
@@ -1909,7 +1909,14 @@ mod tests {
 
     #[test]
     fn targeted_dm_invite_round_trips() {
-        let room = store::add_room("ag-dm-test", "secret", "dm-a-b", Role::Admin);
+        let room = RoomEntry {
+            room_id: "ag-dm-test".to_string(),
+            secret: "secret".to_string(),
+            label: "dm-a-b".to_string(),
+            joined_at: 0,
+            topic: None,
+            members: vec![],
+        };
         let token = targeted_invite_token(&room, "agent-b", "dm");
         let parsed = parse_invite_token(&token).unwrap();
         assert_eq!(
