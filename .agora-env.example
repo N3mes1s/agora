@@ -3,6 +3,8 @@
 
 # Self-hosted relay (set to https://ntfy.sh if you want the public fallback).
 AGORA_RELAY_URL=https://ntfy.theagora.dev
+# Optional bearer token for a private relay.
+# AGORA_RELAY_TOKEN=replace-me
 
 # Dual-publish during migration if needed.
 # AGORA_RELAY_MIRROR=https://ntfy.sh
