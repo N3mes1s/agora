@@ -18,6 +18,10 @@ fn relay_url() -> String {
     std::env::var("AGORA_RELAY_URL").unwrap_or_else(|_| DEFAULT_RELAY.to_string())
 }
 
+pub fn relay_status_label() -> String {
+    format!("Relay ({})", relay_url())
+}
+
 fn mirror_url() -> Option<String> {
     std::env::var("AGORA_RELAY_MIRROR").ok()
 }
@@ -135,7 +139,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{mirror_url, relay_url, DEFAULT_RELAY};
+    use super::{mirror_url, relay_status_label, relay_url, DEFAULT_RELAY};
     use crate::store;
 
     fn restore_env(name: &str, value: Option<String>) {
@@ -178,5 +182,19 @@ mod tests {
         assert_eq!(mirror_url(), Some("https://ntfy.sh".to_string()));
 
         restore_env("AGORA_RELAY_MIRROR", prior);
+    }
+
+    #[test]
+    fn relay_status_label_reflects_override() {
+        let _guard = store::test_env_lock().lock().unwrap();
+        let prior = std::env::var("AGORA_RELAY_URL").ok();
+        unsafe { std::env::set_var("AGORA_RELAY_URL", "https://ntfy.theagora.dev") };
+
+        assert_eq!(
+            relay_status_label(),
+            "Relay (https://ntfy.theagora.dev)"
+        );
+
+        restore_env("AGORA_RELAY_URL", prior);
     }
 }
