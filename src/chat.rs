@@ -53,6 +53,14 @@ struct SomaVolatility {
     effective_confidence: Option<f64>,
 }
 
+#[derive(Debug, Clone)]
+pub struct DiscoveredCapabilityCard {
+    pub room_label: String,
+    pub room_id: String,
+    pub card: store::AgentCapabilityCard,
+    pub overlap: Vec<String>,
+}
+
 fn now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -132,6 +140,10 @@ fn is_reaction(env: &serde_json::Value) -> bool {
     env["type"].as_str() == Some("reaction")
 }
 
+fn is_capability_card(env: &serde_json::Value) -> bool {
+    env["type"].as_str() == Some("card")
+}
+
 fn make_invite_redemption(
     invite_id: &str,
     invite_created_by: Option<&str>,
@@ -155,7 +167,12 @@ fn is_invite_redeem(env: &serde_json::Value) -> bool {
 }
 
 fn is_system_msg(env: &serde_json::Value) -> bool {
-    is_heartbeat(env) || is_receipt(env) || is_file_msg(env) || is_reaction(env) || is_invite_redeem(env)
+    is_heartbeat(env)
+        || is_receipt(env)
+        || is_file_msg(env)
+        || is_reaction(env)
+        || is_invite_redeem(env)
+        || is_capability_card(env)
 }
 
 #[derive(Default)]
@@ -311,6 +328,24 @@ fn ingest_auxiliary_event(room_id: &str, env: &serde_json::Value) {
         return;
     }
 
+    if is_capability_card(env) {
+        let capabilities = env["card_capabilities"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|v| v.as_str().map(|s| s.to_string()))
+            .collect();
+        let card = store::AgentCapabilityCard {
+            agent_id: from.to_string(),
+            capabilities,
+            summary: env["card_summary"].as_str().map(|s| s.to_string()),
+            updated_at: env["ts"].as_u64().unwrap_or(0),
+            auth: env["_auth"].as_str().unwrap_or("unsigned").to_string(),
+        };
+        store::upsert_capability_card(room_id, &card);
+        return;
+    }
+
     if is_reaction(env) {
         if let (Some(target), Some(emoji)) = (env["target_id"].as_str(), env["emoji"].as_str()) {
             store::add_reaction(room_id, target, from, emoji);
@@ -319,7 +354,11 @@ fn ingest_auxiliary_event(room_id: &str, env: &serde_json::Value) {
 }
 
 fn should_display_message(env: &serde_json::Value) -> bool {
-    !is_heartbeat(env) && !is_invite_redeem(env) && !is_receipt(env) && !is_reaction(env)
+    !is_heartbeat(env)
+        && !is_invite_redeem(env)
+        && !is_receipt(env)
+        && !is_reaction(env)
+        && !is_capability_card(env)
 }
 
 /// Update last_seen for the sender of a message.
@@ -856,6 +895,73 @@ pub fn set_profile(name: Option<&str>, role: Option<&str>, room_label: Option<&s
 pub fn whois(agent_id: &str, room_label: Option<&str>) -> Result<Option<store::AgentProfile>, String> {
     let room = resolve_room(room_label)?;
     Ok(store::get_profile(&room.room_id, agent_id))
+}
+
+// ── Capability Cards ───────────────────────────────────────────
+
+pub fn card_set(capabilities: &[String], description: Option<&str>, room_label: Option<&str>) -> Result<(), String> {
+    let room = resolve_room(room_label)?;
+    let me = store::get_agent_id();
+    let card = store::CapabilityCard {
+        agent_id: me.clone(), capabilities: capabilities.to_vec(),
+        available: true, description: description.map(|s| s.to_string()), updated_at: now(),
+    };
+    store::save_card(&card);
+    let room_key = crypto::derive_room_key(&room.secret, &room.room_id);
+    let env = json!({
+        "v": VERSION, "id": msg_id(), "from": me, "ts": now(),
+        "type": "capability_card", "capabilities": card.capabilities,
+        "available": card.available, "description": card.description,
+        "text": format!("[card] {} — capabilities: {}", me, card.capabilities.join(", ")),
+    });
+    let encrypted = encrypt_envelope(&env, &room_key, &room.room_id);
+    transport::publish(&room.room_id, &encrypted);
+    store::save_message(&room.room_id, &env);
+    Ok(())
+}
+
+pub fn card_show(agent_id: Option<&str>, room_label: Option<&str>) -> Result<Option<store::CapabilityCard>, String> {
+    if agent_id.is_none() { return Ok(store::load_card()); }
+    let room = resolve_room(room_label)?;
+    let cards = store::load_peer_cards(&room.room_id);
+    Ok(cards.into_iter().find(|c| c.agent_id == agent_id.unwrap()))
+}
+
+pub fn discover(need: &str, room_label: Option<&str>) -> Result<Vec<store::CapabilityCard>, String> {
+    let need_lower = need.to_lowercase();
+    let needs: Vec<&str> = need_lower.split(',').map(|s| s.trim()).collect();
+    let rooms = if let Some(label) = room_label {
+        vec![resolve_room(Some(label))?]
+    } else {
+        store::load_registry()
+    };
+    let mut results = Vec::new();
+    for room in &rooms {
+        for card in store::load_peer_cards(&room.room_id) {
+            let matches = needs.iter().all(|n| card.capabilities.iter().any(|c| c.to_lowercase().contains(n)));
+            if matches && !results.iter().any(|r: &store::CapabilityCard| r.agent_id == card.agent_id) {
+                results.push(card);
+            }
+        }
+    }
+    results.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+    Ok(results)
+}
+
+pub fn process_card_message(room_id: &str, msg: &serde_json::Value) {
+    if msg["type"].as_str() != Some("capability_card") { return; }
+    let agent_id = msg["from"].as_str().unwrap_or("").to_string();
+    if agent_id.is_empty() { return; }
+    let caps: Vec<String> = msg["capabilities"].as_array()
+        .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+        .unwrap_or_default();
+    let card = store::CapabilityCard {
+        agent_id, capabilities: caps,
+        available: msg["available"].as_bool().unwrap_or(true),
+        description: msg["description"].as_str().map(String::from),
+        updated_at: msg["ts"].as_u64().unwrap_or(0),
+    };
+    store::save_peer_card(room_id, &card);
 }
 
 // ── SOMA — Shared Observable Memory for Agents ─────────────────

@@ -287,6 +287,27 @@ enum Commands {
     /// Show read receipts for your messages
     Status,
 
+    /// Set your capability card and publish it
+    Card {
+        /// Comma-separated capabilities (e.g. "rust,python,kubernetes")
+        capabilities: String,
+        /// Optional description
+        #[arg(long)]
+        description: Option<String>,
+    },
+
+    /// Show an agent's capability card
+    CardShow {
+        /// Agent ID (default: yours)
+        agent_id: Option<String>,
+    },
+
+    /// Discover agents by capability
+    Discover {
+        /// Comma-separated needs (e.g. "python,ML")
+        need: String,
+    },
+
     /// SOMA: assert a belief about a subject
     SomaAssert {
         /// Subject (e.g. "src/crypto.rs:encrypt")
@@ -1822,6 +1843,54 @@ fn main() {
                     eprintln!("  Error: {e}");
                     process::exit(1);
                 }
+            }
+        }
+
+        Commands::Card { capabilities, description } => {
+            let caps: Vec<String> = capabilities.split(',').map(|s| s.trim().to_string()).collect();
+            match chat::card_set(&caps, description.as_deref(), room) {
+                Ok(()) => {
+                    println!("  Card published: {}", caps.join(", "));
+                    if let Some(desc) = &description {
+                        println!("  Description: {desc}");
+                    }
+                }
+                Err(e) => { eprintln!("  Error: {e}"); process::exit(1); }
+            }
+        }
+
+        Commands::CardShow { agent_id } => {
+            match chat::card_show(agent_id.as_deref(), room) {
+                Ok(Some(card)) => {
+                    let name = resolve_display_name(&card.agent_id);
+                    println!("  {name}");
+                    println!("  Capabilities: {}", card.capabilities.join(", "));
+                    if let Some(desc) = &card.description {
+                        println!("  Description: {desc}");
+                    }
+                    println!("  Available: {}", if card.available { "yes" } else { "no" });
+                }
+                Ok(None) => println!("  No card found."),
+                Err(e) => { eprintln!("  Error: {e}"); process::exit(1); }
+            }
+        }
+
+        Commands::Discover { need } => {
+            match chat::discover(&need, room) {
+                Ok(agents) => {
+                    if agents.is_empty() {
+                        println!("  No agents found matching: {need}");
+                        return;
+                    }
+                    println!("  {} agent(s) matching '{need}':\n", agents.len());
+                    for card in &agents {
+                        let name = resolve_display_name(&card.agent_id);
+                        let desc = card.description.as_deref().unwrap_or("");
+                        println!("  {name} — {}", card.capabilities.join(", "));
+                        if !desc.is_empty() { println!("    {desc}"); }
+                    }
+                }
+                Err(e) => { eprintln!("  Error: {e}"); process::exit(1); }
             }
         }
 
