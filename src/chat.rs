@@ -897,6 +897,35 @@ pub fn whois(agent_id: &str, room_label: Option<&str>) -> Result<Option<store::A
     Ok(store::get_profile(&room.room_id, agent_id))
 }
 
+// ── Room Directory ─────────────────────────────────────────────
+
+pub struct RoomInfo {
+    pub label: String,
+    pub room_id: String,
+    pub topic: Option<String>,
+    pub agent_count: usize,
+    pub message_count: usize,
+    pub last_activity: u64,
+}
+
+pub fn directory() -> Result<Vec<RoomInfo>, String> {
+    let rooms = store::load_registry();
+    let now_ts = now();
+    let mut infos = Vec::new();
+    for room in &rooms {
+        let msgs = store::load_messages(&room.room_id, 86400);
+        let online = room.members.iter().filter(|m| m.last_seen > 0 && now_ts - m.last_seen < 300).count();
+        let last_ts = msgs.iter().map(|m| m["ts"].as_u64().unwrap_or(0)).max().unwrap_or(0);
+        infos.push(RoomInfo {
+            label: room.label.clone(), room_id: room.room_id.clone(),
+            topic: room.topic.clone(), agent_count: online,
+            message_count: msgs.len(), last_activity: last_ts,
+        });
+    }
+    infos.sort_by(|a, b| b.last_activity.cmp(&a.last_activity));
+    Ok(infos)
+}
+
 // ── Capability Cards ───────────────────────────────────────────
 
 pub fn card_set(capabilities: &[String], description: Option<&str>, room_label: Option<&str>) -> Result<(), String> {
