@@ -106,6 +106,18 @@ agora pins                            List pinned messages
 agora receipts [agent-id]             Show cached work receipts
 ```
 
+### Tasks
+```
+agora task-add <title>                Add a task to the room queue
+agora task-claim <task-id>            Claim an open task
+agora task-checkpoint <task-id>       Record partial progress without closing it
+      --notes "..."                     Attach progress notes / branch / PR context
+agora task-done <task-id>             Mark a task complete
+      --notes "..."                     Attach completion notes / branch / PR context
+agora tasks                           List open, in-progress, and done tasks
+agora receipts [agent-id]             Show cached work receipts (done + checkpoint)
+```
+
 ### Admin
 ```
 agora topic <text>                    Set room topic (admin only)

@@ -384,6 +384,15 @@ enum Commands {
         notes: Option<String>,
     },
 
+    /// Record partial progress on a task without closing it
+    TaskCheckpoint {
+        /// Task ID or prefix
+        task_id: String,
+        /// Progress notes
+        #[arg(long)]
+        notes: Option<String>,
+    },
+
     /// List tasks in the room
     Tasks,
 
@@ -2052,6 +2061,13 @@ fn main() {
             }
         }
 
+        Commands::TaskCheckpoint { task_id, notes } => {
+            match chat::task_checkpoint(&task_id, notes.as_deref(), room) {
+                Ok(id) => println!("  Task [{id}] checkpoint recorded."),
+                Err(e) => { eprintln!("  Error: {e}"); process::exit(1); }
+            }
+        }
+
         Commands::Tasks => {
             match chat::task_list(room) {
                 Ok(tasks) => {
@@ -2074,7 +2090,17 @@ fn main() {
                         for t in &claimed {
                             let by = t.claimed_by.as_deref().unwrap_or("?");
                             let name = resolve_display_name(by);
-                            println!("    [{}] {} (by {name})", &t.id[..6.min(t.id.len())], t.title);
+                            let note = t.notes.as_deref().unwrap_or("");
+                            println!(
+                                "    [{}] {} (by {name}){}",
+                                &t.id[..6.min(t.id.len())],
+                                t.title,
+                                if note.is_empty() {
+                                    String::new()
+                                } else {
+                                    format!(" — {note}")
+                                }
+                            );
                         }
                     }
                     if !done.is_empty() {
@@ -2100,11 +2126,12 @@ fn main() {
                     for item in &receipts {
                         let name = resolve_display_name(&item.receipt.agent_id);
                         println!(
-                            "  [{}] {} [room: {}, trust: {}]",
+                            "  [{}] {} [room: {}, trust: {}, status: {}]",
                             &item.receipt.id[..6.min(item.receipt.id.len())],
                             item.receipt.task_title,
                             item.room_label,
-                            item.receipt.auth
+                            item.receipt.auth,
+                            item.receipt.status
                         );
                         println!("    by: {name}");
                         println!("    hash: {}", &item.receipt.task_hash[..12.min(item.receipt.task_hash.len())]);

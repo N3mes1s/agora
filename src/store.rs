@@ -686,6 +686,8 @@ pub struct WorkReceipt {
     pub task_id: String,
     pub task_title: String,
     pub agent_id: String,
+    #[serde(default = "default_receipt_status")]
+    pub status: String,
     #[serde(default)]
     pub notes: Option<String>,
     pub task_hash: String,
@@ -698,6 +700,10 @@ pub struct WorkReceipt {
 
 fn default_receipt_auth() -> String {
     "unsigned".to_string()
+}
+
+fn default_receipt_status() -> String {
+    "done".to_string()
 }
 
 pub fn load_work_receipts(room_id: &str) -> Vec<WorkReceipt> {
