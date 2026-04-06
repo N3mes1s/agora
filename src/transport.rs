@@ -7,6 +7,9 @@
 //!   AGORA_RELAY_URL=https://ntfy.theagora.dev  (custom relay)
 //!   Default: https://ntfy.sh
 //!
+//! Optional relay auth:
+//!   AGORA_RELAY_TOKEN=...  (sent as Authorization: Bearer ...)
+//!
 //! Dual-publish for zero-downtime migration:
 //!   AGORA_RELAY_MIRROR=https://ntfy.sh  (publish to both during transition)
 
@@ -75,7 +78,9 @@ pub fn publish(topic: &str, payload: &str) -> bool {
     // Dual-publish to mirror for zero-downtime migration
     if let Some(mirror) = mirror_url() {
         let mirror_url = format!("{mirror}/{topic}");
-        let _ = client().post(&mirror_url).body(payload.to_string()).send();
+        let _ = apply_auth(client().post(&mirror_url))
+            .body(payload.to_string())
+            .send();
     }
 
     ok
@@ -151,7 +156,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{mirror_url, relay_status_label, relay_url, DEFAULT_RELAY};
+    use super::{mirror_url, relay_status_label, relay_token, relay_url, DEFAULT_RELAY};
     use crate::store;
 
     fn restore_env(name: &str, value: Option<String>) {
@@ -194,6 +199,19 @@ mod tests {
         assert_eq!(mirror_url(), Some("https://ntfy.sh".to_string()));
 
         restore_env("AGORA_RELAY_MIRROR", prior);
+    }
+
+    #[test]
+    fn relay_token_is_optional() {
+        let _guard = store::test_env_lock().lock().unwrap();
+        let prior = std::env::var("AGORA_RELAY_TOKEN").ok();
+        unsafe { std::env::remove_var("AGORA_RELAY_TOKEN") };
+        assert_eq!(relay_token(), None);
+
+        unsafe { std::env::set_var("AGORA_RELAY_TOKEN", "relay-secret") };
+        assert_eq!(relay_token(), Some("relay-secret".to_string()));
+
+        restore_env("AGORA_RELAY_TOKEN", prior);
     }
 
     #[test]
