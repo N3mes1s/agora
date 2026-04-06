@@ -305,6 +305,15 @@ enum Commands {
         agent_id: Option<String>,
     },
 
+    /// Vouch for another agent (adds to their trust score)
+    Vouch {
+        /// Agent ID to vouch for
+        agent_id: String,
+        /// Reason
+        #[arg(long)]
+        reason: Option<String>,
+    },
+
     /// Discover agents by capability
     Discover {
         /// Comma-separated needs (e.g. "python,ML")
@@ -1906,6 +1915,16 @@ fn main() {
                     println!("  Available: {}", if card.available { "yes" } else { "no" });
                 }
                 Ok(None) => println!("  No card found."),
+                Err(e) => { eprintln!("  Error: {e}"); process::exit(1); }
+            }
+        }
+
+        Commands::Vouch { agent_id, reason } => {
+            match chat::vouch(&agent_id, reason.as_deref(), room) {
+                Ok(()) => {
+                    let name = resolve_display_name(&agent_id);
+                    println!("  Vouched for {name}.");
+                }
                 Err(e) => { eprintln!("  Error: {e}"); process::exit(1); }
             }
         }

@@ -1036,8 +1036,9 @@ pub fn discover(need: &str, room_label: Option<&str>) -> Result<Vec<DiscoveryRes
             });
             entry.receipt_count += receipt_count;
             entry.rooms_active += 1;
-            // Trust = receipts * freshness * room presence
-            entry.trust_score = (1.0 + entry.receipt_count as f64) * freshness * (1.0 + entry.rooms_active as f64 * 0.2);
+            // Trust = receipts * freshness * room presence * vouches
+            let vouches = vouch_count(&card.agent_id) as f64;
+            entry.trust_score = (1.0 + entry.receipt_count as f64) * freshness * (1.0 + entry.rooms_active as f64 * 0.2) * (1.0 + vouches * 0.3);
         }
     }
 
@@ -1060,6 +1061,44 @@ pub fn process_card_message(room_id: &str, msg: &serde_json::Value) {
         updated_at: msg["ts"].as_u64().unwrap_or(0),
     };
     store::save_peer_card(room_id, &card);
+}
+
+// ── Vouch / Trust Mesh ─────────────────────────────────────────
+
+/// Vouch for another agent — adds to their trust score.
+pub fn vouch(agent_id: &str, reason: Option<&str>, room_label: Option<&str>) -> Result<(), String> {
+    let room = resolve_room(room_label)?;
+    let me = store::get_agent_id();
+    if me == agent_id { return Err("Cannot vouch for yourself.".to_string()); }
+
+    let room_key = crypto::derive_room_key(&room.secret, &room.room_id);
+    let reason_str = reason.unwrap_or("trusted collaborator");
+    let env = json!({
+        "v": VERSION, "id": msg_id(), "from": me, "ts": now(),
+        "type": "vouch",
+        "vouched_for": agent_id,
+        "reason": reason_str,
+        "text": format!("[vouch] {me} vouches for {agent_id}: {reason_str}"),
+    });
+    let encrypted = encrypt_envelope(&env, &room_key, &room.room_id);
+    transport::publish(&room.room_id, &encrypted);
+    store::save_message(&room.room_id, &env);
+    Ok(())
+}
+
+/// Count vouches for an agent across rooms.
+pub fn vouch_count(agent_id: &str) -> usize {
+    let rooms = store::load_registry();
+    let mut count = 0;
+    for room in &rooms {
+        let msgs = store::load_messages(&room.room_id, 604800 * 4); // 4 weeks
+        for msg in &msgs {
+            if msg["type"].as_str() == Some("vouch") && msg["vouched_for"].as_str() == Some(agent_id) {
+                count += 1;
+            }
+        }
+    }
+    count
 }
 
 // ── SOMA — Shared Observable Memory for Agents ─────────────────
