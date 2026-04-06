@@ -1927,12 +1927,22 @@ fn main() {
                         return;
                     }
                     println!("  {} agent(s) matching '{need}':\n", results.len());
-                    for r in &results {
-                        let name = resolve_display_name(&r.card.agent_id);
-                        let desc = r.card.description.as_deref().unwrap_or("");
-                        let trust = format!("{:.1}", r.trust_score);
-                        println!("  {name} — {} (trust: {trust}, receipts: {}, rooms: {})",
-                            r.card.capabilities.join(", "), r.receipt_count, r.rooms_active);
+                    for hit in &results {
+                        let name = resolve_display_name(&hit.card.agent_id);
+                        let desc = hit.card.description.as_deref().unwrap_or("");
+                        println!(
+                            "  {name} — {} [room: {}, trust: {}, score: {}]",
+                            hit.card.capabilities.join(", "),
+                            hit.room_label,
+                            hit.card.auth,
+                            hit.trust_score
+                        );
+                        println!("    overlap: {}", hit.overlap.join(", "));
+                        println!(
+                            "    receipts: {} total, {} fresh",
+                            hit.receipt_count,
+                            hit.fresh_receipt_count
+                        );
                         if !desc.is_empty() { println!("    {desc}"); }
                     }
                 }

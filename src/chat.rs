@@ -58,6 +58,9 @@ pub struct DiscoveredCapabilityCard {
     pub room_label: String,
     pub card: store::CapabilityCard,
     pub overlap: Vec<String>,
+    pub receipt_count: usize,
+    pub fresh_receipt_count: usize,
+    pub trust_score: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -969,6 +972,42 @@ fn normalize_capability_terms(raw: &str) -> Vec<String> {
         .collect()
 }
 
+#[derive(Debug, Clone, Default)]
+struct ReceiptTrustStats {
+    receipt_count: usize,
+    fresh_receipt_count: usize,
+    trust_points: u64,
+}
+
+fn receipt_decay_points(created_at: u64, now_ts: u64) -> u64 {
+    let age = now_ts.saturating_sub(created_at);
+    if age <= 86_400 {
+        12
+    } else if age <= 7 * 86_400 {
+        8
+    } else if age <= 30 * 86_400 {
+        4
+    } else {
+        1
+    }
+}
+
+fn collect_receipt_trust() -> HashMap<String, ReceiptTrustStats> {
+    let now_ts = now();
+    let mut stats: HashMap<String, ReceiptTrustStats> = HashMap::new();
+    for room in store::load_registry() {
+        for receipt in store::load_work_receipts(&room.room_id) {
+            let entry = stats.entry(receipt.agent_id.clone()).or_default();
+            entry.receipt_count += 1;
+            if now_ts.saturating_sub(receipt.created_at) <= 7 * 86_400 {
+                entry.fresh_receipt_count += 1;
+            }
+            entry.trust_points += receipt_decay_points(receipt.created_at, now_ts);
+        }
+    }
+    stats
+}
+
 pub fn card_set(capabilities: &[String], description: Option<&str>, room_label: Option<&str>) -> Result<(), String> {
     let room = resolve_room(room_label)?;
     let me = store::get_agent_id();
@@ -1014,52 +1053,54 @@ pub fn card_show(agent_id: Option<&str>, room_label: Option<&str>) -> Result<Opt
     Ok(cards.into_iter().find(|c| c.agent_id == agent_id.unwrap()))
 }
 
-/// Agent discovery result with trust score.
-pub struct DiscoveryResult {
-    pub card: store::CapabilityCard,
-    pub trust_score: f64,
-    pub receipt_count: usize,
-    pub rooms_active: usize,
-}
-
-/// Discover agents by capability with trust-weighted ranking.
-/// Trust = receipt_count * freshness_decay * room_presence
-pub fn discover(need: &str, room_label: Option<&str>) -> Result<Vec<DiscoveryResult>, String> {
-    let need_lower = need.to_lowercase();
-    let needs: Vec<&str> = need_lower.split(',').map(|s| s.trim()).collect();
+pub fn discover(need: &str, room_label: Option<&str>) -> Result<Vec<DiscoveredCapabilityCard>, String> {
+    let needs = normalize_capability_terms(need);
+    if needs.is_empty() {
+        return Err("Provide at least one capability via comma-separated terms.".to_string());
+    }
+    let me = store::get_agent_id();
+    let receipt_trust = collect_receipt_trust();
     let rooms = if let Some(label) = room_label {
         vec![resolve_room(Some(label))?]
     } else {
         store::load_registry()
     };
-    let now_ts = now();
-    let mut agent_map: HashMap<String, DiscoveryResult> = HashMap::new();
-
-    for room in &rooms {
-        let receipts = store::load_work_receipts(&room.room_id);
+    let mut results = Vec::new();
+    for room in rooms {
         for card in store::load_peer_cards(&room.room_id) {
-            let matches = needs.iter().all(|n| card.capabilities.iter().any(|c| c.to_lowercase().contains(n)));
-            if !matches { continue; }
-
-            let agent_receipts: Vec<_> = receipts.iter().filter(|r| r.agent_id == card.agent_id).collect();
-            let receipt_count = agent_receipts.len();
-
-            // Freshness: decay score based on last activity (halves every 7 days)
-            let age_secs = now_ts.saturating_sub(card.updated_at) as f64;
-            let freshness = 0.5_f64.powf(age_secs / 604800.0); // 7-day half-life
-
-            let entry = agent_map.entry(card.agent_id.clone()).or_insert_with(|| {
-                DiscoveryResult { card: card.clone(), trust_score: 0.0, receipt_count: 0, rooms_active: 0 }
+            if card.agent_id == me {
+                continue;
+            }
+            let overlap: Vec<String> = needs
+                .iter()
+                .filter(|need| card.capabilities.iter().any(|cap| cap == *need))
+                .cloned()
+                .collect();
+            if overlap.is_empty() {
+                continue;
+            }
+            let trust = receipt_trust.get(&card.agent_id).cloned().unwrap_or_default();
+            let mut trust_score = (overlap.len() as u64) * 100 + trust.trust_points;
+            if card.auth == "verified" {
+                trust_score += 20;
+            }
+            results.push(DiscoveredCapabilityCard {
+                room_label: room.label.clone(),
+                card,
+                overlap,
+                receipt_count: trust.receipt_count,
+                fresh_receipt_count: trust.fresh_receipt_count,
+                trust_score,
             });
-            entry.receipt_count += receipt_count;
-            entry.rooms_active += 1;
-            // Trust = receipts * freshness * room presence
-            entry.trust_score = (1.0 + entry.receipt_count as f64) * freshness * (1.0 + entry.rooms_active as f64 * 0.2);
         }
     }
-
-    let mut results: Vec<DiscoveryResult> = agent_map.into_values().collect();
-    results.sort_by(|a, b| b.trust_score.partial_cmp(&a.trust_score).unwrap_or(std::cmp::Ordering::Equal));
+    results.sort_by(|a, b| {
+        b.trust_score
+            .cmp(&a.trust_score)
+            .then_with(|| b.overlap.len().cmp(&a.overlap.len()))
+            .then_with(|| b.card.updated_at.cmp(&a.card.updated_at))
+            .then_with(|| a.card.agent_id.cmp(&b.card.agent_id))
+    });
     Ok(results)
 }
 
@@ -2726,6 +2767,50 @@ mod tests {
         assert_eq!(matches[0].room_label, "plaza");
         assert_eq!(matches[0].card.agent_id, "peer-agent");
         assert_eq!(matches[0].overlap, vec!["python".to_string(), "ml".to_string()]);
+    }
+
+    #[test]
+    fn discover_prefers_agents_with_recent_cross_room_receipts() {
+        let _guard = store::test_env_lock().lock().unwrap();
+        let (_home, plaza) = setup_plaza_room("discover-self", Role::Admin);
+        let beta = store::add_room("ag-beta", "secret-beta", "beta", Role::Admin);
+        let now_ts = current_ts();
+
+        store::save_peer_card(&plaza.room_id, &store::CapabilityCard {
+            agent_id: "alice".to_string(),
+            capabilities: vec!["python".to_string()],
+            available: true,
+            description: Some("ships backend work".to_string()),
+            updated_at: now_ts,
+            auth: "verified".to_string(),
+        });
+        store::save_peer_card(&plaza.room_id, &store::CapabilityCard {
+            agent_id: "bob".to_string(),
+            capabilities: vec!["python".to_string()],
+            available: true,
+            description: Some("also ships backend work".to_string()),
+            updated_at: now_ts,
+            auth: "verified".to_string(),
+        });
+        store::upsert_work_receipt(&beta.room_id, &store::WorkReceipt {
+            id: "wr-alice".to_string(),
+            task_id: "task-alice".to_string(),
+            task_title: "Fix API".to_string(),
+            agent_id: "alice".to_string(),
+            notes: Some("merged".to_string()),
+            task_hash: "hash-alice".to_string(),
+            witness_ids: vec!["discover-self".to_string()],
+            created_at: now_ts,
+            auth: "verified".to_string(),
+        });
+
+        let hits = discover("python", None).unwrap();
+        assert_eq!(hits.len(), 2);
+        assert_eq!(hits[0].card.agent_id, "alice");
+        assert_eq!(hits[0].receipt_count, 1);
+        assert_eq!(hits[0].fresh_receipt_count, 1);
+        assert_eq!(hits[1].card.agent_id, "bob");
+        assert!(hits[0].trust_score > hits[1].trust_score);
     }
 
     #[test]
