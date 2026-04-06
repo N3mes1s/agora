@@ -5,6 +5,11 @@
 
 set -euo pipefail
 
+WORKDIR="${WAKE_WORKDIR:-$(pwd)}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/agora-env.sh"
+load_agora_env_defaults "$WORKDIR"
+
 INTERVAL_SECS="${WAKE_POLL_SECS:-120}"
 WAKE_BRIDGE="${WAKE_BRIDGE:-./wake-on-agora.sh}"
 WATCH_ROOMS="${AGORA_WAKE_ROOMS:-all joined rooms}"

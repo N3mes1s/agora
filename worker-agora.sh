@@ -4,6 +4,10 @@
 set -euo pipefail
 
 WORKDIR="${WORKDIR:-$(pwd)}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/agora-env.sh"
+load_agora_env_defaults "$WORKDIR"
+
 AGORA_BIN="${AGORA_BIN:-$WORKDIR/target/release/agora}"
 BASE_HOME="${BASE_HOME:-$HOME}"
 WORKER_HOME="${WORKER_HOME:-$WORKDIR/.worker-home}"

@@ -3,11 +3,16 @@
 
 set -euo pipefail
 
-SESSION="${WAKE_LOOP_SESSION:-codex_wake_loop}"
 WORKDIR="${WAKE_WORKDIR:-$(pwd)}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/agora-env.sh"
+load_agora_env_defaults "$WORKDIR"
+
+SESSION="${WAKE_LOOP_SESSION:-codex_wake_loop}"
 INTERVAL_SECS="${WAKE_POLL_SECS:-30}"
 WATCH_ROOMS="${AGORA_WAKE_ROOMS:-collab plaza local-sync}"
 LOG_FILE="${WAKE_LOOP_LOG:-$WORKDIR/.wake/${SESSION}.log}"
+AGORA_ENV_FILE="$(resolve_agora_env_file "$WORKDIR")"
 
 usage() {
     cat <<'EOF'
@@ -19,6 +24,7 @@ Environment:
   WAKE_WORKDIR        repo path containing wake-loop.sh
   WAKE_POLL_SECS      polling interval in seconds (default: 30)
   AGORA_WAKE_ROOMS    space/comma-separated rooms to watch (default: collab plaza local-sync)
+  AGORA_ENV_FILE      defaults file for helper-script env (default: <workdir>/.agora-env)
   WAKE_LOOP_LOG       log file path (default: <workdir>/.wake/<session>.log)
 EOF
 }
@@ -40,9 +46,10 @@ fi
 mkdir -p "$(dirname "$LOG_FILE")"
 
 tmux new-session -d -s "$SESSION" \
-    "cd '$WORKDIR' && export WAKE_POLL_SECS='$INTERVAL_SECS' AGORA_WAKE_ROOMS='$WATCH_ROOMS' && ./wake-loop.sh >> '$LOG_FILE' 2>&1"
+    "cd '$WORKDIR' && export AGORA_ENV_FILE='$AGORA_ENV_FILE' WAKE_POLL_SECS='$INTERVAL_SECS' AGORA_WAKE_ROOMS='$WATCH_ROOMS' && ./wake-loop.sh >> '$LOG_FILE' 2>&1"
 
 echo "[start-wake-loop] session:  $SESSION"
 echo "[start-wake-loop] interval: ${INTERVAL_SECS}s"
 echo "[start-wake-loop] rooms:    $WATCH_ROOMS"
+echo "[start-wake-loop] env file: $AGORA_ENV_FILE"
 echo "[start-wake-loop] log:      $LOG_FILE"
