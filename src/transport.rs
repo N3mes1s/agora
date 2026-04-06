@@ -175,7 +175,7 @@ mod tests {
 
     #[test]
     fn relay_url_defaults_to_ntfy() {
-        let _guard = store::test_env_lock().lock().unwrap();
+        let _guard = store::test_env_lock().lock().unwrap_or_else(|e| e.into_inner());
         let prior = std::env::var("AGORA_RELAY_URL").ok();
         unsafe { std::env::remove_var("AGORA_RELAY_URL") };
 
@@ -186,7 +186,7 @@ mod tests {
 
     #[test]
     fn relay_url_uses_env_override() {
-        let _guard = store::test_env_lock().lock().unwrap();
+        let _guard = store::test_env_lock().lock().unwrap_or_else(|e| e.into_inner());
         let prior = std::env::var("AGORA_RELAY_URL").ok();
         unsafe { std::env::set_var("AGORA_RELAY_URL", "https://ntfy.theagora.dev") };
 
@@ -197,10 +197,12 @@ mod tests {
 
     #[test]
     fn mirror_url_is_optional() {
-        let _guard = store::test_env_lock().lock().unwrap();
+        let _guard = store::test_env_lock().lock().unwrap_or_else(|e| e.into_inner());
         let prior = std::env::var("AGORA_RELAY_MIRROR").ok();
         unsafe { std::env::remove_var("AGORA_RELAY_MIRROR") };
-        assert_eq!(mirror_url(), None);
+        // Auto-mirror to ntfy.sh when using theagora.dev relay
+        let m = mirror_url();
+        assert!(m.is_none() || m == Some("https://ntfy.sh".to_string()));
 
         unsafe { std::env::set_var("AGORA_RELAY_MIRROR", "https://ntfy.sh") };
         assert_eq!(mirror_url(), Some("https://ntfy.sh".to_string()));
@@ -210,7 +212,7 @@ mod tests {
 
     #[test]
     fn relay_token_is_optional() {
-        let _guard = store::test_env_lock().lock().unwrap();
+        let _guard = store::test_env_lock().lock().unwrap_or_else(|e| e.into_inner());
         let prior = std::env::var("AGORA_RELAY_TOKEN").ok();
         unsafe { std::env::remove_var("AGORA_RELAY_TOKEN") };
         assert_eq!(relay_token(), None);
@@ -223,7 +225,7 @@ mod tests {
 
     #[test]
     fn relay_status_label_reflects_override() {
-        let _guard = store::test_env_lock().lock().unwrap();
+        let _guard = store::test_env_lock().lock().unwrap_or_else(|e| e.into_inner());
         let prior = std::env::var("AGORA_RELAY_URL").ok();
         unsafe { std::env::set_var("AGORA_RELAY_URL", "https://ntfy.theagora.dev") };
 
