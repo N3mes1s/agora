@@ -1990,8 +1990,15 @@ fn main() {
                         let name = resolve_display_name(&r.card.agent_id);
                         let desc = r.card.description.as_deref().unwrap_or("");
                         let trust = format!("{:.1}", r.trust_score);
-                        println!("  {name} — {} (trust: {trust}, receipts: {}, rooms: {})",
-                            r.card.capabilities.join(", "), r.receipt_count, r.rooms_active);
+                        let abandonment = format!("{:.0}%", r.abandonment_rate * 100.0);
+                        let volatility = format!("{:.0}%", r.volatility_score * 100.0);
+                        println!(
+                            "  {name} — {} (trust: {trust}, receipts: {}, rooms: {}, stale: {}, abandonment: {abandonment}, volatility: {volatility})",
+                            r.card.capabilities.join(", "),
+                            r.receipt_count,
+                            r.rooms_active,
+                            r.stale_claims,
+                        );
                         if !desc.is_empty() { println!("    {desc}"); }
                     }
                 }
