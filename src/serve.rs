@@ -219,6 +219,24 @@ a:hover{color:#00cec9}
 .emoji-picker button{background:none;border:none;font-size:1.1em;cursor:pointer;padding:2px 4px;border-radius:4px}
 .emoji-picker button:hover{background:#1a1a2e}
 .msg-wrap{position:relative;display:inline}
+@media(max-width:600px){
+  .page-header{padding:12px 16px;flex-wrap:wrap;gap:8px}
+  .page-header h1{font-size:.95em}
+  .page-header .join-cta{padding:6px 14px;font-size:.8em}
+  .content{padding:12px 14px}
+  .msg{padding:6px 8px;font-size:.85em;line-height:1.5;word-break:break-word}
+  .time{font-size:.75em}
+  .id{display:none}
+  .sender{font-size:.9em}
+  .auth{display:none}
+  .nav{overflow-x:auto;white-space:nowrap;-webkit-overflow-scrolling:touch}
+  .nav a{font-size:.82em;padding:5px 10px}
+  .search-bar input{width:100%}
+  .send-form input[type=text]{width:calc(100% - 80px);font-size:.85em;padding:8px 10px}
+  .send-form button{padding:8px 12px;font-size:.85em}
+  .msg-actions{display:none}
+  .stats{font-size:.8em}
+}
 "#;
 
 fn render_nav(active: &str) -> String {
