@@ -286,6 +286,42 @@ fn allow_incoming_message(
     true
 }
 
+fn ingest_auxiliary_event(room_id: &str, env: &serde_json::Value) {
+    let from = env["from"].as_str().unwrap_or("");
+
+    if is_receipt(env) {
+        if let Some(ids) = env["read_ids"].as_array() {
+            let msg_ids: Vec<String> = ids
+                .iter()
+                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                .collect();
+            store::record_receipts(room_id, &msg_ids, from);
+        }
+        return;
+    }
+
+    if env["type"].as_str() == Some("profile") {
+        let profile = store::AgentProfile {
+            agent_id: from.to_string(),
+            name: env["profile_name"].as_str().map(|s| s.to_string()),
+            role: env["profile_role"].as_str().map(|s| s.to_string()),
+            updated_at: env["ts"].as_u64().unwrap_or(0),
+        };
+        store::upsert_profile(room_id, &profile);
+        return;
+    }
+
+    if is_reaction(env) {
+        if let (Some(target), Some(emoji)) = (env["target_id"].as_str(), env["emoji"].as_str()) {
+            store::add_reaction(room_id, target, from, emoji);
+        }
+    }
+}
+
+fn should_display_message(env: &serde_json::Value) -> bool {
+    !is_heartbeat(env) && !is_invite_redeem(env) && !is_receipt(env) && !is_reaction(env)
+}
+
 /// Update last_seen for the sender of a message.
 fn track_presence(room_id: &str, env: &serde_json::Value) {
     if let Some(from) = env["from"].as_str() {
@@ -606,8 +642,8 @@ pub fn read(since: &str, limit: usize, room_label: Option<&str>) -> Result<Vec<s
         seen_ids.insert(mid);
         // Track presence from all messages (including heartbeats)
         track_presence(&room.room_id, &msg);
-        // Only persist and display non-heartbeat, non-invite-redemption messages.
-        if !is_heartbeat(&msg) && !is_invite_redeem(&msg) {
+        ingest_auxiliary_event(&room.room_id, &msg);
+        if should_display_message(&msg) {
             store::save_message(&room.room_id, &msg);
             merged.push(msg);
         }
@@ -1848,7 +1884,8 @@ where
             if !allow_incoming_message(&room, &env, ts, &mut rate_limit) {
                 return;
             }
-            if !is_heartbeat(&env) {
+            ingest_auxiliary_event(&room_id, &env);
+            if should_display_message(&env) {
                 store::save_message(&room_id, &env);
                 on_message(&env);
             }
@@ -2073,7 +2110,7 @@ mod tests {
         allow_incoming_message, annotate_soma_message, count_invite_redemptions_in_envs,
         decrypt_payload, enforce_outbound_plaza_rate_limit, encrypt_envelope,
         infer_soma_subject_path, make_envelope, make_invite_redemption, pin, pins, resolve_room,
-        seed_plaza_rate_limit_state, send_watch_heartbeat, signing_message_bytes,
+        seed_plaza_rate_limit_state, send_watch_heartbeat, should_display_message, signing_message_bytes,
         soma_churn_decay, soma_correct, unpin, SignedWirePayload, SIGNED_WIRE_VERSION, BASE64,
         PLAZA_RATE_LIMIT_WINDOW_SECS,
     };
@@ -2281,6 +2318,21 @@ mod tests {
 
         let err = enforce_outbound_plaza_rate_limit(&room, "speaker").unwrap_err();
         assert!(err.contains("Plaza rate limit exceeded"));
+    }
+
+    #[test]
+    fn receipts_are_not_display_messages() {
+        let receipt = json!({
+            "id": "receipt1",
+            "from": "reader",
+            "ts": current_ts(),
+            "type": "receipt",
+            "read_ids": ["abc123"],
+            "text": "",
+            "v": "3.0",
+        });
+
+        assert!(!should_display_message(&receipt));
     }
 
     #[test]
@@ -2810,8 +2862,11 @@ pub fn daemon(room_label: Option<&str>) -> Result<u32, String> {
             if !allow_incoming_message(&room, &env, ts, &mut rate_limit) {
                 return;
             }
-            store::save_message(&room_id, &env);
-            store::set_notify_flag(&room_id, &env);
+            ingest_auxiliary_event(&room_id, &env);
+            if should_display_message(&env) {
+                store::save_message(&room_id, &env);
+                store::set_notify_flag(&room_id, &env);
+            }
         }
     });
 

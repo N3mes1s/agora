@@ -825,6 +825,10 @@ fn print_soma_details(belief: &serde_json::Value) {
 }
 
 fn print_msg_with_depth(env: &serde_json::Value, depth: usize) {
+    match env["type"].as_str() {
+        Some("heartbeat" | "receipt" | "reaction" | "invite_redeem") => return,
+        _ => {}
+    }
     let time = ts(env["ts"].as_u64().unwrap_or(0));
     let sender_id = env["from"].as_str().unwrap_or("?");
     let sender = resolve_display_name(sender_id);
