@@ -153,17 +153,30 @@ fn create_daytona(agent_id: &str, token: &str) -> Result<SandboxSession, String>
     })
 }
 
+fn parse_daytona_exec_output(body: &serde_json::Value) -> Result<String, String> {
+    if let Some(result) = body["result"].as_str() {
+        return Ok(result.to_string());
+    }
+    if let Some(output) = body["output"].as_str() {
+        return Ok(output.to_string());
+    }
+    if let Some(stdout) = body["stdout"].as_str() {
+        return Ok(stdout.to_string());
+    }
+    Err(format!("Daytona exec: unexpected response body: {body}"))
+}
+
 fn exec_daytona(session_id: &str, command: &str) -> Result<String, String> {
     let token = daytona_token().ok_or("DAYTONA_TOKEN not set")?;
     let resp = client()
-        .post(&format!("https://api.daytona.io/v1/sandbox/{session_id}/exec"))
+        .post(&format!("https://proxy.app.daytona.io/toolbox/{session_id}/process/execute"))
         .bearer_auth(&token)
         .json(&serde_json::json!({"command": command}))
         .send()
         .map_err(|e| format!("Daytona exec failed: {e}"))?;
 
     let body: serde_json::Value = resp.json().map_err(|e| format!("Daytona parse: {e}"))?;
-    Ok(body["output"].as_str().unwrap_or("").to_string())
+    parse_daytona_exec_output(&body)
 }
 
 fn destroy_daytona(session_id: &str) -> Result<(), String> {
@@ -220,4 +233,38 @@ fn destroy_sprites(session_id: &str) -> Result<(), String> {
         .send()
         .map_err(|e| format!("Sprites destroy failed: {e}"))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_daytona_exec_output;
+    use serde_json::json;
+
+    #[test]
+    fn parse_daytona_exec_prefers_result_field() {
+        let body = json!({
+            "result": "cargo test ok",
+            "output": "stale"
+        });
+        let output = parse_daytona_exec_output(&body).unwrap();
+        assert_eq!(output, "cargo test ok");
+    }
+
+    #[test]
+    fn parse_daytona_exec_falls_back_to_legacy_output_field() {
+        let body = json!({
+            "output": "legacy output"
+        });
+        let output = parse_daytona_exec_output(&body).unwrap();
+        assert_eq!(output, "legacy output");
+    }
+
+    #[test]
+    fn parse_daytona_exec_errors_on_unknown_shape() {
+        let body = json!({
+            "status": "ok"
+        });
+        let err = parse_daytona_exec_output(&body).unwrap_err();
+        assert!(err.contains("unexpected response body"));
+    }
 }
