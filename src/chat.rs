@@ -153,6 +153,43 @@ fn is_reaction(env: &serde_json::Value) -> bool {
     env["type"].as_str() == Some("reaction")
 }
 
+fn auth_warning_id(
+    room_id: &str,
+    sender: &str,
+    signing_pubkey: &str,
+    sig: &str,
+    reason: &str,
+) -> String {
+    use ring::digest;
+    let input = format!(
+        "agora-auth-warning-v1\n{room_id}\n{sender}\n{signing_pubkey}\n{sig}\n{reason}"
+    );
+    let hash = digest::digest(&digest::SHA256, input.as_bytes());
+    format!("auth-{}", hex::encode(&hash.as_ref()[..4]))
+}
+
+fn make_auth_warning(
+    room_id: &str,
+    wire: &SignedWirePayload,
+    reason: &str,
+    text: String,
+) -> serde_json::Value {
+    json!({
+        "v": VERSION,
+        "id": auth_warning_id(room_id, &wire.from, &wire.signing_pubkey, &wire.sig, reason),
+        "from": "[auth]",
+        "sender": wire.from,
+        "ts": 0,
+        "type": "auth_warning",
+        "auth_reason": reason,
+        "text": text,
+    })
+}
+
+fn is_auth_warning(env: &serde_json::Value) -> bool {
+    env["type"].as_str() == Some("auth_warning")
+}
+
 fn is_capability_card(env: &serde_json::Value) -> bool {
     env["type"].as_str() == Some("card")
 }
@@ -403,6 +440,9 @@ fn should_display_message(env: &serde_json::Value) -> bool {
 
 /// Update last_seen for the sender of a message.
 fn track_presence(room_id: &str, env: &serde_json::Value) {
+    if is_auth_warning(env) {
+        return;
+    }
     if let Some(from) = env["from"].as_str() {
         store::update_last_seen(room_id, from);
     }
@@ -476,7 +516,15 @@ fn decrypt_signed_payload(raw: &str, room_key: &[u8; 32], room_id: &str) -> Opti
             "  [warn] dropped message from '{}' in room '{}' due to invalid signature",
             wire.from, room_id
         );
-        return None;
+        return Some(make_auth_warning(
+            room_id,
+            &wire,
+            "invalid_signature",
+            format!(
+                "[auth] Dropped message from '{}' due to invalid signature.",
+                wire.from
+            ),
+        ));
     }
 
     if let Some(trusted) = store::get_trusted_signing_key(&wire.from) {
@@ -485,7 +533,15 @@ fn decrypt_signed_payload(raw: &str, room_key: &[u8; 32], room_id: &str) -> Opti
                 "  [warn] dropped message from '{}' in room '{}' due to signing key mismatch",
                 wire.from, room_id
             );
-            return None;
+            return Some(make_auth_warning(
+                room_id,
+                &wire,
+                "signing_key_mismatch",
+                format!(
+                    "[auth] Dropped message from '{}' because its signing key no longer matches the trusted key for that identity.",
+                    wire.from
+                ),
+            ));
         }
     } else {
         store::trust_signing_key(&wire.from, &wire.signing_pubkey);
@@ -502,7 +558,15 @@ fn decrypt_signed_payload(raw: &str, room_key: &[u8; 32], room_id: &str) -> Opti
             "  [warn] dropped message in room '{}' due to sender/signature mismatch",
             room_id
         );
-        return None;
+        return Some(make_auth_warning(
+            room_id,
+            &wire,
+            "sender_signature_mismatch",
+            format!(
+                "[auth] Dropped message from '{}' because the signed sender did not match the decrypted payload.",
+                wire.from
+            ),
+        ));
     }
     env["_auth"] = json!("verified");
     Some(env)
@@ -3525,7 +3589,15 @@ mod tests {
             sig,
         }).unwrap();
 
-        assert!(decrypt_payload(&forged_wire, &room_key, &room.room_id).is_none());
+        let warning = decrypt_payload(&forged_wire, &room_key, &room.room_id).unwrap();
+        assert_eq!(warning["type"].as_str(), Some("auth_warning"));
+        assert_eq!(warning["from"].as_str(), Some("[auth]"));
+        assert_eq!(warning["sender"].as_str(), Some("alice"));
+        assert_eq!(warning["auth_reason"].as_str(), Some("signing_key_mismatch"));
+        assert!(warning["text"]
+            .as_str()
+            .unwrap_or("")
+            .contains("signing key"));
     }
 
     #[test]
