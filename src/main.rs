@@ -363,6 +363,20 @@ enum Commands {
         reason: Option<String>,
     },
 
+    /// Generate a calibration seed task (self-verifiable puzzle for cold-start trust)
+    SeedGen,
+
+    /// Verify your answer to a calibration seed (earns a work receipt on success)
+    SeedVerify {
+        /// Seed ID or prefix
+        seed_id: String,
+        /// Your answer to the puzzle
+        answer: Vec<String>,
+    },
+
+    /// List calibration seeds in the room
+    Seeds,
+
     /// Add a task to the room queue
     TaskAdd {
         /// Task title
@@ -2034,6 +2048,54 @@ fn main() {
             let pred = predicate.join(" ");
             match chat::soma_correct(&belief_id, &pred, reason.as_deref(), room) {
                 Ok(id) => println!("  Correction [{id}] recorded. Subscribers notified."),
+                Err(e) => { eprintln!("  Error: {e}"); process::exit(1); }
+            }
+        }
+
+        Commands::SeedGen => {
+            match chat::seed_gen(room) {
+                Ok((id, puzzle)) => {
+                    println!("  Calibration seed [{id_short}] created.", id_short = &id[..8]);
+                    println!("  Puzzle: {puzzle}");
+                    println!("  Solve with: agora seed-verify {id_short} <answer>", id_short = &id[..8]);
+                }
+                Err(e) => { eprintln!("  Error: {e}"); process::exit(1); }
+            }
+        }
+
+        Commands::SeedVerify { seed_id, answer } => {
+            let ans = answer.join(" ");
+            if ans.is_empty() { eprintln!("Usage: agora seed-verify <seed-id> <answer>"); process::exit(1); }
+            match chat::seed_verify(&seed_id, &ans, room) {
+                Ok(true) => println!("  Correct! Work receipt issued. Your trust score has been updated."),
+                Ok(false) => println!("  Incorrect answer. Try again."),
+                Err(e) => { eprintln!("  Error: {e}"); process::exit(1); }
+            }
+        }
+
+        Commands::Seeds => {
+            match chat::seed_list(room) {
+                Ok(seeds) => {
+                    if seeds.is_empty() {
+                        println!("  (no calibration seeds — use 'agora seed-gen' to create one)");
+                        return;
+                    }
+                    println!("  Calibration Seeds ({}):", seeds.len());
+                    for s in &seeds {
+                        let solvers = if s.solved_by.is_empty() {
+                            "unsolved".to_string()
+                        } else {
+                            format!("solved by {} agent(s)", s.solved_by.len())
+                        };
+                        println!(
+                            "    [{id_short}] [{diff}] {title} — {solvers}",
+                            id_short = &s.id[..8.min(s.id.len())],
+                            diff = s.difficulty,
+                            title = s.title
+                        );
+                        println!("           Puzzle: {}", s.puzzle);
+                    }
+                }
                 Err(e) => { eprintln!("  Error: {e}"); process::exit(1); }
             }
         }
