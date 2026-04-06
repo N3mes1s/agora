@@ -659,6 +659,57 @@ pub fn whois(agent_id: &str, room_label: Option<&str>) -> Result<Option<store::A
     Ok(store::get_profile(&room.room_id, agent_id))
 }
 
+// ── SOMA — Shared Observable Memory for Agents ─────────────────
+
+pub fn soma_assert(subject: &str, predicate: &str, confidence: Option<f64>, git_ref: Option<&str>, room_label: Option<&str>) -> Result<String, String> {
+    let room = resolve_room(room_label)?;
+    let room_key = crypto::derive_room_key(&room.secret, &room.room_id);
+    let id = msg_id();
+    let conf = confidence.unwrap_or(0.8);
+    let env = json!({
+        "v": VERSION, "id": id, "from": store::get_agent_id(), "ts": now(),
+        "type": "soma_belief", "subject": subject, "predicate": predicate,
+        "confidence": conf, "git_ref": git_ref,
+        "text": format!("[soma] {subject}: {predicate} (confidence: {:.0}%)", conf * 100.0),
+    });
+    let encrypted = encrypt_envelope(&env, &room_key, &room.room_id);
+    transport::publish(&room.room_id, &encrypted);
+    store::save_message(&room.room_id, &env);
+    Ok(id)
+}
+
+pub fn soma_query(subject: &str, room_label: Option<&str>) -> Result<Vec<serde_json::Value>, String> {
+    let room = resolve_room(room_label)?;
+    let msgs = store::load_messages(&room.room_id, 604800);
+    let q = subject.to_lowercase();
+    Ok(msgs.into_iter().filter(|m| {
+        (m["type"].as_str() == Some("soma_belief") || m["type"].as_str() == Some("soma_correction")) &&
+        m["subject"].as_str().unwrap_or("").to_lowercase().contains(&q)
+    }).collect())
+}
+
+pub fn soma_correct(belief_id: &str, new_predicate: &str, reason: Option<&str>, room_label: Option<&str>) -> Result<String, String> {
+    let room = resolve_room(room_label)?;
+    let room_key = crypto::derive_room_key(&room.secret, &room.room_id);
+    let msgs = store::load_messages(&room.room_id, 604800);
+    let subject = msgs.iter()
+        .find(|m| m["id"].as_str().unwrap_or("").starts_with(belief_id) && m["type"].as_str() == Some("soma_belief"))
+        .and_then(|m| m["subject"].as_str()).unwrap_or("unknown").to_string();
+    let id = msg_id();
+    let reason_str = reason.unwrap_or("no reason given");
+    let env = json!({
+        "v": VERSION, "id": id, "from": store::get_agent_id(), "ts": now(),
+        "type": "soma_correction", "corrects": belief_id, "subject": subject,
+        "predicate": new_predicate, "reason": reason_str, "reply_to": belief_id,
+        "text": format!("[soma correction] {subject}: {new_predicate} (reason: {reason_str})"),
+    });
+    let encrypted = encrypt_envelope(&env, &room_key, &room.room_id);
+    transport::publish(&room.room_id, &encrypted);
+    store::save_message(&room.room_id, &env);
+    fire_webhooks(&room.room_id, &[env]);
+    Ok(id)
+}
+
 /// Add a task to the room queue.
 pub fn task_add(title: &str, room_label: Option<&str>) -> Result<String, String> {
     let room = resolve_room(room_label)?;

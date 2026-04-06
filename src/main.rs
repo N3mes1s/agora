@@ -281,6 +281,37 @@ enum Commands {
     /// Show read receipts for your messages
     Status,
 
+    /// SOMA: assert a belief about a subject
+    SomaAssert {
+        /// Subject (e.g. "src/crypto.rs:encrypt")
+        subject: String,
+        /// Predicate (e.g. "uses AES-256-GCM with random nonces")
+        predicate: Vec<String>,
+        /// Confidence 0.0-1.0 (default: 0.8)
+        #[arg(long, default_value = "0.8")]
+        confidence: f64,
+        /// Git ref this belief is grounded in
+        #[arg(long)]
+        git_ref: Option<String>,
+    },
+
+    /// SOMA: query beliefs about a subject
+    SomaQuery {
+        /// Subject to search
+        subject: String,
+    },
+
+    /// SOMA: correct a belief
+    SomaCorrect {
+        /// Belief ID to correct
+        belief_id: String,
+        /// New predicate
+        predicate: Vec<String>,
+        /// Reason for correction
+        #[arg(long)]
+        reason: Option<String>,
+    },
+
     /// Add a task to the room queue
     TaskAdd {
         /// Task title
@@ -1715,6 +1746,45 @@ fn main() {
                     eprintln!("  Error: {e}");
                     process::exit(1);
                 }
+            }
+        }
+
+        Commands::SomaAssert { subject, predicate, confidence, git_ref } => {
+            let pred = predicate.join(" ");
+            match chat::soma_assert(&subject, &pred, Some(confidence), git_ref.as_deref(), room) {
+                Ok(id) => println!("  Belief [{id}] asserted: {subject}: {pred}"),
+                Err(e) => { eprintln!("  Error: {e}"); process::exit(1); }
+            }
+        }
+
+        Commands::SomaQuery { subject } => {
+            match chat::soma_query(&subject, room) {
+                Ok(beliefs) => {
+                    if beliefs.is_empty() {
+                        println!("  No beliefs about '{subject}'.");
+                        return;
+                    }
+                    println!("  {} belief(s) about '{subject}':\n", beliefs.len());
+                    for b in &beliefs {
+                        let bid = &b["id"].as_str().unwrap_or("?")[..6.min(b["id"].as_str().unwrap_or("?").len())];
+                        let btype = if b["type"].as_str() == Some("soma_correction") { "CORRECTED" } else { "belief" };
+                        let pred = b["predicate"].as_str().unwrap_or("?");
+                        let conf = b["confidence"].as_f64().unwrap_or(0.0);
+                        let from = b["from"].as_str().unwrap_or("?");
+                        let name = resolve_display_name(from);
+                        println!("  [{bid}] ({btype}) {pred}");
+                        println!("         by {name}, confidence: {:.0}%", conf * 100.0);
+                    }
+                }
+                Err(e) => { eprintln!("  Error: {e}"); process::exit(1); }
+            }
+        }
+
+        Commands::SomaCorrect { belief_id, predicate, reason } => {
+            let pred = predicate.join(" ");
+            match chat::soma_correct(&belief_id, &pred, reason.as_deref(), room) {
+                Ok(id) => println!("  Correction [{id}] recorded. Subscribers notified."),
+                Err(e) => { eprintln!("  Error: {e}"); process::exit(1); }
             }
         }
 
