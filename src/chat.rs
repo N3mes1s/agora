@@ -997,7 +997,17 @@ pub fn card_show(agent_id: Option<&str>, room_label: Option<&str>) -> Result<Opt
     Ok(cards.into_iter().find(|c| c.agent_id == agent_id.unwrap()))
 }
 
-pub fn discover(need: &str, room_label: Option<&str>) -> Result<Vec<store::CapabilityCard>, String> {
+/// Agent discovery result with trust score.
+pub struct DiscoveryResult {
+    pub card: store::CapabilityCard,
+    pub trust_score: f64,
+    pub receipt_count: usize,
+    pub rooms_active: usize,
+}
+
+/// Discover agents by capability with trust-weighted ranking.
+/// Trust = receipt_count * freshness_decay * room_presence
+pub fn discover(need: &str, room_label: Option<&str>) -> Result<Vec<DiscoveryResult>, String> {
     let need_lower = need.to_lowercase();
     let needs: Vec<&str> = need_lower.split(',').map(|s| s.trim()).collect();
     let rooms = if let Some(label) = room_label {
@@ -1005,16 +1015,34 @@ pub fn discover(need: &str, room_label: Option<&str>) -> Result<Vec<store::Capab
     } else {
         store::load_registry()
     };
-    let mut results = Vec::new();
+    let now_ts = now();
+    let mut agent_map: HashMap<String, DiscoveryResult> = HashMap::new();
+
     for room in &rooms {
+        let receipts = store::load_work_receipts(&room.room_id);
         for card in store::load_peer_cards(&room.room_id) {
             let matches = needs.iter().all(|n| card.capabilities.iter().any(|c| c.to_lowercase().contains(n)));
-            if matches && !results.iter().any(|r: &store::CapabilityCard| r.agent_id == card.agent_id) {
-                results.push(card);
-            }
+            if !matches { continue; }
+
+            let agent_receipts: Vec<_> = receipts.iter().filter(|r| r.agent_id == card.agent_id).collect();
+            let receipt_count = agent_receipts.len();
+
+            // Freshness: decay score based on last activity (halves every 7 days)
+            let age_secs = now_ts.saturating_sub(card.updated_at) as f64;
+            let freshness = 0.5_f64.powf(age_secs / 604800.0); // 7-day half-life
+
+            let entry = agent_map.entry(card.agent_id.clone()).or_insert_with(|| {
+                DiscoveryResult { card: card.clone(), trust_score: 0.0, receipt_count: 0, rooms_active: 0 }
+            });
+            entry.receipt_count += receipt_count;
+            entry.rooms_active += 1;
+            // Trust = receipts * freshness * room presence
+            entry.trust_score = (1.0 + entry.receipt_count as f64) * freshness * (1.0 + entry.rooms_active as f64 * 0.2);
         }
     }
-    results.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+
+    let mut results: Vec<DiscoveryResult> = agent_map.into_values().collect();
+    results.sort_by(|a, b| b.trust_score.partial_cmp(&a.trust_score).unwrap_or(std::cmp::Ordering::Equal));
     Ok(results)
 }
 
