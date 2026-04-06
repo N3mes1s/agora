@@ -117,8 +117,30 @@ fn is_reaction(env: &serde_json::Value) -> bool {
     env["type"].as_str() == Some("reaction")
 }
 
+fn make_invite_redemption(
+    invite_id: &str,
+    invite_created_by: Option<&str>,
+    invite_max_uses: Option<u32>,
+) -> serde_json::Value {
+    json!({
+        "v": VERSION,
+        "id": msg_id(),
+        "from": store::get_agent_id(),
+        "ts": now(),
+        "type": "invite_redeem",
+        "invite_id": invite_id,
+        "invite_created_by": invite_created_by,
+        "invite_max_uses": invite_max_uses,
+        "text": "",
+    })
+}
+
+fn is_invite_redeem(env: &serde_json::Value) -> bool {
+    env["type"].as_str() == Some("invite_redeem")
+}
+
 fn is_system_msg(env: &serde_json::Value) -> bool {
-    is_heartbeat(env) || is_receipt(env) || is_file_msg(env) || is_reaction(env)
+    is_heartbeat(env) || is_receipt(env) || is_file_msg(env) || is_reaction(env) || is_invite_redeem(env)
 }
 
 /// Update last_seen for the sender of a message.
@@ -339,6 +361,64 @@ pub fn send(message: &str, reply_to: Option<&str>, room_label: Option<&str>) -> 
     Ok(mid)
 }
 
+fn count_invite_redemptions_in_envs(events: &[serde_json::Value], invite_id: &str) -> u32 {
+    let mut seen = HashSet::new();
+    let mut count = 0;
+    for env in events {
+        if !is_invite_redeem(env) {
+            continue;
+        }
+        if env["invite_id"].as_str() != Some(invite_id) {
+            continue;
+        }
+        let mid = env["id"].as_str().unwrap_or("");
+        if !mid.is_empty() && !seen.insert(mid.to_string()) {
+            continue;
+        }
+        count += 1;
+    }
+    count
+}
+
+pub fn count_invite_redemptions(
+    room_id: &str,
+    secret: &str,
+    invite_id: &str,
+    issued_at: Option<u64>,
+) -> Result<u32, String> {
+    let room_key = crypto::derive_room_key(secret, room_id);
+    let since = issued_at
+        .map(|ts| ts.to_string())
+        .unwrap_or_else(|| "24h".to_string());
+    let remote_events = transport::fetch(room_id, &since);
+    let mut events = Vec::new();
+    for (ts, payload) in &remote_events {
+        if let Some(mut env) = decrypt_payload(payload, &room_key, room_id) {
+            if env["ts"].as_u64().unwrap_or(0) == 0 {
+                env["ts"] = json!(ts);
+            }
+            events.push(env);
+        }
+    }
+    Ok(count_invite_redemptions_in_envs(&events, invite_id))
+}
+
+pub fn redeem_invite(
+    room_id: &str,
+    secret: &str,
+    invite_id: &str,
+    invite_created_by: Option<&str>,
+    invite_max_uses: Option<u32>,
+) -> Result<(), String> {
+    let room_key = crypto::derive_room_key(secret, room_id);
+    let env = make_invite_redemption(invite_id, invite_created_by, invite_max_uses);
+    let encrypted = encrypt_envelope(&env, &room_key, room_id);
+    if !transport::publish(room_id, &encrypted) {
+        return Err("failed to publish invite redemption to relay".to_string());
+    }
+    Ok(())
+}
+
 pub fn read(since: &str, limit: usize, room_label: Option<&str>) -> Result<Vec<serde_json::Value>, String> {
     let room = resolve_room(room_label)?;
     let room_key = crypto::derive_room_key(&room.secret, &room.room_id);
@@ -369,8 +449,8 @@ pub fn read(since: &str, limit: usize, room_label: Option<&str>) -> Result<Vec<s
         seen_ids.insert(mid);
         // Track presence from all messages (including heartbeats)
         track_presence(&room.room_id, &msg);
-        // Only persist and display non-heartbeat messages
-        if !is_heartbeat(&msg) {
+        // Only persist and display non-heartbeat, non-invite-redemption messages.
+        if !is_heartbeat(&msg) && !is_invite_redeem(&msg) {
             store::save_message(&room.room_id, &msg);
             merged.push(msg);
         }
@@ -422,6 +502,10 @@ pub fn check(since: &str, room_label: Option<&str>) -> Result<Vec<serde_json::Va
             }
 
             if is_heartbeat(&env) {
+                continue;
+            }
+
+            if is_invite_redeem(&env) {
                 continue;
             }
 
@@ -1556,8 +1640,9 @@ mod tests {
     use base64::Engine;
     use super::{pin, pins, resolve_room, send_watch_heartbeat, unpin};
     use super::{
-        decrypt_payload, encrypt_envelope, make_envelope, signing_message_bytes, SignedWirePayload,
-        SIGNED_WIRE_VERSION, BASE64,
+        count_invite_redemptions_in_envs, decrypt_payload, encrypt_envelope, make_envelope,
+        make_invite_redemption, signing_message_bytes, SignedWirePayload, SIGNED_WIRE_VERSION,
+        BASE64,
     };
     use crate::crypto;
     use crate::store::{self, Role};
@@ -1768,6 +1853,18 @@ mod tests {
         }).unwrap();
 
         assert!(decrypt_payload(&forged_wire, &room_key, &room.room_id).is_none());
+    }
+
+    #[test]
+    fn invite_redemption_counter_matches_invite_id() {
+        let first = make_invite_redemption("invite-a", Some("alice"), Some(1));
+        let second = make_invite_redemption("invite-a", Some("alice"), Some(1));
+        let third = make_invite_redemption("invite-b", Some("alice"), Some(1));
+        let events = vec![first, second, third];
+
+        assert_eq!(count_invite_redemptions_in_envs(&events, "invite-a"), 2);
+        assert_eq!(count_invite_redemptions_in_envs(&events, "invite-b"), 1);
+        assert_eq!(count_invite_redemptions_in_envs(&events, "invite-c"), 0);
     }
 }
 

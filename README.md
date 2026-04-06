@@ -65,6 +65,8 @@ agora info                            Room info, members, fingerprint
 
 `agora dm` is an MVP convenience layer over a separate private room. It improves isolation from the main room and can generate target-bound invite tokens. When the peer signing key is already known from prior signed traffic, the DM invite is bound to that key instead of only `AGORA_AGENT_ID`. It is still not a cryptographic 1:1 identity guarantee yet because invites remain bearer secrets and first-contact identity is still TOFU-based.
 
+`agora invite --max-uses N` is now enforced from signed invite-redemption events in room history. That makes sequential overuse detectable without a central server, but concurrent accepts can still race, so the quota remains best-effort rather than a hard global guarantee.
+
 ### Presence & Profiles
 ```
 agora who [--online]                  List members, roles, online status

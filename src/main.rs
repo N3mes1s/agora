@@ -12,8 +12,10 @@ mod transport;
 
 use base64::Engine;
 use clap::{Parser, Subcommand};
+use ring::rand::SecureRandom;
 use serde::{Deserialize, Serialize};
 use std::process;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 const BASE64: base64::engine::general_purpose::GeneralPurpose =
     base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -23,6 +25,8 @@ struct InviteTokenPayload {
     room_id: String,
     secret: String,
     label: String,
+    #[serde(default)]
+    invite_id: Option<String>,
     #[serde(default)]
     target_agent_id: Option<String>,
     #[serde(default)]
@@ -35,6 +39,8 @@ struct InviteTokenPayload {
     max_uses: Option<u32>,
     #[serde(default)]
     created_by: Option<String>,
+    #[serde(default)]
+    issued_at: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -534,15 +540,24 @@ fn dm_room_label(left: &str, right: &str) -> Result<String, String> {
     Ok(format!("dm-{a}-{b}"))
 }
 
+fn invite_id() -> String {
+    let mut bytes = [0u8; 8];
+    ring::rand::SystemRandom::new()
+        .fill(&mut bytes)
+        .expect("RNG failed");
+    hex::encode(bytes)
+}
+
 fn invite_signing_message_bytes(
     payload: &InviteTokenPayload,
     inviter_signing_pubkey: &str,
 ) -> Vec<u8> {
     format!(
-        "agora-signed-invite-v1\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
+        "agora-signed-invite-v1\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
         payload.room_id,
         payload.secret,
         payload.label,
+        payload.invite_id.as_deref().unwrap_or(""),
         payload.target_agent_id.as_deref().unwrap_or(""),
         payload.target_signing_pubkey.as_deref().unwrap_or(""),
         payload.purpose.as_deref().unwrap_or(""),
@@ -552,6 +567,7 @@ fn invite_signing_message_bytes(
             .unwrap_or_default(),
         payload.max_uses.map(|v| v.to_string()).unwrap_or_default(),
         payload.created_by.as_deref().unwrap_or(""),
+        payload.issued_at.map(|v| v.to_string()).unwrap_or_default(),
         inviter_signing_pubkey,
     )
     .into_bytes()
@@ -564,6 +580,18 @@ fn local_signing_pubkey(agent_id: &str) -> Result<String, String> {
 }
 
 fn sign_invite_token(payload: InviteTokenPayload) -> Result<String, String> {
+    let mut payload = payload;
+    if payload.invite_id.is_none() {
+        payload.invite_id = Some(invite_id());
+    }
+    if payload.issued_at.is_none() {
+        payload.issued_at = Some(
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs(),
+        );
+    }
     let created_by = payload
         .created_by
         .clone()
@@ -596,12 +624,14 @@ fn targeted_invite_token(
         room_id: room.room_id.clone(),
         secret: room.secret.clone(),
         label: room.label.clone(),
+        invite_id: None,
         target_agent_id: Some(target_agent_id.to_string()),
         target_signing_pubkey: store::get_trusted_signing_key(target_agent_id),
         purpose: Some(purpose.to_string()),
         expires_at: None,
         max_uses: None,
         created_by: Some(store::get_agent_id()),
+        issued_at: None,
     };
     sign_invite_token(payload)
 }
@@ -656,23 +686,25 @@ fn parse_invite_token(token: &str) -> Result<ParsedInviteToken, String> {
     }
 
     Ok(ParsedInviteToken {
-        payload: InviteTokenPayload {
-            room_id: parts[0].to_string(),
-            secret: parts[1].to_string(),
-            label: if parts.len() == 3 {
-                parts[2].to_string()
-            } else {
-                parts[0][..12.min(parts[0].len())].to_string()
+            payload: InviteTokenPayload {
+                room_id: parts[0].to_string(),
+                secret: parts[1].to_string(),
+                label: if parts.len() == 3 {
+                    parts[2].to_string()
+                } else {
+                    parts[0][..12.min(parts[0].len())].to_string()
+                },
+                invite_id: None,
+                target_agent_id: None,
+                target_signing_pubkey: None,
+                purpose: None,
+                expires_at: None,
+                max_uses: None,
+                created_by: None,
+                issued_at: None,
             },
-            target_agent_id: None,
-            target_signing_pubkey: None,
-            purpose: None,
-            expires_at: None,
-            max_uses: None,
-            created_by: None,
-        },
-        auth: InviteTokenAuth::Unsigned,
-    })
+            auth: InviteTokenAuth::Unsigned,
+        })
 }
 
 fn print_msg(env: &serde_json::Value) {
@@ -780,12 +812,14 @@ fn main() {
                         room_id: r.room_id.clone(),
                         secret: r.secret.clone(),
                         label: r.label.clone(),
+                        invite_id: None,
                         target_agent_id: None,
                         target_signing_pubkey: None,
                         purpose: None,
                         expires_at,
                         max_uses,
                         created_by: Some(store::get_agent_id()),
+                        issued_at: None,
                     };
                     let token = match sign_invite_token(payload) {
                         Ok(token) => token,
@@ -856,8 +890,46 @@ fn main() {
                         }
                     }
 
+                    let redemption_count = if let (Some(max_uses), Some(invite_id)) =
+                        (payload.max_uses, payload.invite_id.as_deref())
+                    {
+                        match chat::count_invite_redemptions(
+                            &payload.room_id,
+                            &payload.secret,
+                            invite_id,
+                            payload.issued_at,
+                        ) {
+                            Ok(used) => {
+                                if used >= max_uses {
+                                    eprintln!(
+                                        "  Error: invite token has reached its max uses ({used}/{max_uses})."
+                                    );
+                                    process::exit(1);
+                                }
+                                Some(used)
+                            }
+                            Err(e) => {
+                                eprintln!("  Error: failed to verify invite usage: {e}");
+                                process::exit(1);
+                            }
+                        }
+                    } else {
+                        None
+                    };
+
                     match chat::join(&payload.room_id, &payload.secret, &payload.label) {
                         Ok(_) => {
+                            if let Some(invite_id) = payload.invite_id.as_deref() {
+                                if let Err(e) = chat::redeem_invite(
+                                    &payload.room_id,
+                                    &payload.secret,
+                                    invite_id,
+                                    payload.created_by.as_deref(),
+                                    payload.max_uses,
+                                ) {
+                                    eprintln!("  Warning: failed to record invite redemption: {e}");
+                                }
+                            }
                             let room_key = crypto::derive_room_key(&payload.secret, &payload.room_id);
                             println!("  Joined room '{}'", payload.label);
                             println!("  Encryption: AES-256-GCM + HKDF-SHA256");
@@ -869,6 +941,13 @@ fn main() {
                                 InviteTokenAuth::Unsigned => {
                                     println!("  Invite signature: unsigned legacy token");
                                 }
+                            }
+                            if let (Some(used_before), Some(max_uses)) = (redemption_count, payload.max_uses) {
+                                println!(
+                                    "  Invite uses: {}/{} (best-effort decentralized check)",
+                                    used_before + 1,
+                                    max_uses
+                                );
                             }
                             if payload.purpose.as_deref() == Some("dm") {
                                 if payload.target_signing_pubkey.is_some() {
@@ -2224,15 +2303,19 @@ mod tests {
                 room_id: "ag-dm-test".to_string(),
                 secret: "secret".to_string(),
                 label: "dm-a-b".to_string(),
+                invite_id: parsed.payload.invite_id.clone(),
                 target_agent_id: Some("agent-b".to_string()),
                 target_signing_pubkey: Some("cGVlci1zaWduaW5nLWtleQ".to_string()),
                 purpose: Some("dm".to_string()),
                 expires_at: None,
                 max_uses: None,
                 created_by: Some(store::get_agent_id()),
+                issued_at: parsed.payload.issued_at,
             }
         );
         assert_eq!(parsed.auth, InviteTokenAuth::SignedVerified);
+        assert!(parsed.payload.invite_id.is_some());
+        assert!(parsed.payload.issued_at.is_some());
     }
 
     #[test]
@@ -2272,8 +2355,10 @@ mod tests {
         assert_eq!(parsed.payload.room_id, "ag-room");
         assert_eq!(parsed.payload.secret, "secret");
         assert_eq!(parsed.payload.label, "label");
+        assert_eq!(parsed.payload.invite_id, None);
         assert_eq!(parsed.payload.target_agent_id, None);
         assert_eq!(parsed.payload.target_signing_pubkey, None);
+        assert_eq!(parsed.payload.issued_at, None);
         assert_eq!(parsed.auth, InviteTokenAuth::Unsigned);
     }
 }
