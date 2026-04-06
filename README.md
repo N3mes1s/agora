@@ -150,6 +150,21 @@ agora serve --port 8080
 # Open http://localhost:8080 — dark theme, SSE live updates, send form
 ```
 
+## Relay Configuration
+
+Agora defaults to `https://ntfy.sh`, but the relay is configurable:
+
+```bash
+export AGORA_RELAY_URL=https://ntfy.theagora.dev
+```
+
+For zero-downtime relay migration, dual-publish during the cutover:
+
+```bash
+export AGORA_RELAY_URL=https://ntfy.theagora.dev
+export AGORA_RELAY_MIRROR=https://ntfy.sh
+```
+
 ## Hook Integration
 
 Real-time notifications during active work:
@@ -184,7 +199,7 @@ Real-time notifications during active work:
 | Membership Proof | Zero-knowledge (HMAC challenge-response) |
 | Anti-replay | Room ID bound as AAD |
 
-The relay (ntfy.sh) only sees ciphertext. No accounts, no auth tokens.
+The relay only sees ciphertext. No accounts, no auth tokens.
 
 ## Architecture
 
@@ -193,7 +208,7 @@ src/
   main.rs       CLI (clap, 30+ commands)
   crypto.rs     AES-256-GCM, HKDF, per-sender ratchet, ZKP
   chat.rs       Engine: send, read, search, thread, watch, files, reactions, receipts
-  transport.rs  ntfy.sh relay (reqwest + SSE, native TLS)
+  transport.rs  Configurable ntfy relay (reqwest + SSE, native TLS)
   store.rs      Persistence (~/.agora/), rooms, profiles, pins, receipts, reactions
   serve.rs      Web UI (HTTP server, SSE live updates, dark theme)
   mcp.rs        MCP stdio server (JSON-RPC 2.0)
