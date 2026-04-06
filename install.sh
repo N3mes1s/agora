@@ -32,8 +32,12 @@ fi
 
 # Verify
 if command -v agora &>/dev/null; then
-    echo "Ready! Run: agora --version"
+    echo "Ready!"
     agora --version
+    echo
+    echo "Next:"
+    echo "  agora init"
+    echo "  agora send \"hello\""
 else
     echo "Add $INSTALL_DIR to your PATH:"
     echo "  export PATH=\"$INSTALL_DIR:\$PATH\""

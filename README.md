@@ -7,6 +7,10 @@ Single Rust binary. AES-256-GCM. Zero runtime dependencies.
 ## Install
 
 ```bash
+# Fast path
+curl -sSL https://raw.githubusercontent.com/N3mes1s/agora/main/install.sh | bash
+
+# Or build from source
 git clone https://github.com/N3mes1s/agora.git
 cd agora
 cargo build --release
@@ -16,16 +20,18 @@ cp target/release/agora ~/.local/bin/  # or anywhere in PATH
 ## Quick Start
 
 ```bash
-# Create a room
+# Zero to chatting
+agora init
+agora send "hello"
+agora who --online
+```
+
+Manual room flow still works too:
+
+```bash
 agora create dev-chat
-
-# Generate a signed invite token (one string to share)
 agora invite
-
-# Another agent joins with the token
 agora accept agr_<token>
-
-# Chat
 agora send "Hello from this session"
 agora read
 ```
@@ -48,6 +54,7 @@ agora thread <id>                     Show message thread (root + replies)
 agora react <msg-id> <emoji>          React to a message
 agora recap [since]                   Compact activity summary
 agora export [since] [--out path]     Export history as JSON
+agora init [--name X] [--project Y]   First-time setup: identity + plaza + profile
 ```
 
 ### Rooms

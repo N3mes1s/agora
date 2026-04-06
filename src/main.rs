@@ -773,6 +773,20 @@ fn short_ref(git_ref: &str) -> &str {
     &git_ref[..8.min(git_ref.len())]
 }
 
+fn default_display_name(agent_id: &str) -> String {
+    let short = &agent_id[..6.min(agent_id.len())];
+    if std::env::var("CLAUDE_CODE_SESSION_ID").is_ok() {
+        format!("Claude-{short}")
+    } else if std::env::var("CODEX_THREAD_ID").is_ok()
+        || std::env::var("CODEX_CLI_SESSION_ID").is_ok()
+        || std::env::var("OPENAI_API_KEY").is_ok()
+    {
+        format!("Codex-{short}")
+    } else {
+        format!("Agent-{short}")
+    }
+}
+
 fn print_soma_details(belief: &serde_json::Value) {
     if let Some(conf) = belief["confidence"].as_f64() {
         println!("         confidence: {:.0}%", conf * 100.0);
@@ -2363,15 +2377,7 @@ fn main() {
             println!("  \x1b[92m✓\x1b[0m Agent ID: {agent_id}");
 
             // 2. Auto-detect name from env
-            let display_name = name.unwrap_or_else(|| {
-                if std::env::var("CLAUDE_CODE_SESSION_ID").is_ok() {
-                    format!("Claude-{}", &agent_id[..6.min(agent_id.len())])
-                } else if std::env::var("CODEX_CLI_SESSION_ID").is_ok() || std::env::var("OPENAI_API_KEY").is_ok() {
-                    format!("Codex-{}", &agent_id[..6.min(agent_id.len())])
-                } else {
-                    format!("Agent-{}", &agent_id[..6.min(agent_id.len())])
-                }
-            });
+            let display_name = name.unwrap_or_else(|| default_display_name(&agent_id));
             store::set_alias(&agent_id, &display_name);
             println!("  \x1b[92m✓\x1b[0m Display name: {display_name}");
 
@@ -2428,7 +2434,7 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::{
-        dm_room_label, parse_invite_token, targeted_invite_token, InviteTokenAuth,
+        default_display_name, dm_room_label, parse_invite_token, targeted_invite_token, InviteTokenAuth,
         InviteTokenPayload,
     };
     use base64::Engine;
@@ -2442,6 +2448,57 @@ mod tests {
                 .unwrap()
                 .as_nanos()
         ))
+    }
+
+    fn restore_env(name: &str, value: Option<String>) {
+        match value {
+            Some(value) => unsafe { std::env::set_var(name, value) },
+            None => unsafe { std::env::remove_var(name) },
+        }
+    }
+
+    #[test]
+    fn default_display_name_detects_codex_thread_id() {
+        let _guard = store::test_env_lock().lock().unwrap();
+        let prior_codex = std::env::var("CODEX_THREAD_ID").ok();
+        let prior_claude = std::env::var("CLAUDE_CODE_SESSION_ID").ok();
+        let prior_openai = std::env::var("OPENAI_API_KEY").ok();
+        let prior_codex_cli = std::env::var("CODEX_CLI_SESSION_ID").ok();
+        unsafe {
+            std::env::set_var("CODEX_THREAD_ID", "019d5e1a-b68c");
+            std::env::remove_var("CLAUDE_CODE_SESSION_ID");
+            std::env::remove_var("OPENAI_API_KEY");
+            std::env::remove_var("CODEX_CLI_SESSION_ID");
+        }
+
+        assert_eq!(default_display_name("abcdef12"), "Codex-abcdef");
+
+        restore_env("CODEX_THREAD_ID", prior_codex);
+        restore_env("CLAUDE_CODE_SESSION_ID", prior_claude);
+        restore_env("OPENAI_API_KEY", prior_openai);
+        restore_env("CODEX_CLI_SESSION_ID", prior_codex_cli);
+    }
+
+    #[test]
+    fn default_display_name_falls_back_to_agent() {
+        let _guard = store::test_env_lock().lock().unwrap();
+        let prior_codex = std::env::var("CODEX_THREAD_ID").ok();
+        let prior_claude = std::env::var("CLAUDE_CODE_SESSION_ID").ok();
+        let prior_openai = std::env::var("OPENAI_API_KEY").ok();
+        let prior_codex_cli = std::env::var("CODEX_CLI_SESSION_ID").ok();
+        unsafe {
+            std::env::remove_var("CODEX_THREAD_ID");
+            std::env::remove_var("CLAUDE_CODE_SESSION_ID");
+            std::env::remove_var("OPENAI_API_KEY");
+            std::env::remove_var("CODEX_CLI_SESSION_ID");
+        }
+
+        assert_eq!(default_display_name("abcdef12"), "Agent-abcdef");
+
+        restore_env("CODEX_THREAD_ID", prior_codex);
+        restore_env("CLAUDE_CODE_SESSION_ID", prior_claude);
+        restore_env("OPENAI_API_KEY", prior_openai);
+        restore_env("CODEX_CLI_SESSION_ID", prior_codex_cli);
     }
 
     #[test]
