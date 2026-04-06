@@ -487,6 +487,78 @@ pub fn whois(agent_id: &str, room_label: Option<&str>) -> Result<Option<store::A
     Ok(store::get_profile(&room.room_id, agent_id))
 }
 
+/// Generate a formatted digest report.
+pub fn digest(since: &str, room_label: Option<&str>) -> Result<String, String> {
+    let room = resolve_room(room_label)?;
+    let since_secs = parse_since(since);
+    let msgs = store::load_messages(&room.room_id, since_secs);
+    let reactions = store::load_reactions(&room.room_id);
+
+    if msgs.is_empty() {
+        return Ok(format!("# {} — Digest (last {})\n\nNo activity.", room.label, since));
+    }
+
+    let mut agents: HashMap<String, u64> = HashMap::new();
+    let mut topics: HashMap<String, u64> = HashMap::new();
+    let first_ts = msgs.first().and_then(|m| m["ts"].as_u64()).unwrap_or(0);
+    let last_ts = msgs.last().and_then(|m| m["ts"].as_u64()).unwrap_or(0);
+
+    for msg in &msgs {
+        let from = msg["from"].as_str().unwrap_or("?").to_string();
+        *agents.entry(from).or_insert(0) += 1;
+        if let Some(text) = msg["text"].as_str() {
+            for word in text.split_whitespace() {
+                let w = word.trim_matches(|c: char| !c.is_alphanumeric()).to_lowercase();
+                if w.len() >= 5 && !is_stopword(&w) {
+                    *topics.entry(w).or_insert(0) += 1;
+                }
+            }
+        }
+    }
+
+    let mut sorted_agents: Vec<_> = agents.into_iter().collect();
+    sorted_agents.sort_by(|a, b| b.1.cmp(&a.1));
+    let mut sorted_topics: Vec<_> = topics.into_iter().collect();
+    sorted_topics.sort_by(|a, b| b.1.cmp(&a.1));
+    sorted_topics.truncate(8);
+
+    let total_reactions: usize = reactions.values().map(|v| v.len()).sum();
+
+    let first_dt = chrono::DateTime::from_timestamp(first_ts as i64, 0)
+        .map(|d| d.format("%H:%M").to_string()).unwrap_or_default();
+    let last_dt = chrono::DateTime::from_timestamp(last_ts as i64, 0)
+        .map(|d| d.format("%H:%M").to_string()).unwrap_or_default();
+
+    let mut report = format!("# {} — Digest (last {})\n\n", room.label, since);
+    report.push_str(&format!("**Period:** {} → {}\n", first_dt, last_dt));
+    report.push_str(&format!("**Messages:** {}  |  **Agents:** {}  |  **Reactions:** {}\n\n", msgs.len(), sorted_agents.len(), total_reactions));
+
+    report.push_str("## Participants\n");
+    for (agent, count) in &sorted_agents {
+        report.push_str(&format!("- **{}**: {} messages\n", agent, count));
+    }
+
+    report.push_str("\n## Key Topics\n");
+    report.push_str(&sorted_topics.iter().map(|(w, _)| w.as_str()).collect::<Vec<_>>().join(", "));
+
+    report.push_str("\n\n## Highlights\n");
+    // Pick messages with most text (likely substantive)
+    let mut by_length: Vec<_> = msgs.iter().collect();
+    by_length.sort_by(|a, b| {
+        let la = a["text"].as_str().unwrap_or("").len();
+        let lb = b["text"].as_str().unwrap_or("").len();
+        lb.cmp(&la)
+    });
+    for msg in by_length.iter().take(5) {
+        let from = msg["from"].as_str().unwrap_or("?");
+        let text = msg["text"].as_str().unwrap_or("");
+        let short = &text[..100.min(text.len())];
+        report.push_str(&format!("- **{}**: {}\n", from, short));
+    }
+
+    Ok(report)
+}
+
 /// Add a webhook URL to a room.
 pub fn add_webhook(url: &str, room_label: Option<&str>) -> Result<String, String> {
     let room = resolve_room(room_label)?;

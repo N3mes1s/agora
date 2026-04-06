@@ -12,10 +12,22 @@ mod transport;
 
 use base64::Engine;
 use clap::{Parser, Subcommand};
+use serde::{Deserialize, Serialize};
 use std::process;
 
 const BASE64: base64::engine::general_purpose::GeneralPurpose =
     base64::engine::general_purpose::URL_SAFE_NO_PAD;
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+struct InviteTokenPayload {
+    room_id: String,
+    secret: String,
+    label: String,
+    #[serde(default)]
+    target_agent_id: Option<String>,
+    #[serde(default)]
+    purpose: Option<String>,
+}
 
 #[derive(Parser)]
 #[command(name = "agora", about = "Encrypted agent-to-agent chat", version)]
@@ -242,6 +254,16 @@ enum Commands {
         agent_id: String,
     },
 
+    /// Generate a formatted digest report
+    Digest {
+        /// Time window (e.g. 8h, 24h, 7d)
+        #[arg(default_value = "24h")]
+        since: String,
+        /// Output to file
+        #[arg(long)]
+        out: Option<String>,
+    },
+
     /// Set a readable alias for an agent
     Alias {
         /// Agent ID
@@ -449,6 +471,49 @@ fn invite_token(room: &store::RoomEntry) -> String {
     format!("agr_{}", BASE64.encode(payload.as_bytes()))
 }
 
+fn targeted_invite_token(room: &store::RoomEntry, target_agent_id: &str, purpose: &str) -> String {
+    let payload = InviteTokenPayload {
+        room_id: room.room_id.clone(),
+        secret: room.secret.clone(),
+        label: room.label.clone(),
+        target_agent_id: Some(target_agent_id.to_string()),
+        purpose: Some(purpose.to_string()),
+    };
+    format!(
+        "agr_{}",
+        BASE64.encode(serde_json::to_vec(&payload).expect("invite token payload should serialize"))
+    )
+}
+
+fn parse_invite_token(token: &str) -> Result<InviteTokenPayload, String> {
+    let raw = token.strip_prefix("agr_").unwrap_or(token);
+    let bytes = BASE64
+        .decode(raw)
+        .map_err(|_| "Invalid invite token (bad encoding).".to_string())?;
+
+    if let Ok(payload) = serde_json::from_slice::<InviteTokenPayload>(&bytes) {
+        return Ok(payload);
+    }
+
+    let payload = String::from_utf8_lossy(&bytes);
+    let parts: Vec<&str> = payload.splitn(3, ':').collect();
+    if parts.len() < 2 {
+        return Err("Invalid invite token.".to_string());
+    }
+
+    Ok(InviteTokenPayload {
+        room_id: parts[0].to_string(),
+        secret: parts[1].to_string(),
+        label: if parts.len() == 3 {
+            parts[2].to_string()
+        } else {
+            parts[0][..12.min(parts[0].len())].to_string()
+        },
+        target_agent_id: None,
+        purpose: None,
+    })
+}
+
 fn print_msg(env: &serde_json::Value) {
     print_msg_with_depth(env, 0);
 }
@@ -552,24 +617,29 @@ fn main() {
         }
 
         Commands::Accept { token } => {
-            let raw = token.strip_prefix("agr_").unwrap_or(&token);
-            match BASE64.decode(raw) {
-                Ok(bytes) => {
-                    let payload = String::from_utf8_lossy(&bytes);
-                    let parts: Vec<&str> = payload.splitn(3, ':').collect();
-                    if parts.len() < 2 {
-                        eprintln!("  Invalid invite token.");
-                        process::exit(1);
+            match parse_invite_token(&token) {
+                Ok(payload) => {
+                    if let Some(target) = payload.target_agent_id.as_deref() {
+                        let me = store::get_agent_id();
+                        if me != target {
+                            eprintln!(
+                                "  Error: invite token is intended for '{}' but your agent ID is '{}'.",
+                                target, me
+                            );
+                            eprintln!("  Note: agent IDs are not authenticated yet; this is a soft guardrail.");
+                            process::exit(1);
+                        }
                     }
-                    let room_id = parts[0];
-                    let secret = parts[1];
-                    let label = if parts.len() == 3 { parts[2].to_string() } else { room_id[..12.min(room_id.len())].to_string() };
-                    match chat::join(room_id, secret, &label) {
+
+                    match chat::join(&payload.room_id, &payload.secret, &payload.label) {
                         Ok(_) => {
-                            let room_key = crypto::derive_room_key(secret, room_id);
-                            println!("  Joined room '{label}'");
+                            let room_key = crypto::derive_room_key(&payload.secret, &payload.room_id);
+                            println!("  Joined room '{}'", payload.label);
                             println!("  Encryption: AES-256-GCM + HKDF-SHA256");
                             println!("  Fingerprint: {}", crypto::fingerprint(&room_key));
+                            if payload.purpose.as_deref() == Some("dm") {
+                                println!("  DM invite target check passed.");
+                            }
                         }
                         Err(e) => {
                             eprintln!("  Error: {e}");
@@ -577,8 +647,8 @@ fn main() {
                         }
                     }
                 }
-                Err(_) => {
-                    eprintln!("  Invalid invite token (bad encoding).");
+                Err(e) => {
+                    eprintln!("  {e}");
                     process::exit(1);
                 }
             }
@@ -629,12 +699,14 @@ fn main() {
             };
 
             if created {
-                let token = invite_token(&room_entry);
+                let token = targeted_invite_token(&room_entry, &agent_id, "dm");
                 println!("  DM room '{}' is ready for {}", room_entry.label, agent_id);
                 println!("  Room ID:    {}", room_entry.room_id);
                 println!();
-                println!("  Share this invite token with {}:", agent_id);
+                println!("  Share this DM invite token with {}:", agent_id);
                 println!("    agora accept {}", token);
+                println!("  Guardrail:  only '{}' will accept this token without overriding AGORA_AGENT_ID", agent_id);
+                println!("  Note:       agent IDs are not authenticated yet, so this is soft binding, not hard identity proof");
                 if let Some(mid) = sent_mid {
                     println!();
                     println!("  Initial message sent [{}]", &mid[..6.min(mid.len())]);
@@ -647,7 +719,11 @@ fn main() {
                     room_entry.label
                 );
             } else {
+                let token = targeted_invite_token(&room_entry, &agent_id, "dm");
                 println!("  DM room '{}' is ready for {}", room_entry.label, agent_id);
+                println!("  DM invite token for {}:", agent_id);
+                println!("    agora accept {}", token);
+                println!("  Guardrail:  only '{}' will accept this token without overriding AGORA_AGENT_ID", agent_id);
                 println!("  Use it with:");
                 println!("    agora dm {} <message>", agent_id);
                 println!("    agora --room {} read", room_entry.label);
@@ -816,11 +892,13 @@ fn main() {
                     let me = store::get_agent_id();
                     let now_ts = std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
-                    println!("  {:<12} {:<8} {:<10} Last seen", "Agent", "Role", "Status");
-                    println!("  {:<12} {:<8} {:<10} {}", "─".repeat(12), "─".repeat(8), "─".repeat(10), "─".repeat(16));
+                    println!("  {:<20} {:<12} {:<8} {:<10} Last seen", "Name", "Agent", "Role", "Status");
+                    println!("  {:<20} {:<12} {:<8} {:<10} {}", "─".repeat(20), "─".repeat(12), "─".repeat(8), "─".repeat(10), "─".repeat(16));
                     for m in &members {
                         let role = format!("{:?}", m.role);
                         let is_me = if m.agent_id == me { " (you)" } else { "" };
+                        let display = resolve_display_name(&m.agent_id);
+                        let name = if display == m.agent_id { "".to_string() } else { display };
                         let status = if m.last_seen > 0 && now_ts - m.last_seen < 300 {
                             "\x1b[92monline\x1b[0m"
                         } else if m.last_seen > 0 {
@@ -836,7 +914,7 @@ fn main() {
                         } else {
                             "never".to_string()
                         };
-                        println!("  {:<12} {:<8} {:<18} {seen}{is_me}", m.agent_id, role, status);
+                        println!("  {:<20} {:<12} {:<8} {:<18} {seen}{is_me}", name, m.agent_id, role, status);
                     }
                 }
                 Err(e) => {
@@ -1322,6 +1400,22 @@ fn main() {
             }
         }
 
+        Commands::Digest { since, out } => {
+            match chat::digest(&since, room) {
+                Ok(report) => {
+                    if let Some(path) = out {
+                        std::fs::write(&path, &report).unwrap_or_else(|e| {
+                            eprintln!("  Error: {e}"); process::exit(1);
+                        });
+                        println!("  Digest written to: {path}");
+                    } else {
+                        println!("{report}");
+                    }
+                }
+                Err(e) => { eprintln!("  Error: {e}"); process::exit(1); }
+            }
+        }
+
         Commands::Alias { agent_id, name } => {
             if let Some(n) = name {
                 store::set_alias(&agent_id, &n);
@@ -1703,7 +1797,8 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::dm_room_label;
+    use super::{dm_room_label, parse_invite_token, targeted_invite_token, InviteTokenPayload};
+    use crate::store::{self, Role};
 
     #[test]
     fn dm_room_label_is_stable_and_symmetric() {
@@ -1717,5 +1812,32 @@ mod tests {
     fn dm_room_label_rejects_self_dm() {
         let err = dm_room_label("agent-a", "agent-a").unwrap_err();
         assert_eq!(err, "Cannot open a DM with yourself.");
+    }
+
+    #[test]
+    fn targeted_dm_invite_round_trips() {
+        let room = store::add_room("ag-dm-test", "secret", "dm-a-b", Role::Admin);
+        let token = targeted_invite_token(&room, "agent-b", "dm");
+        let parsed = parse_invite_token(&token).unwrap();
+        assert_eq!(
+            parsed,
+            InviteTokenPayload {
+                room_id: "ag-dm-test".to_string(),
+                secret: "secret".to_string(),
+                label: "dm-a-b".to_string(),
+                target_agent_id: Some("agent-b".to_string()),
+                purpose: Some("dm".to_string()),
+            }
+        );
+    }
+
+    #[test]
+    fn legacy_invite_token_still_parses() {
+        let token = "agr_YWctcm9vbTpzZWNyZXQ6bGFiZWw";
+        let parsed = parse_invite_token(token).unwrap();
+        assert_eq!(parsed.room_id, "ag-room");
+        assert_eq!(parsed.secret, "secret");
+        assert_eq!(parsed.label, "label");
+        assert_eq!(parsed.target_agent_id, None);
     }
 }
