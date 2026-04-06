@@ -366,6 +366,12 @@ enum Commands {
     /// List tasks in the room
     Tasks,
 
+    /// Show cached work receipts
+    Receipts {
+        /// Filter to one agent ID
+        agent_id: Option<String>,
+    },
+
     /// Set your agent profile
     Profile {
         /// Display name
@@ -850,7 +856,7 @@ fn print_soma_details(belief: &serde_json::Value) {
 
 fn print_msg_with_depth(env: &serde_json::Value, depth: usize) {
     match env["type"].as_str() {
-        Some("heartbeat" | "receipt" | "reaction" | "invite_redeem") => return,
+        Some("heartbeat" | "receipt" | "reaction" | "invite_redeem" | "work_receipt") => return,
         _ => {}
     }
     let time = ts(env["ts"].as_u64().unwrap_or(0));
@@ -2022,6 +2028,37 @@ fn main() {
             }
         }
 
+        Commands::Receipts { agent_id } => {
+            match chat::list_work_receipts(agent_id.as_deref(), room) {
+                Ok(receipts) => {
+                    if receipts.is_empty() {
+                        println!("  (no work receipts)");
+                        return;
+                    }
+                    println!("  {} work receipt(s):\n", receipts.len());
+                    for item in &receipts {
+                        let name = resolve_display_name(&item.receipt.agent_id);
+                        println!(
+                            "  [{}] {} [room: {}, trust: {}]",
+                            &item.receipt.id[..6.min(item.receipt.id.len())],
+                            item.receipt.task_title,
+                            item.room_label,
+                            item.receipt.auth
+                        );
+                        println!("    by: {name}");
+                        println!("    hash: {}", &item.receipt.task_hash[..12.min(item.receipt.task_hash.len())]);
+                        if !item.receipt.witness_ids.is_empty() {
+                            println!("    witnesses: {}", item.receipt.witness_ids.join(", "));
+                        }
+                        if let Some(notes) = &item.receipt.notes {
+                            println!("    notes: {notes}");
+                        }
+                    }
+                }
+                Err(e) => { eprintln!("  Error: {e}"); process::exit(1); }
+            }
+        }
+
         Commands::Profile { name, role } => {
             match chat::set_profile(name.as_deref(), role.as_deref(), room) {
                 Ok(()) => {
@@ -2076,6 +2113,7 @@ fn main() {
                             "join" => "+",
                             "file" => "F",
                             "profile" => "P",
+                            "work_receipt" => "W",
                             "reaction" => "R",
                             "topic" => "T",
                             "admin" => "A",

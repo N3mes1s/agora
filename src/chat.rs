@@ -22,7 +22,7 @@ use std::path::Path;
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use ring::rand::SecureRandom;
+use ring::{digest, rand::SecureRandom};
 
 use crate::{crypto, store, transport};
 
@@ -59,6 +59,12 @@ pub struct DiscoveredCapabilityCard {
     pub room_id: String,
     pub card: store::AgentCapabilityCard,
     pub overlap: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ListedWorkReceipt {
+    pub room_label: String,
+    pub receipt: store::WorkReceipt,
 }
 
 fn now() -> u64 {
@@ -123,6 +129,10 @@ fn is_receipt(env: &serde_json::Value) -> bool {
     env["type"].as_str() == Some("receipt")
 }
 
+fn is_work_receipt(env: &serde_json::Value) -> bool {
+    env["type"].as_str() == Some("work_receipt")
+}
+
 fn make_reaction(target_id: &str, emoji: &str) -> serde_json::Value {
     json!({
         "v": VERSION,
@@ -169,6 +179,7 @@ fn is_invite_redeem(env: &serde_json::Value) -> bool {
 fn is_system_msg(env: &serde_json::Value) -> bool {
     is_heartbeat(env)
         || is_receipt(env)
+        || is_work_receipt(env)
         || is_file_msg(env)
         || is_reaction(env)
         || is_invite_redeem(env)
@@ -328,6 +339,30 @@ fn ingest_auxiliary_event(room_id: &str, env: &serde_json::Value) {
         return;
     }
 
+    if is_work_receipt(env) {
+        let receipt = store::WorkReceipt {
+            id: env["id"].as_str().unwrap_or("?").to_string(),
+            task_id: env["task_id"].as_str().unwrap_or("").to_string(),
+            task_title: env["task_title"].as_str().unwrap_or("").to_string(),
+            agent_id: from.to_string(),
+            notes: env["receipt_notes"].as_str().map(|s| s.to_string()),
+            task_hash: env["task_hash"].as_str().unwrap_or("").to_string(),
+            witness_ids: env["witness_ids"]
+                .as_array()
+                .map(|items| {
+                    items
+                        .iter()
+                        .filter_map(|item| item.as_str().map(|s| s.to_string()))
+                        .collect()
+                })
+                .unwrap_or_default(),
+            created_at: env["ts"].as_u64().unwrap_or(0),
+            auth: env["_auth"].as_str().unwrap_or("unsigned").to_string(),
+        };
+        store::upsert_work_receipt(room_id, &receipt);
+        return;
+    }
+
     if is_capability_card(env) {
         let capabilities = env["card_capabilities"]
             .as_array()
@@ -357,6 +392,7 @@ fn should_display_message(env: &serde_json::Value) -> bool {
     !is_heartbeat(env)
         && !is_invite_redeem(env)
         && !is_receipt(env)
+        && !is_work_receipt(env)
         && !is_reaction(env)
         && !is_capability_card(env)
 }
@@ -744,6 +780,11 @@ pub fn check(since: &str, room_label: Option<&str>) -> Result<Vec<serde_json::Va
             }
 
             if is_invite_redeem(&env) {
+                continue;
+            }
+
+            if is_work_receipt(&env) {
+                ingest_auxiliary_event(&room.room_id, &env);
                 continue;
             }
 
@@ -1230,6 +1271,53 @@ pub fn soma_correct(belief_id: &str, new_predicate: &str, reason: Option<&str>, 
     Ok(id)
 }
 
+fn compute_task_hash(
+    room_id: &str,
+    task_id: &str,
+    title: &str,
+    agent_id: &str,
+    notes: Option<&str>,
+    completed_at: u64,
+) -> String {
+    let payload = format!(
+        "{room_id}\n{task_id}\n{title}\n{agent_id}\n{}\n{completed_at}",
+        notes.unwrap_or("")
+    );
+    hex::encode(digest::digest(&digest::SHA256, payload.as_bytes()).as_ref())
+}
+
+fn build_work_receipt(
+    room: &store::RoomEntry,
+    task: &store::Task,
+    agent_id: &str,
+) -> store::WorkReceipt {
+    let witness_ids = room
+        .members
+        .iter()
+        .filter(|member| member.role == store::Role::Admin)
+        .map(|member| member.agent_id.clone())
+        .collect::<Vec<_>>();
+
+    store::WorkReceipt {
+        id: msg_id(),
+        task_id: task.id.clone(),
+        task_title: task.title.clone(),
+        agent_id: agent_id.to_string(),
+        notes: task.notes.clone(),
+        task_hash: compute_task_hash(
+            &room.room_id,
+            &task.id,
+            &task.title,
+            agent_id,
+            task.notes.as_deref(),
+            task.updated_at,
+        ),
+        witness_ids,
+        created_at: task.updated_at,
+        auth: "verified".to_string(),
+    }
+}
+
 /// Add a task to the room queue.
 pub fn task_add(title: &str, room_label: Option<&str>) -> Result<String, String> {
     let room = resolve_room(room_label)?;
@@ -1289,8 +1377,9 @@ pub fn task_done(task_id: &str, notes: Option<&str>, room_label: Option<&str>) -
     task.status = "done".to_string();
     task.updated_at = now();
     if let Some(n) = notes { task.notes = Some(n.to_string()); }
-    let title = task.title.clone();
-    let tid = task.id.clone();
+    let task_snapshot = task.clone();
+    let title = task_snapshot.title.clone();
+    let tid = task_snapshot.id.clone();
     store::save_tasks(&room.room_id, &tasks);
 
     let note_str = notes.map(|n| format!(" — {n}")).unwrap_or_default();
@@ -1299,6 +1388,25 @@ pub fn task_done(task_id: &str, notes: Option<&str>, room_label: Option<&str>) -
     let encrypted = encrypt_envelope(&env, &room_key, &room.room_id);
     transport::publish(&room.room_id, &encrypted);
     store::save_message(&room.room_id, &env);
+
+    let receipt = build_work_receipt(&room, &task_snapshot, &me);
+    store::upsert_work_receipt(&room.room_id, &receipt);
+    let receipt_env = json!({
+        "v": VERSION,
+        "id": receipt.id,
+        "from": me,
+        "ts": receipt.created_at,
+        "type": "work_receipt",
+        "task_id": receipt.task_id,
+        "task_title": receipt.task_title,
+        "task_hash": receipt.task_hash,
+        "receipt_notes": receipt.notes,
+        "witness_ids": receipt.witness_ids,
+        "text": format!("[receipt] {} completed {}", receipt.agent_id, receipt.task_title),
+    });
+    let encrypted_receipt = encrypt_envelope(&receipt_env, &room_key, &room.room_id);
+    transport::publish(&room.room_id, &encrypted_receipt);
+    store::save_message(&room.room_id, &receipt_env);
     Ok(tid)
 }
 
@@ -1357,7 +1465,34 @@ pub fn task_list(room_label: Option<&str>) -> Result<Vec<store::Task>, String> {
     Ok(tasks)
 }
 
-/// Activity timeline — all events (messages, joins, files, reactions, profiles).
+pub fn list_work_receipts(
+    agent_id: Option<&str>,
+    room_label: Option<&str>,
+) -> Result<Vec<ListedWorkReceipt>, String> {
+    let rooms = if let Some(label) = room_label {
+        vec![resolve_room(Some(label))?]
+    } else {
+        store::load_registry()
+    };
+
+    let mut receipts = Vec::new();
+    for room in rooms {
+        for receipt in store::load_work_receipts(&room.room_id) {
+            if agent_id.is_some_and(|target| target != receipt.agent_id) {
+                continue;
+            }
+            receipts.push(ListedWorkReceipt {
+                room_label: room.label.clone(),
+                receipt,
+            });
+        }
+    }
+
+    receipts.sort_by(|a, b| b.receipt.created_at.cmp(&a.receipt.created_at));
+    Ok(receipts)
+}
+
+/// Activity timeline — all events (messages, joins, files, reactions, profiles, work receipts).
 pub fn timeline(since: &str, room_label: Option<&str>) -> Result<Vec<serde_json::Value>, String> {
     let room = resolve_room(room_label)?;
     let since_secs = parse_since(since);
@@ -1369,6 +1504,8 @@ pub fn timeline(since: &str, room_label: Option<&str>) -> Result<Vec<serde_json:
             "file"
         } else if evt["type"].as_str() == Some("profile") {
             "profile"
+        } else if is_work_receipt(evt) {
+            "work_receipt"
         } else if evt["type"].as_str() == Some("reaction") {
             "reaction"
         } else if evt["text"].as_str().unwrap_or("").contains("Joined (agora") {
@@ -2244,10 +2381,11 @@ mod tests {
     use super::{
         allow_incoming_message, annotate_soma_message, count_invite_redemptions_in_envs,
         decrypt_payload, enforce_outbound_plaza_rate_limit, encrypt_envelope,
-        infer_soma_subject_path, make_envelope, make_invite_redemption, pin, pins, resolve_room,
-        seed_plaza_rate_limit_state, send_watch_heartbeat, should_display_message, signing_message_bytes,
-        soma_churn_decay, soma_correct, unpin, SignedWirePayload, SIGNED_WIRE_VERSION, BASE64,
-        PLAZA_RATE_LIMIT_WINDOW_SECS,
+        infer_soma_subject_path, ingest_auxiliary_event, list_work_receipts, make_envelope,
+        make_invite_redemption, pin, pins, resolve_room, seed_plaza_rate_limit_state,
+        send_watch_heartbeat, should_display_message, signing_message_bytes, soma_churn_decay,
+        soma_correct, task_add, task_done, unpin, SignedWirePayload, SIGNED_WIRE_VERSION,
+        BASE64, PLAZA_RATE_LIMIT_WINDOW_SECS,
     };
     use crate::crypto;
     use crate::store::{self, Role};
@@ -2468,6 +2606,54 @@ mod tests {
         });
 
         assert!(!should_display_message(&receipt));
+    }
+
+    #[test]
+    fn task_done_generates_work_receipt() {
+        let _guard = store::test_env_lock().lock().unwrap();
+        let (_home, _room) = setup_plaza_room("receipt-admin", Role::Admin);
+
+        let task_id = task_add("Ship receipts", None).unwrap();
+        task_done(&task_id, Some("PR #60"), None).unwrap();
+
+        let receipts = list_work_receipts(Some("receipt-admin"), Some("plaza")).unwrap();
+        assert_eq!(receipts.len(), 1);
+        let receipt = &receipts[0].receipt;
+        assert_eq!(receipt.task_id, task_id);
+        assert_eq!(receipt.task_title, "Ship receipts");
+        assert_eq!(receipt.notes.as_deref(), Some("PR #60"));
+        assert_eq!(receipt.auth, "verified");
+        assert_eq!(receipt.witness_ids, vec!["receipt-admin".to_string()]);
+        assert_eq!(receipt.task_hash.len(), 64);
+    }
+
+    #[test]
+    fn work_receipts_are_hidden_messages_but_cached() {
+        let _guard = store::test_env_lock().lock().unwrap();
+        let (_home, room) = setup_plaza_room("receipt-reader", Role::Admin);
+        let env = json!({
+            "id": "wr01",
+            "from": "peer-agent",
+            "ts": current_ts(),
+            "type": "work_receipt",
+            "task_id": "task01",
+            "task_title": "Implement receipts",
+            "task_hash": "abc123",
+            "receipt_notes": "done",
+            "witness_ids": ["admin-a", "admin-b"],
+            "text": "[receipt] peer-agent completed Implement receipts",
+            "_auth": "verified",
+            "v": "3.0",
+        });
+
+        assert!(!should_display_message(&env));
+        ingest_auxiliary_event(&room.room_id, &env);
+
+        let receipts = list_work_receipts(Some("peer-agent"), Some("plaza")).unwrap();
+        assert_eq!(receipts.len(), 1);
+        assert_eq!(receipts[0].receipt.task_id, "task01");
+        assert_eq!(receipts[0].receipt.witness_ids.len(), 2);
+        assert_eq!(receipts[0].receipt.auth, "verified");
     }
 
     #[test]

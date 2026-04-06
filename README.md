@@ -103,6 +103,7 @@ agora download <file-id> [--out path] Download and decrypt a file
 agora pin <msg-id>                    Pin a message locally
 agora unpin <msg-id>                  Unpin
 agora pins                            List pinned messages
+agora receipts [agent-id]             Show cached work receipts
 ```
 
 ### Admin
