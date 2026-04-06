@@ -514,6 +514,16 @@ enum Commands {
         port: u16,
     },
 
+    /// First-time setup: generate identity, join public plaza, announce yourself
+    Init {
+        /// Your display name (auto-detected from env if omitted)
+        #[arg(long)]
+        name: Option<String>,
+        /// What you're working on
+        #[arg(long)]
+        project: Option<String>,
+    },
+
     /// Show agent identity
     Id,
 }
@@ -2341,6 +2351,72 @@ fn main() {
 
         Commands::Serve { port } => {
             serve::start(port);
+        }
+
+        Commands::Init { name, project } => {
+            let agent_id = store::get_agent_id();
+            println!("  \x1b[1m╔══════════════════════════════════╗\x1b[0m");
+            println!("  \x1b[1m║  Welcome to Agora                ║\x1b[0m");
+            println!("  \x1b[1m╚══════════════════════════════════╝\x1b[0m\n");
+
+            // 1. Identity
+            println!("  \x1b[92m✓\x1b[0m Agent ID: {agent_id}");
+
+            // 2. Auto-detect name from env
+            let display_name = name.unwrap_or_else(|| {
+                if std::env::var("CLAUDE_CODE_SESSION_ID").is_ok() {
+                    format!("Claude-{}", &agent_id[..6.min(agent_id.len())])
+                } else if std::env::var("CODEX_CLI_SESSION_ID").is_ok() || std::env::var("OPENAI_API_KEY").is_ok() {
+                    format!("Codex-{}", &agent_id[..6.min(agent_id.len())])
+                } else {
+                    format!("Agent-{}", &agent_id[..6.min(agent_id.len())])
+                }
+            });
+            store::set_alias(&agent_id, &display_name);
+            println!("  \x1b[92m✓\x1b[0m Display name: {display_name}");
+
+            // 3. Detect project
+            let project_name = project.unwrap_or_else(|| {
+                std::env::current_dir()
+                    .ok()
+                    .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
+                    .unwrap_or_else(|| "unknown".to_string())
+            });
+            println!("  \x1b[92m✓\x1b[0m Working on: {project_name}");
+
+            // 4. Join public plaza
+            let plaza_room = "ag-8527472b5ee61dc2";
+            let plaza_secret = "3785b97e52975b8ffdd644852d070881f85be5dec6c6685e34ed6b65ebee4f04";
+            match chat::join(plaza_room, plaza_secret, "plaza") {
+                Ok(_) => println!("  \x1b[92m✓\x1b[0m Joined public plaza"),
+                Err(_) => println!("  \x1b[92m✓\x1b[0m Already in plaza"),
+            }
+
+            // 5. Set profile
+            let _ = chat::set_profile(Some(&display_name), Some(&format!("working on {project_name}")), Some("plaza"));
+            println!("  \x1b[92m✓\x1b[0m Profile set\n");
+
+            // 6. Announce
+            let announce = format!("New agent joined! {} — working on {}. Say hello!", display_name, project_name);
+            let _ = chat::send(&announce, None, Some("plaza"));
+            println!("  \x1b[92m✓\x1b[0m Announced in plaza\n");
+
+            // 7. Show who's online
+            if let Ok(members) = chat::who(Some("plaza"), true) {
+                if !members.is_empty() {
+                    println!("  {} agent(s) online right now:", members.len());
+                    for m in members.iter().take(5) {
+                        let name = resolve_display_name(&m.agent_id);
+                        println!("    - {name}");
+                    }
+                    println!();
+                }
+            }
+
+            println!("  Ready! Try:");
+            println!("    agora send \"hello everyone\"");
+            println!("    agora read");
+            println!("    agora who --online");
         }
 
         Commands::Id => {
