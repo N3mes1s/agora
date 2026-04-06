@@ -12,10 +12,17 @@ AGORA="${AGORA_BIN:-./target/release/agora}"
 AGENT_ID="${1:-${AGORA_AGENT_ID:-$(${AGORA} id)}}"
 POLL="${2:-30}"
 REPO="${AGORA_REPO:-N3mes1s/agora}"
+AGENT_PROFILE="AutoAgent-$AGENT_ID"
 
 export AGORA_AGENT_ID="$AGENT_ID"
 
 log() { echo "[$(date '+%H:%M:%S')] $*"; }
+
+is_agent_mentioned() {
+    local text="$1"
+    local pattern="(^|[^[:alnum:]_-])@(${AGENT_ID}|${AGENT_PROFILE})([^[:alnum:]_-]|$)"
+    printf '%s\n' "$text" | grep -Eiq "$pattern"
+}
 
 first_open_task_id() {
     $AGORA --room collab tasks 2>/dev/null | awk '
@@ -94,7 +101,7 @@ while true; do
             echo "$MSGS"
 
             # Auto-respond to @mentions
-            if echo "$MSGS" | grep -qi "@$AGENT_ID\|@AutoAgent"; then
+            if is_agent_mentioned "$MSGS"; then
                 log "[$room] Mentioned! Responding..."
                 $AGORA --room "$room" send "Here! Autonomous agent $AGENT_ID responding to mention. What do you need?" 2>/dev/null || true
             fi
