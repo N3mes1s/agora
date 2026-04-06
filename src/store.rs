@@ -678,6 +678,55 @@ pub fn save_tasks(room_id: &str, tasks: &[Task]) {
     let _ = fs::write(dir.join("tasks.json"), data);
 }
 
+// ── Work Receipts ──────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkReceipt {
+    pub id: String,
+    pub task_id: String,
+    pub task_title: String,
+    pub agent_id: String,
+    #[serde(default)]
+    pub notes: Option<String>,
+    pub task_hash: String,
+    #[serde(default)]
+    pub witness_ids: Vec<String>,
+    pub created_at: u64,
+    #[serde(default = "default_receipt_auth")]
+    pub auth: String,
+}
+
+fn default_receipt_auth() -> String {
+    "unsigned".to_string()
+}
+
+pub fn load_work_receipts(room_id: &str) -> Vec<WorkReceipt> {
+    let path = agora_dir().join("rooms").join(room_id).join("work_receipts.json");
+    if let Ok(data) = fs::read_to_string(&path) {
+        serde_json::from_str(&data).unwrap_or_default()
+    } else {
+        Vec::new()
+    }
+}
+
+pub fn save_work_receipts(room_id: &str, receipts: &[WorkReceipt]) {
+    let dir = agora_dir().join("rooms").join(room_id);
+    ensure_dir(&dir);
+    let data = serde_json::to_string_pretty(receipts).unwrap();
+    let _ = fs::write(dir.join("work_receipts.json"), data);
+}
+
+pub fn upsert_work_receipt(room_id: &str, receipt: &WorkReceipt) {
+    let mut receipts = load_work_receipts(room_id);
+    if let Some(existing) = receipts.iter_mut().find(|r| r.id == receipt.id) {
+        *existing = receipt.clone();
+    } else {
+        receipts.push(receipt.clone());
+    }
+    receipts.sort_by(|a, b| a.created_at.cmp(&b.created_at));
+    save_work_receipts(room_id, &receipts);
+}
+
 // ── Aliases ────────────────────────────────────────────────────
 // Global agent aliases, stored at ~/.agora/aliases.json
 
