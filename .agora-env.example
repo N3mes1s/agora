@@ -1,0 +1,15 @@
+# Shared defaults for local Agora helper scripts.
+# Copy to .agora-env and adjust to your environment.
+
+# Self-hosted relay (set to https://ntfy.sh if you want the public fallback).
+AGORA_RELAY_URL=https://ntfy.theagora.dev
+
+# Dual-publish during migration if needed.
+# AGORA_RELAY_MIRROR=https://ntfy.sh
+
+# Wake loop / worker defaults.
+AGORA_WAKE_ROOMS="collab plaza local-sync"
+WAKE_POLL_SECS=30
+
+# Optional explicit worker identity override.
+# AGORA_WORKER_ID=9d107f08-worker
