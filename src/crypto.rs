@@ -211,6 +211,42 @@ pub fn generate_signing_keypair_pkcs8() -> Result<Vec<u8>, CryptoError> {
     Ok(pkcs8.as_ref().to_vec())
 }
 
+/// Generate an Ed25519 PKCS8 keypair deterministically from a 32-byte seed.
+///
+/// Uses ring's `Ed25519KeyPair::from_seed_unchecked` to derive the keypair from the
+/// raw seed bytes, extracts the public key, then constructs a full RFC 5958 / RFC 8410
+/// PKCS8v1 document (version=1, with public key) that ring's `from_pkcs8` accepts.
+///
+/// Wire format (83 bytes):
+///   SEQUENCE(81) {
+///     INTEGER(1)                         -- version 1
+///     SEQUENCE { OID 1.3.101.112 }       -- Ed25519
+///     OCTET STRING { OCTET STRING { seed } }  -- 32-byte seed
+///     [1] IMPLICIT BIT STRING { pubkey } -- 33 bytes: 0x00 + 32 pubkey bytes
+///   }
+pub fn generate_signing_keypair_from_seed(seed: &[u8; 32]) -> Result<Vec<u8>, CryptoError> {
+    // Derive the keypair from the seed to get the matching public key.
+    let pair = Ed25519KeyPair::from_seed_unchecked(seed).map_err(|_| CryptoError::InvalidKey)?;
+    let pubkey = pair.public_key().as_ref();
+
+    // Construct PKCS8 v1 (RFC 5958 + RFC 8410) with both seed and public key.
+    // This is the format ring generates and accepts via from_pkcs8.
+    #[rustfmt::skip]
+    let mut pkcs8: Vec<u8> = vec![
+        0x30, 0x51,                                     // SEQUENCE, length 81
+        0x02, 0x01, 0x01,                               // INTEGER 1 (version)
+        0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70,      // SEQUENCE { OID 1.3.101.112 }
+        0x04, 0x22, 0x04, 0x20,                         // OCTET STRING(34) { OCTET STRING(32) }
+    ];
+    pkcs8.extend_from_slice(seed);           // 32-byte private key seed
+    pkcs8.extend_from_slice(&[0x81, 0x21, 0x00]); // [1] IMPLICIT BIT STRING(33), no unused bits
+    pkcs8.extend_from_slice(pubkey);          // 32-byte compressed Edwards point
+
+    // Validate round-trip before returning.
+    Ed25519KeyPair::from_pkcs8(&pkcs8).map_err(|_| CryptoError::InvalidKey)?;
+    Ok(pkcs8)
+}
+
 pub fn signing_public_key(pkcs8: &[u8]) -> Result<Vec<u8>, CryptoError> {
     let pair = Ed25519KeyPair::from_pkcs8(pkcs8).map_err(|_| CryptoError::InvalidKey)?;
     Ok(pair.public_key().as_ref().to_vec())
@@ -459,5 +495,40 @@ mod tests {
         let parts: Vec<&str> = fp.split(' ').collect();
         assert_eq!(parts.len(), 8);
         assert!(parts.iter().all(|p| p.len() == 4));
+    }
+
+    #[test]
+    fn seed_keypair_is_deterministic() {
+        let seed = [0x42u8; 32];
+        let pkcs8_a = generate_signing_keypair_from_seed(&seed).unwrap();
+        let pkcs8_b = generate_signing_keypair_from_seed(&seed).unwrap();
+        assert_eq!(pkcs8_a, pkcs8_b, "same seed must produce same PKCS8");
+    }
+
+    #[test]
+    fn seed_keypair_different_seeds_differ() {
+        let seed_a = [0x01u8; 32];
+        let seed_b = [0x02u8; 32];
+        let pkcs8_a = generate_signing_keypair_from_seed(&seed_a).unwrap();
+        let pkcs8_b = generate_signing_keypair_from_seed(&seed_b).unwrap();
+        assert_ne!(pkcs8_a, pkcs8_b, "different seeds must produce different keypairs");
+    }
+
+    #[test]
+    fn seed_keypair_produces_valid_signing_key() {
+        let seed = [0xabu8; 32];
+        let pkcs8 = generate_signing_keypair_from_seed(&seed).unwrap();
+        let pubkey = signing_public_key(&pkcs8).unwrap();
+        let msg = b"test message for signing";
+        let sig = sign_message(&pkcs8, msg).unwrap();
+        assert!(verify_message_signature(&pubkey, msg, &sig), "seed-derived key must sign/verify");
+    }
+
+    #[test]
+    fn seed_keypair_differs_from_random_keypair() {
+        let seed = [0x55u8; 32];
+        let seed_pkcs8 = generate_signing_keypair_from_seed(&seed).unwrap();
+        let random_pkcs8 = generate_signing_keypair_pkcs8().unwrap();
+        assert_ne!(seed_pkcs8, random_pkcs8, "seed-derived must differ from random");
     }
 }
