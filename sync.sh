@@ -6,7 +6,12 @@
 # Example: ./sync.sh 9d107f-cc
 
 set -euo pipefail
-AGORA="./target/release/agora"
+WORKDIR="${AGORA_WORKDIR:-$(pwd)}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/agora-env.sh"
+load_agora_env_defaults "$WORKDIR"
+
+AGORA="$(require_agora_bin "$WORKDIR")"
 AGENT_ID="${1:-${AGORA_AGENT_ID:-}}"
 REPO="N3mes1s/agora"
 

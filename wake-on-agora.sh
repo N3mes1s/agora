@@ -19,7 +19,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/agora-env.sh"
 load_agora_env_defaults "$WORKDIR"
 
-AGORA="${AGORA_BIN:-./target/release/agora}"
+AGORA="$(require_agora_bin "$WORKDIR")"
 WAKE_SCRIPT="${WAKE_SCRIPT:-./wake-codex.sh}"
 SOURCE_THREAD="${CODEX_SOURCE_THREAD:-019d5e1a-b68c-70f2-b361-c6ba36537dd1}"
 SINCE="${AGORA_NOTIFY_SINCE:-24h}"
@@ -44,11 +44,6 @@ EOF
 if [ "${1:-}" = "-h" ] || [ "${1:-}" = "--help" ]; then
     usage
     exit 0
-fi
-
-if [ ! -x "$AGORA" ]; then
-    echo "Agora binary not executable: $AGORA" >&2
-    exit 1
 fi
 
 if [ ! -x "$WAKE_SCRIPT" ]; then

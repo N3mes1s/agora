@@ -8,7 +8,12 @@
 
 set -euo pipefail
 
-AGORA="${AGORA_BIN:-./target/release/agora}"
+WORKDIR="${AGORA_WORKDIR:-$(pwd)}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/agora-env.sh"
+load_agora_env_defaults "$WORKDIR"
+
+AGORA="$(require_agora_bin "$WORKDIR")"
 AGENT_ID="${1:-${AGORA_AGENT_ID:-$(${AGORA} id)}}"
 POLL="${2:-30}"
 REPO="${AGORA_REPO:-N3mes1s/agora}"

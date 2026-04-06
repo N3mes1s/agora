@@ -8,14 +8,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/agora-env.sh"
 load_agora_env_defaults "$WORKDIR"
 
-AGORA_BIN="${AGORA_BIN:-$WORKDIR/target/release/agora}"
+AGORA_BIN="$(require_agora_bin "$WORKDIR")"
 BASE_HOME="${BASE_HOME:-$HOME}"
 WORKER_HOME="${WORKER_HOME:-$WORKDIR/.worker-home}"
-
-if [ ! -x "$AGORA_BIN" ]; then
-    echo "Agora binary not executable: $AGORA_BIN" >&2
-    exit 1
-fi
 
 resolve_worker_id() {
     if [ -n "${AGORA_WORKER_ID:-}" ]; then

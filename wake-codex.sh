@@ -20,6 +20,9 @@
 
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/agora-env.sh"
+
 WS_URL="${CODEX_WS_URL:-ws://127.0.0.1:8765}"
 SERVER_SESSION="${CODEX_SERVER_SESSION:-codex_app_server}"
 AGENT_SESSION="${CODEX_AGENT_SESSION:-codex_remote_fork}"
@@ -107,7 +110,7 @@ resolve_worker_agora_id() {
     fi
 
     local agora_bin
-    agora_bin="$WORKDIR/target/release/agora"
+    agora_bin="$(resolve_agora_bin "$WORKDIR")"
     if [ -x "$agora_bin" ]; then
         local base_id
         base_id="$("$agora_bin" id 2>/dev/null | extract_agora_agent_id || true)"

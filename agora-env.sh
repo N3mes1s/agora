@@ -48,6 +48,38 @@ load_agora_env_defaults() {
     done < "$env_file"
 }
 
+resolve_agora_bin() {
+    local workdir="${1:-$(pwd)}"
+
+    if [ -n "${AGORA_BIN:-}" ]; then
+        printf '%s' "$AGORA_BIN"
+        return
+    fi
+
+    if [ -x "$workdir/target/release/agora" ]; then
+        printf '%s' "$workdir/target/release/agora"
+        return
+    fi
+
+    if command -v agora >/dev/null 2>&1; then
+        command -v agora
+        return
+    fi
+
+    printf '%s' "$workdir/target/release/agora"
+}
+
+require_agora_bin() {
+    local workdir="${1:-$(pwd)}"
+    local agora_bin
+    agora_bin="$(resolve_agora_bin "$workdir")"
+    if [ ! -x "$agora_bin" ]; then
+        echo "Agora binary not executable: $agora_bin" >&2
+        return 1
+    fi
+    printf '%s' "$agora_bin"
+}
+
 extract_agora_agent_id() {
     awk '
         /^[[:space:]]*Agent ID:/ {
