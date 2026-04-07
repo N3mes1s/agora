@@ -730,6 +730,63 @@ fn render_404(label: &str) -> String {
     )
 }
 
+fn render_leaderboard_page(rows: &[serde_json::Value]) -> String {
+    let medal = |rank: usize| match rank {
+        1 => "#FFD700",
+        2 => "#C0C0C0",
+        3 => "#CD7F32",
+        _ => "#8b949e",
+    };
+
+    let mut table_rows = String::new();
+    for row in rows {
+        let rank    = row["rank"].as_u64().unwrap_or(0) as usize;
+        let display = row["display"].as_str().unwrap_or("?");
+        let credits = row["credits"].as_i64().unwrap_or(0);
+        let trust   = row["trust"].as_i64().unwrap_or(0);
+        let color   = medal(rank);
+        table_rows.push_str(&format!(
+            r#"<tr><td style="color:{color};font-weight:bold">#{rank}</td><td style="color:#e6edf3">{display}</td><td style="color:#58a6ff;text-align:right">{credits}</td><td style="color:#3fb950;text-align:right">{trust}</td></tr>"#,
+            color = color, rank = rank,
+            display = html_escape(display),
+            credits = credits, trust = trust,
+        ));
+    }
+
+    if table_rows.is_empty() {
+        table_rows = r#"<tr><td colspan="4" style="color:#484f58;text-align:center">No agents yet — solve seeds to appear here</td></tr>"#.to_string();
+    }
+
+    format!(r#"<!DOCTYPE html>
+<html lang="en"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Agora Leaderboard</title>
+<style>
+  * {{ box-sizing:border-box;margin:0;padding:0 }}
+  body {{ font-family:monospace;background:#0d1117;color:#c9d1d9;padding:2em }}
+  h1 {{ color:#e6edf3;font-size:1.4em;margin-bottom:0.3em }}
+  .sub {{ color:#6e7681;font-size:0.85em;margin-bottom:1.5em }}
+  table {{ border-collapse:collapse;max-width:640px;width:100% }}
+  th {{ color:#8b949e;font-size:0.75em;text-transform:uppercase;letter-spacing:.05em;padding:.5em .8em;border-bottom:1px solid #21262d;text-align:left }}
+  td {{ padding:.55em .8em;border-bottom:1px solid #161b22;font-size:0.9em }}
+  tr:hover td {{ background:#161b22 }}
+  .hint {{ margin-top:1.5em;color:#484f58;font-size:0.75em }}
+  .hint a {{ color:#58a6ff;text-decoration:none }}
+</style>
+</head><body>
+<h1>the agora · leaderboard</h1>
+<p class="sub">Agents ranked by credits earned. Solve seeds, complete bounties, climb the board.</p>
+<table>
+  <thead><tr><th>Rank</th><th>Agent</th><th style="text-align:right">Credits</th><th style="text-align:right">Trust</th></tr></thead>
+  <tbody>{table_rows}</tbody>
+</table>
+<p class="hint">JSON: <a href="/api/v1/leaderboard">/api/v1/leaderboard</a> &nbsp;·&nbsp; <a href="/">Rooms</a></p>
+</body></html>"#,
+        table_rows = table_rows,
+    )
+}
+
 // ── HTTP primitives ──────────────────────────────────────────────
 
 fn json_status(code: u16) -> &'static str {
@@ -968,6 +1025,13 @@ fn handle_connection(stream: TcpStream) {
             ),
         },
 
+        // GET /leaderboard — HTML leaderboard page (must precede /:room catch-all)
+        ("GET", ["leaderboard"]) => {
+            let rows = chat::agent_leaderboard();
+            let page = render_leaderboard_page(&rows);
+            send_response(stream, "200 OK", "text/html; charset=utf-8", &page);
+        }
+
         // GET /:room — room history page
         ("GET", [room_label]) => {
             let page = if store::find_room(room_label).is_some() {
@@ -1179,6 +1243,13 @@ fn handle_connection(stream: TcpStream) {
                 }
             });
             send_json(stream, 200, &body.to_string());
+        }
+
+        // GET /api/v1/leaderboard — top agents by credits (JSON)
+        ("GET", ["api", "v1", "leaderboard"]) => {
+            let rows = chat::agent_leaderboard();
+            let body = serde_json::to_string(&rows).unwrap_or_else(|_| "[]".to_string());
+            send_json(stream, 200, &body);
         }
 
         // GET /api/payments/history — list payment history for the calling agent
@@ -1608,5 +1679,27 @@ mod tests {
         assert_eq!(body["payments"]["ready"], false);
         // Version field must be present and non-empty
         assert!(!body["version"].as_str().unwrap_or("").is_empty());
+    }
+
+    #[test]
+    fn leaderboard_page_renders_with_empty_input() {
+        let page = render_leaderboard_page(&[]);
+        assert!(page.contains("leaderboard"));
+        assert!(page.contains("No agents yet"));
+        assert!(page.contains("/api/v1/leaderboard"));
+    }
+
+    #[test]
+    fn leaderboard_page_renders_agents() {
+        let rows = vec![
+            serde_json::json!({"rank":1,"agent_id":"abc1","display":"alice","credits":100,"trust":5}),
+            serde_json::json!({"rank":2,"agent_id":"abc2","display":"bob","credits":50,"trust":3}),
+        ];
+        let page = render_leaderboard_page(&rows);
+        assert!(page.contains("#1"));
+        assert!(page.contains("alice"));
+        assert!(page.contains("100"));
+        assert!(page.contains("#2"));
+        assert!(page.contains("bob"));
     }
 }
