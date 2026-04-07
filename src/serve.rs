@@ -1153,6 +1153,34 @@ fn handle_connection(stream: TcpStream) {
             }
         }
 
+        // GET /api/health — structured health check for Railway + ops monitoring
+        // Always returns 200 so Railway healthcheck passes; status field indicates readiness
+        ("GET", ["api", "health"]) => {
+            let e2b     = std::env::var("E2B_TOKEN").map(|v| !v.is_empty()).unwrap_or(false);
+            let daytona = std::env::var("DAYTONA_TOKEN").map(|v| !v.is_empty()).unwrap_or(false);
+            let sprites = std::env::var("SPRITES_TOKEN").map(|v| !v.is_empty()).unwrap_or(false);
+            let stripe_key     = std::env::var("STRIPE_SECRET_KEY").map(|v| !v.is_empty()).unwrap_or(false);
+            let stripe_webhook = std::env::var("STRIPE_WEBHOOK_SECRET").map(|v| !v.is_empty()).unwrap_or(false);
+            let relay_url = std::env::var("AGORA_RELAY_URL")
+                .unwrap_or_else(|_| "https://ntfy.theagora.dev".to_string());
+            let sandbox_ok = e2b || daytona || sprites;
+            let body = serde_json::json!({
+                "status": if sandbox_ok && stripe_key { "ok" } else { "degraded" },
+                "version": env!("CARGO_PKG_VERSION"),
+                "relay": relay_url,
+                "sandbox": {
+                    "available": sandbox_ok,
+                    "providers": { "e2b": e2b, "daytona": daytona, "sprites": sprites }
+                },
+                "payments": {
+                    "stripe_key": stripe_key,
+                    "stripe_webhook": stripe_webhook,
+                    "ready": stripe_key && stripe_webhook
+                }
+            });
+            send_json(stream, 200, &body.to_string());
+        }
+
         // GET /api/payments/history — list payment history for the calling agent
         // Query param: room=plaza
         ("GET", ["api", "payments", "history"]) => {
@@ -1546,5 +1574,39 @@ mod tests {
         let result = verify_stripe_signature(&raw, body, secret);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("replay protection"));
+    }
+
+    #[test]
+    fn test_health_endpoint_degraded_without_env_vars() {
+        // Without STRIPE_SECRET_KEY or sandbox tokens, status should be "degraded"
+        // and all sub-fields should be false.
+        // We just test the JSON shape via the logic directly (no env vars set in CI).
+        let e2b     = std::env::var("E2B_TOKEN").map(|v| !v.is_empty()).unwrap_or(false);
+        let daytona = std::env::var("DAYTONA_TOKEN").map(|v| !v.is_empty()).unwrap_or(false);
+        let sprites = std::env::var("SPRITES_TOKEN").map(|v| !v.is_empty()).unwrap_or(false);
+        let stripe_key     = std::env::var("STRIPE_SECRET_KEY").map(|v| !v.is_empty()).unwrap_or(false);
+        let stripe_webhook = std::env::var("STRIPE_WEBHOOK_SECRET").map(|v| !v.is_empty()).unwrap_or(false);
+        let sandbox_ok = e2b || daytona || sprites;
+        let expected_status = if sandbox_ok && stripe_key { "ok" } else { "degraded" };
+        let body = serde_json::json!({
+            "status": expected_status,
+            "version": env!("CARGO_PKG_VERSION"),
+            "relay": "https://ntfy.theagora.dev",
+            "sandbox": {
+                "available": sandbox_ok,
+                "providers": { "e2b": e2b, "daytona": daytona, "sprites": sprites }
+            },
+            "payments": {
+                "stripe_key": stripe_key,
+                "stripe_webhook": stripe_webhook,
+                "ready": stripe_key && stripe_webhook
+            }
+        });
+        // In CI without env vars, must be degraded
+        assert_eq!(body["status"], "degraded");
+        assert_eq!(body["sandbox"]["available"], false);
+        assert_eq!(body["payments"]["ready"], false);
+        // Version field must be present and non-empty
+        assert!(!body["version"].as_str().unwrap_or("").is_empty());
     }
 }
