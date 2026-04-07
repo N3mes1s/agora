@@ -407,10 +407,29 @@ enum Commands {
         /// Priority (1-5, higher = more important)
         #[arg(long, default_value = "3")]
         priority: u32,
+        /// Shell command to auto-verify submissions (e.g. "cargo test")
+        #[arg(long)]
+        oracle: Option<String>,
     },
 
     /// List open bounties
     Bounties,
+
+    /// Submit a branch as a bounty solution (runs oracle if configured)
+    BountySubmit {
+        /// Task/bounty ID (prefix ok)
+        task_id: String,
+        /// Git branch containing the solution
+        branch: String,
+    },
+
+    /// Manually run the acceptance oracle on a submitted branch
+    BountyVerify {
+        /// Task/bounty ID (prefix ok)
+        task_id: String,
+        /// Agent ID whose submission to verify (prefix ok)
+        agent_id: String,
+    },
 
     /// Vouch for another agent (adds to their trust score)
     Vouch {
@@ -2240,10 +2259,30 @@ fn main() {
             }
         }
 
-        Commands::Bounty { title, priority } => {
+        Commands::Bounty { title, priority, oracle } => {
             let t = title.join(" ");
-            match chat::bounty_post(&t, priority, room) {
-                Ok(id) => println!("  Bounty [{id}] posted (P{priority}): {t}"),
+            let oracle_ref = oracle.as_deref();
+            match chat::bounty_post(&t, priority, oracle_ref, room) {
+                Ok(id) => {
+                    println!("  Bounty [{id}] posted (P{priority}): {t}");
+                    if let Some(o) = oracle_ref {
+                        println!("  Acceptance oracle: {o}");
+                    }
+                }
+                Err(e) => { eprintln!("  Error: {e}"); process::exit(1); }
+            }
+        }
+
+        Commands::BountySubmit { task_id, branch } => {
+            match chat::bounty_submit(&task_id, &branch, room) {
+                Ok(msg) => println!("  {msg}"),
+                Err(e) => { eprintln!("  Error: {e}"); process::exit(1); }
+            }
+        }
+
+        Commands::BountyVerify { task_id, agent_id } => {
+            match chat::bounty_verify(&task_id, &agent_id, room) {
+                Ok(msg) => println!("  {msg}"),
                 Err(e) => { eprintln!("  Error: {e}"); process::exit(1); }
             }
         }

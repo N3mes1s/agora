@@ -835,6 +835,22 @@ pub struct Task {
     pub created_at: u64,
     pub updated_at: u64,
     pub notes: Option<String>,
+    /// Shell command run against a submission to determine pass/fail (e.g. "cargo test")
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub acceptance_oracle: Option<String>,
+    /// Submitted branches: vec of (agent_id, branch_name)
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub submissions: Vec<BountySubmission>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct BountySubmission {
+    pub agent_id: String,
+    pub branch: String,
+    pub submitted_at: u64,
+    /// None = not yet verified, Some(true/false) = oracle result
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub oracle_passed: Option<bool>,
 }
 
 pub fn load_tasks(room_id: &str) -> Vec<Task> {
