@@ -1754,6 +1754,35 @@ pub fn bounty_submit(task_id: &str, branch: &str, room_label: Option<&str>) -> R
     let room = resolve_room(room_label)?;
     let me = store::get_agent_id();
     let mut tasks = store::load_tasks(&room.room_id);
+
+    // If not in local store, reconstruct from room messages (cross-session support).
+    if !tasks.iter().any(|t| t.id.starts_with(task_id)) {
+        let msgs = store::load_messages(&room.room_id, 604800);
+        for msg in &msgs {
+            if msg["type"].as_str() == Some("bounty")
+                && msg["id"].as_str().map_or(false, |id| id.starts_with(task_id))
+            {
+                tasks.push(store::Task {
+                    id: msg["id"].as_str().unwrap_or(task_id).to_string(),
+                    title: msg["title"].as_str().unwrap_or("").to_string(),
+                    status: msg["status"].as_str().unwrap_or("open").to_string(),
+                    created_by: msg["from"].as_str().unwrap_or("").to_string(),
+                    claimed_by: None,
+                    created_at: msg["ts"].as_u64().unwrap_or(0),
+                    updated_at: msg["ts"].as_u64().unwrap_or(0),
+                    notes: None,
+                    acceptance_oracle: msg["acceptance_oracle"].as_str().map(|s| s.to_string()),
+                    // Bounty messages may use "reward_credits" or the legacy "reward" key.
+                    reward_credits: msg["reward_credits"].as_i64()
+                        .or_else(|| msg["reward"].as_i64()),
+                    reward_trust: msg["reward_trust"].as_i64(),
+                    submissions: vec![],
+                });
+                break;
+            }
+        }
+    }
+
     let task = tasks.iter_mut()
         .find(|t| t.id.starts_with(task_id))
         .ok_or_else(|| format!("No task matching '{task_id}'"))?;
@@ -4024,7 +4053,8 @@ mod tests {
         role_heartbeat, role_release, payment_complete_solana_deposit,
         seed_plaza_rate_limit_state, send_watch_heartbeat,
         should_display_message, signing_message_bytes, soma_churn_decay, soma_correct,
-        stale_claim_weight, task_add, task_checkpoint, task_done, unpin,
+        bounty_verify, stale_claim_weight, task_add, task_add_with_oracle,
+        task_checkpoint, task_done, unpin,
         verified_solana_deposit_from_tx, SignedWirePayload, VerifiedSolanaDeposit,
         SIGNED_WIRE_VERSION, BASE64, DISCOVERY_POSITIVE_HALF_LIFE_SECS,
         PLAZA_RATE_LIMIT_WINDOW_SECS, SOLANA_TOKEN_PROGRAM, SOLANA_TREASURY_WALLET,
@@ -4800,6 +4830,84 @@ mod tests {
         assert_eq!(count_invite_redemptions_in_envs(&events, "invite-a"), 2);
         assert_eq!(count_invite_redemptions_in_envs(&events, "invite-b"), 1);
         assert_eq!(count_invite_redemptions_in_envs(&events, "invite-c"), 0);
+    }
+
+    /// Verify that bounty_verify grants the configured credits to the winning agent
+    /// when the acceptance oracle exits with status 0 (PASS).
+    #[test]
+    fn bounty_verify_awards_credits_to_winner() {
+        let _guard = store::test_env_lock().lock().unwrap();
+        let agent_id = "bounty-winner";
+        let (_home, room) = setup_plaza_room(agent_id, Role::Admin);
+
+        // Create a temporary git branch so run_oracle_on_branch can check it out.
+        // We use a nanosecond-suffixed name to avoid collisions between parallel runs.
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let branch = format!("test-bounty-verify-{ts}");
+        let _ = std::process::Command::new("git")
+            .args(["branch", &branch])
+            .output();
+
+        // Create a bounty task with a 50-credit reward. Oracle is "true" — always passes.
+        let task_id = task_add_with_oracle(
+            "Build feature X",
+            Some("true"),
+            Some(50),
+            None,
+            None,
+        )
+        .unwrap();
+
+        // Register a submission from the winner agent using the branch above.
+        let mut tasks = store::load_tasks(&room.room_id);
+        let task = tasks.iter_mut().find(|t| t.id == task_id).unwrap();
+        task.submissions.push(store::BountySubmission {
+            agent_id: agent_id.to_string(),
+            branch: branch.clone(),
+            submitted_at: 0,
+            oracle_passed: None,
+        });
+        store::save_tasks(&room.room_id, &tasks);
+
+        // Pre-condition: no credits yet.
+        assert_eq!(
+            store::credit_balance(&room.room_id, agent_id),
+            0,
+            "winner should start with 0 credits"
+        );
+
+        // Run the oracle.
+        let result = bounty_verify(&task_id, agent_id, None)
+            .expect("bounty_verify should succeed");
+        assert!(
+            result.starts_with("PASS"),
+            "oracle 'true' must PASS, got: {result}"
+        );
+
+        // Post-condition: winner received the bounty reward.
+        assert_eq!(
+            store::credit_balance(&room.room_id, agent_id),
+            50,
+            "bounty_verify must grant 50 credits to the winner on oracle PASS"
+        );
+
+        // Task should be closed and attributed to the winner.
+        let tasks = store::load_tasks(&room.room_id);
+        let task = tasks.iter().find(|t| t.id == task_id).unwrap();
+        assert_eq!(task.status, "done", "task must be marked done after oracle PASS");
+        assert_eq!(
+            task.claimed_by.as_deref(),
+            Some(agent_id),
+            "winning agent must be set as claimed_by"
+        );
+
+        // Clean up the temporary branch.
+        let _ = std::process::Command::new("git")
+            .args(["branch", "-D", &branch])
+            .output();
     }
 }
 
