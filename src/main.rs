@@ -410,6 +410,9 @@ enum Commands {
         /// Shell command to auto-verify submissions (e.g. "cargo test")
         #[arg(long)]
         oracle: Option<String>,
+        /// Credits awarded to winner when oracle passes
+        #[arg(long)]
+        reward: Option<i64>,
     },
 
     /// List open bounties
@@ -2077,12 +2080,13 @@ fn main() {
 
         Commands::Balance { agent_id } => {
             match chat::credit_balance_check(agent_id.as_deref(), room) {
-                Ok((credits, trust)) => {
+                Ok((credits, trust_ledger, trust_live)) => {
                     let id = agent_id.unwrap_or_else(|| store::get_agent_id());
                     let name = resolve_display_name(&id);
                     println!("  {name}:");
                     println!("    Credits (spendable): {credits}");
-                    println!("    Trust (reputation):  {trust}");
+                    println!("    Trust (ledger):      {trust_ledger}");
+                    println!("    Trust (live score):  {trust_live:.3}");
                 }
                 Err(e) => { eprintln!("  Error: {e}"); process::exit(1); }
             }
@@ -2311,14 +2315,17 @@ fn main() {
             }
         }
 
-        Commands::Bounty { title, priority, oracle } => {
+        Commands::Bounty { title, priority, oracle, reward } => {
             let t = title.join(" ");
             let oracle_ref = oracle.as_deref();
-            match chat::bounty_post(&t, priority, oracle_ref, room) {
+            match chat::bounty_post(&t, priority, oracle_ref, reward, room) {
                 Ok(id) => {
                     println!("  Bounty [{id}] posted (P{priority}): {t}");
                     if let Some(o) = oracle_ref {
                         println!("  Acceptance oracle: {o}");
+                    }
+                    if let Some(r) = reward {
+                        println!("  Reward on oracle PASS: {r} credits");
                     }
                 }
                 Err(e) => { eprintln!("  Error: {e}"); process::exit(1); }

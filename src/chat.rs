@@ -1198,10 +1198,37 @@ pub fn credit_grant(agent_id: &str, amount: i64, reason: &str, room_label: Optio
     Ok(balance)
 }
 
-pub fn credit_balance_check(agent_id: Option<&str>, room_label: Option<&str>) -> Result<(i64, i64), String> {
+pub fn credit_balance_check(agent_id: Option<&str>, room_label: Option<&str>) -> Result<(i64, i64, f64), String> {
     let room = resolve_room(room_label)?;
     let id = agent_id.unwrap_or(&store::get_agent_id()).to_string();
-    Ok((store::credit_balance(&room.room_id, &id), store::trust_balance(&room.room_id, &id)))
+    let credits = store::credit_balance(&room.room_id, &id);
+    let trust_ledger = store::trust_balance(&room.room_id, &id);
+    let trust_live = compute_agent_trust_score(&id);
+    Ok((credits, trust_ledger, trust_live))
+}
+
+/// Compute a live trust score for an agent across all rooms.
+/// Uses the same decay/multiplier logic as discover but doesn't require a capability card.
+pub fn compute_agent_trust_score(agent_id: &str) -> f64 {
+    let rooms = store::load_registry();
+    let now_ts = now();
+    let mut weighted_receipts = 0.0_f64;
+    let mut rooms_active = 0usize;
+
+    for room in &rooms {
+        let receipts = store::load_work_receipts(&room.room_id);
+        let agent_receipts: Vec<_> = receipts.iter().filter(|r| r.agent_id == agent_id).collect();
+        if agent_receipts.is_empty() { continue; }
+        rooms_active += 1;
+        weighted_receipts += agent_receipts
+            .iter()
+            .map(|r| discovery_decay_weight(now_ts.saturating_sub(r.created_at), DISCOVERY_POSITIVE_HALF_LIFE_SECS))
+            .sum::<f64>();
+    }
+
+    let vouches = vouch_count(agent_id) as f64;
+    let room_presence = 1.0 + rooms_active as f64 * 0.2;
+    (1.0 + weighted_receipts) * room_presence * (1.0 + vouches * 0.3)
 }
 
 pub fn credit_spend(amount: i64, reason: &str, room_label: Option<&str>) -> Result<i64, String> {
@@ -1632,33 +1659,37 @@ pub fn vouch_count(agent_id: &str) -> usize {
 /// Post a bounty — a task with a priority weight that boosts discoverer trust.
 ///
 /// `acceptance_oracle`: optional shell command run against submissions to auto-verify (e.g. "cargo test").
-pub fn bounty_post(title: &str, priority: u32, acceptance_oracle: Option<&str>, room_label: Option<&str>) -> Result<String, String> {
+pub fn bounty_post(title: &str, priority: u32, acceptance_oracle: Option<&str>, reward: Option<i64>, room_label: Option<&str>) -> Result<String, String> {
     let room = resolve_room(room_label)?;
     let me = store::get_agent_id();
     let id = msg_id();
     let room_key = crypto::derive_room_key(&room.secret, &room.room_id);
+    let reward_suffix = reward.map(|r| format!(" [reward: {r} credits]")).unwrap_or_default();
     let mut env = json!({
         "v": VERSION, "id": id, "from": me, "ts": now(),
         "type": "bounty",
         "title": title,
         "priority": priority,
         "status": "open",
-        "text": format!("[bounty P{}] {title} (id: {})", priority, &id[..6]),
+        "text": format!("[bounty P{}] {title}{reward_suffix} (id: {})", priority, &id[..6]),
     });
     if let Some(oracle) = acceptance_oracle {
         env["acceptance_oracle"] = json!(oracle);
+    }
+    if let Some(r) = reward {
+        env["reward"] = json!(r);
     }
     let encrypted = encrypt_envelope(&env, &room_key, &room.room_id);
     transport::publish(&room.room_id, &encrypted);
     store::save_message(&room.room_id, &env);
 
-    // Also create as a task (with oracle)
-    let _ = task_add_with_oracle(title, acceptance_oracle, room_label);
+    // Also create as a task (with oracle and reward)
+    let _ = task_add_with_oracle(title, acceptance_oracle, reward, room_label);
     Ok(id)
 }
 
-/// Internal: add a task with an optional acceptance oracle.
-fn task_add_with_oracle(title: &str, acceptance_oracle: Option<&str>, room_label: Option<&str>) -> Result<String, String> {
+/// Internal: add a task with an optional acceptance oracle and reward.
+fn task_add_with_oracle(title: &str, acceptance_oracle: Option<&str>, reward: Option<i64>, room_label: Option<&str>) -> Result<String, String> {
     let room = resolve_room(room_label)?;
     let me = store::get_agent_id();
     let id = msg_id();
@@ -1673,6 +1704,7 @@ fn task_add_with_oracle(title: &str, acceptance_oracle: Option<&str>, room_label
         updated_at: now(),
         notes: None,
         acceptance_oracle: acceptance_oracle.map(|s| s.to_string()),
+        reward,
         submissions: vec![],
     });
     store::save_tasks(&room.room_id, &tasks);
@@ -1813,20 +1845,39 @@ pub fn bounty_verify(task_id: &str, agent_id: &str, room_label: Option<&str>) ->
 
     let passed = run_oracle_on_branch(&branch, &oracle)?;
     sub.oracle_passed = Some(passed);
+    let reward = task.reward;
+    if passed {
+        task.status = "done".to_string();
+        task.claimed_by = Some(agent_id.to_string());
+    }
     task.updated_at = now();
     store::save_tasks(&room.room_id, &tasks);
 
     let result = if passed { "PASS" } else { "FAIL" };
+
+    // Auto-distribute credits and trust when oracle passes
+    let payout_msg = if passed {
+        if let Some(credits) = reward {
+            store::credit_add(&room.room_id, agent_id, credits, &format!("bounty reward: task {task_id}"));
+            store::trust_add(&room.room_id, agent_id, credits / 10, &format!("bounty oracle pass: task {task_id}"), "oracle");
+            format!(" — {credits} credits + {} trust awarded to {agent_id}", credits / 10)
+        } else {
+            format!(" — no reward configured (use --reward when posting bounties)")
+        }
+    } else {
+        String::new()
+    };
+
     let room_key = crypto::derive_room_key(&room.secret, &room.room_id);
     let env = make_envelope(
-        &format!("[bounty verify] {result}: '{oracle}' on branch '{branch}' (agent {agent_id}, task {task_id})"),
+        &format!("[bounty verify] {result}: '{oracle}' on branch '{branch}' (agent {agent_id}, task {task_id}){payout_msg}"),
         None,
     );
     let encrypted = encrypt_envelope(&env, &room_key, &room.room_id);
     transport::publish(&room.room_id, &encrypted);
     store::save_message(&room.room_id, &env);
 
-    Ok(format!("{result}: oracle '{oracle}' on branch '{branch}'"))
+    Ok(format!("{result}: oracle '{oracle}' on branch '{branch}'{payout_msg}"))
 }
 
 /// List open bounties in a room.
@@ -2447,6 +2498,7 @@ pub fn task_add(title: &str, room_label: Option<&str>) -> Result<String, String>
         updated_at: now(),
         notes: None,
         acceptance_oracle: None,
+        reward: None,
         submissions: vec![],
     };
     let mut tasks = store::load_tasks(&room.room_id);
@@ -2692,6 +2744,15 @@ pub fn seed_verify(seed_id: &str, answer: &str, room_label: Option<&str>) -> Res
     let seed_snapshot = seed.clone();
     store::save_seeds(&room.room_id, &seeds);
 
+    // Award credits based on difficulty
+    let seed_reward: i64 = match seed_snapshot.difficulty.as_str() {
+        "hard"   => 25,
+        "medium" => 5,
+        _        => 1,  // easy or unknown
+    };
+    store::credit_add(&room.room_id, &me, seed_reward, &format!("seed reward ({}): {}", seed_snapshot.difficulty, seed_snapshot.title));
+    store::trust_add(&room.room_id, &me, 1, &format!("seed solved: {}", seed_snapshot.title), "oracle");
+
     // Synthesise a Task so we can reuse publish_task_receipt.
     let task = store::Task {
         id: seed_snapshot.id.clone(),
@@ -2701,8 +2762,9 @@ pub fn seed_verify(seed_id: &str, answer: &str, room_label: Option<&str>) -> Res
         claimed_by: Some(me.clone()),
         created_at: seed_snapshot.created_at,
         updated_at: now(),
-        notes: Some(format!("difficulty:{}", seed_snapshot.difficulty)),
+        notes: Some(format!("difficulty:{} reward:{seed_reward}", seed_snapshot.difficulty)),
         acceptance_oracle: None,
+        reward: Some(seed_reward),
         submissions: vec![],
     };
 
@@ -2754,6 +2816,7 @@ pub fn task_list(room_label: Option<&str>) -> Result<Vec<store::Task>, String> {
                         updated_at: msg["ts"].as_u64().unwrap_or(0),
                         notes: None,
                         acceptance_oracle: None,
+                        reward: None,
                         submissions: vec![],
                     });
                 }
@@ -4125,6 +4188,7 @@ mod tests {
                 updated_at: now_ts - 10 * 24 * 60 * 60,
                 notes: Some("went dark".to_string()),
                 acceptance_oracle: None,
+                reward: None,
                 submissions: vec![],
             }],
         );
