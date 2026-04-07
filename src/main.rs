@@ -407,6 +407,9 @@ enum Commands {
         /// Priority (1-5, higher = more important)
         #[arg(long, default_value = "3")]
         priority: u32,
+        /// Shell command to auto-verify submissions (e.g. "cargo test")
+        #[arg(long)]
+        oracle: Option<String>,
     },
 
     /// List open bounties
@@ -430,6 +433,53 @@ enum Commands {
 
     /// Show payment history (deposits and withdrawals).
     Payments,
+
+    /// Submit a branch as a bounty solution (runs oracle if configured)
+    BountySubmit {
+        /// Task/bounty ID (prefix ok)
+        task_id: String,
+        /// Git branch containing the solution
+        branch: String,
+    },
+
+    /// Manually run the acceptance oracle on a submitted branch
+    BountyVerify {
+        /// Task/bounty ID (prefix ok)
+        task_id: String,
+        /// Agent ID whose submission to verify (prefix ok)
+        agent_id: String,
+    },
+
+    /// Claim a persistent specialist role (e.g. "backend", "security")
+    RoleClaim {
+        /// Role name
+        role: String,
+        /// Lease duration in seconds (default: 3600)
+        #[arg(long, default_value = "3600")]
+        ttl: u64,
+    },
+
+    /// Send a heartbeat for a held role (extends lease, saves context)
+    RoleHeartbeat {
+        /// Role name
+        role: String,
+        /// Context summary — what you are working on
+        context: Vec<String>,
+        /// Lease extension in seconds (default: 3600)
+        #[arg(long, default_value = "3600")]
+        ttl: u64,
+    },
+
+    /// Release a role lease (stores final context for the next holder)
+    RoleRelease {
+        /// Role name
+        role: String,
+        /// Final context summary
+        context: Vec<String>,
+    },
+
+    /// Show active role leases and last context summaries
+    Roles,
 
     /// Vouch for another agent (adds to their trust score)
     Vouch {
@@ -2259,11 +2309,81 @@ fn main() {
             }
         }
 
-        Commands::Bounty { title, priority } => {
+        Commands::Bounty { title, priority, oracle } => {
             let t = title.join(" ");
-            match chat::bounty_post(&t, priority, room) {
-                Ok(id) => println!("  Bounty [{id}] posted (P{priority}): {t}"),
+            let oracle_ref = oracle.as_deref();
+            match chat::bounty_post(&t, priority, oracle_ref, room) {
+                Ok(id) => {
+                    println!("  Bounty [{id}] posted (P{priority}): {t}");
+                    if let Some(o) = oracle_ref {
+                        println!("  Acceptance oracle: {o}");
+                    }
+                }
                 Err(e) => { eprintln!("  Error: {e}"); process::exit(1); }
+            }
+        }
+
+        Commands::BountySubmit { task_id, branch } => {
+            match chat::bounty_submit(&task_id, &branch, room) {
+                Ok(msg) => println!("  {msg}"),
+                Err(e) => { eprintln!("  Error: {e}"); process::exit(1); }
+            }
+        }
+
+        Commands::BountyVerify { task_id, agent_id } => {
+            match chat::bounty_verify(&task_id, &agent_id, room) {
+                Ok(msg) => println!("  {msg}"),
+                Err(e) => { eprintln!("  Error: {e}"); process::exit(1); }
+            }
+        }
+
+        Commands::RoleClaim { role, ttl } => {
+            let me = store::get_agent_id();
+            let ts = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+            match store::role_claim(&role, &me, ttl, ts) {
+                Ok(()) => println!("  Role '{role}' claimed by {me} for {ttl}s."),
+                Err(e) => { eprintln!("  Error: {e}"); process::exit(1); }
+            }
+        }
+
+        Commands::RoleHeartbeat { role, context, ttl } => {
+            let me = store::get_agent_id();
+            let ts = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+            let ctx = context.join(" ");
+            match store::role_heartbeat(&role, &me, ttl, &ctx, ts) {
+                Ok(()) => println!("  Heartbeat sent for role '{role}'. Context saved."),
+                Err(e) => { eprintln!("  Error: {e}"); process::exit(1); }
+            }
+        }
+
+        Commands::RoleRelease { role, context } => {
+            let me = store::get_agent_id();
+            let ctx = context.join(" ");
+            match store::role_release(&role, &me, &ctx) {
+                Ok(()) => println!("  Role '{role}' released. Context stored for next holder."),
+                Err(e) => { eprintln!("  Error: {e}"); process::exit(1); }
+            }
+        }
+
+        Commands::Roles => {
+            let ts = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+            let leases = store::load_role_leases();
+            if leases.is_empty() {
+                println!("  No role leases on file.");
+            } else {
+                for l in &leases {
+                    let status = if l.expires_at > ts {
+                        format!("ACTIVE ({}s remaining)", l.expires_at - ts)
+                    } else {
+                        "EXPIRED".to_string()
+                    };
+                    println!("  {:12} {:20} {}  context: {}",
+                        l.role, l.agent_id, status,
+                        if l.context_summary.is_empty() { "(none)" } else { &l.context_summary });
+                }
             }
         }
 

@@ -732,9 +732,18 @@ fn render_404(label: &str) -> String {
 
 // ── HTTP primitives ──────────────────────────────────────────────
 
+fn json_status(code: u16) -> &'static str {
+    match code {
+        200 => "200 OK",
+        400 => "400 Bad Request",
+        401 => "401 Unauthorized",
+        404 => "404 Not Found",
+        _ => "500 Internal Server Error",
+    }
+}
+
 fn send_json(stream: TcpStream, code: u16, body: &str) {
-    let status = match code { 200 => "200 OK", 400 => "400 Bad Request", _ => "500 Internal Server Error" };
-    send_response(stream, status, "application/json", body);
+    send_response(stream, json_status(code), "application/json", body);
 }
 
 fn send_response(mut stream: TcpStream, status: &str, content_type: &str, body: &str) {
@@ -765,6 +774,82 @@ fn parse_request(raw: &str) -> (&str, &str, &str) {
         .unwrap_or("");
 
     (method, path, body)
+}
+
+/// Extract a named header value from a raw HTTP request (case-insensitive name match).
+fn get_header<'a>(raw: &'a str, name: &str) -> Option<&'a str> {
+    let header_section = raw.split_once("\r\n\r\n").map(|(h, _)| h).unwrap_or(raw);
+    let name_lower = name.to_lowercase();
+    for line in header_section.lines().skip(1) {
+        if let Some((k, v)) = line.split_once(':') {
+            if k.trim().to_lowercase() == name_lower {
+                return Some(v.trim());
+            }
+        }
+    }
+    None
+}
+
+/// Verify a Stripe webhook signature.
+///
+/// Stripe-Signature header format: `t=<timestamp>,v1=<hmac_hex>`
+/// Signed payload: `<timestamp>.<body>`
+/// Algorithm: HMAC-SHA256 with the webhook secret.
+///
+/// Returns Ok(()) if valid, Err(message) if invalid or missing.
+fn verify_stripe_signature(raw: &str, body: &str, secret: &str) -> Result<(), String> {
+    use ring::hmac;
+
+    let sig_header = get_header(raw, "Stripe-Signature")
+        .ok_or_else(|| "missing Stripe-Signature header".to_string())?;
+
+    // Parse t= and v1= from "t=timestamp,v1=sig,v1=sig2,..."
+    let mut timestamp_str: Option<&str> = None;
+    let mut signatures: Vec<&str> = Vec::new();
+    for part in sig_header.split(',') {
+        if let Some(ts) = part.strip_prefix("t=") {
+            timestamp_str = Some(ts);
+        } else if let Some(sig) = part.strip_prefix("v1=") {
+            signatures.push(sig);
+        }
+    }
+
+    let ts = timestamp_str.ok_or_else(|| "missing t= in Stripe-Signature".to_string())?;
+    if signatures.is_empty() {
+        return Err("missing v1= in Stripe-Signature".to_string());
+    }
+
+    // Reject timestamps older than 5 minutes (replay protection)
+    if let Ok(ts_secs) = ts.parse::<u64>() {
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        if now_secs.saturating_sub(ts_secs) > 300 {
+            return Err("Stripe-Signature timestamp too old (replay protection)".to_string());
+        }
+    }
+
+    // Signed payload: "<timestamp>.<body>"
+    let signed_payload = format!("{ts}.{body}");
+    let key = hmac::Key::new(hmac::HMAC_SHA256, secret.as_bytes());
+    let expected = hmac::sign(&key, signed_payload.as_bytes());
+    let expected_hex = hex::encode(expected.as_ref());
+
+    // Accept if any v1 signature matches (constant-time via ring's hmac::verify)
+    for sig in &signatures {
+        // Decode provided hex signature
+        if let Ok(sig_bytes) = hex::decode(sig) {
+            let verify_key = hmac::Key::new(hmac::HMAC_SHA256, secret.as_bytes());
+            if hmac::verify(&verify_key, signed_payload.as_bytes(), &sig_bytes).is_ok() {
+                return Ok(());
+            }
+        }
+    }
+
+    // Fallback: compare expected hex string (timing-safe through constant-time comparison)
+    let _ = expected_hex; // already computed above
+    Err("Stripe-Signature verification failed".to_string())
 }
 
 /// Parse ?since=<ts> query param from a path like /room/events?since=123
@@ -1022,14 +1107,19 @@ fn handle_connection(stream: TcpStream) {
         // Stripe sends checkout.session.completed → mint credits
         // Requires: STRIPE_WEBHOOK_SECRET env var for signature verification
         ("POST", ["api", "payments", "webhook"]) => {
-            // Verify Stripe-Signature header using HMAC-SHA256
+            // Verify Stripe-Signature header using HMAC-SHA256 (replay window: 5 minutes)
             let webhook_secret = std::env::var("STRIPE_WEBHOOK_SECRET").unwrap_or_default();
             if webhook_secret.is_empty() {
                 send_json(stream, 500, r#"{"error":"STRIPE_WEBHOOK_SECRET not configured"}"#);
                 return;
             }
 
-            // Parse the Stripe event (signature verification skipped in MVP — add HMAC in hardening)
+            if let Err(e) = verify_stripe_signature(&raw, body, &webhook_secret) {
+                eprintln!("  [webhook] signature verification failed: {e}");
+                send_json(stream, 400, r#"{"error":"invalid signature"}"#);
+                return;
+            }
+
             let event: serde_json::Value = match serde_json::from_str(body) {
                 Ok(v) => v,
                 Err(_) => {
@@ -1378,5 +1468,83 @@ mod tests {
         let body = "message_id=abc123&emoji=%F0%9F%94%A5";
         assert_eq!(form_field(body, "message_id"), Some("abc123".to_string()));
         assert!(form_field(body, "emoji").is_some());
+    }
+
+    #[test]
+    fn test_json_status_preserves_401_status() {
+        assert_eq!(json_status(401), "401 Unauthorized");
+        assert_eq!(json_status(404), "404 Not Found");
+        assert_eq!(json_status(500), "500 Internal Server Error");
+    }
+
+    #[test]
+    fn test_get_header_case_insensitive() {
+        let raw = "POST /api/payments/webhook HTTP/1.1\r\nStripe-Signature: t=123,v1=abc\r\nContent-Type: application/json\r\n\r\n{}";
+        assert_eq!(get_header(raw, "Stripe-Signature"), Some("t=123,v1=abc"));
+        assert_eq!(get_header(raw, "stripe-signature"), Some("t=123,v1=abc"));
+        assert_eq!(get_header(raw, "content-type"), Some("application/json"));
+        assert_eq!(get_header(raw, "X-Missing"), None);
+    }
+
+    #[test]
+    fn test_verify_stripe_signature_valid() {
+        use ring::hmac;
+        let secret = "whsec_test_secret";
+        // Construct a valid signature
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let body = r#"{"type":"checkout.session.completed"}"#;
+        let signed_payload = format!("{ts}.{body}");
+        let key = hmac::Key::new(hmac::HMAC_SHA256, secret.as_bytes());
+        let sig = hmac::sign(&key, signed_payload.as_bytes());
+        let sig_hex = hex::encode(sig.as_ref());
+        let raw = format!(
+            "POST /api/payments/webhook HTTP/1.1\r\nStripe-Signature: t={ts},v1={sig_hex}\r\n\r\n{body}"
+        );
+        assert!(verify_stripe_signature(&raw, body, secret).is_ok());
+    }
+
+    #[test]
+    fn test_verify_stripe_signature_invalid() {
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let body = r#"{"type":"checkout.session.completed"}"#;
+        let raw = format!(
+            "POST /api/payments/webhook HTTP/1.1\r\nStripe-Signature: t={ts},v1=deadbeef\r\n\r\n{body}"
+        );
+        assert!(verify_stripe_signature(&raw, body, "whsec_secret").is_err());
+    }
+
+    #[test]
+    fn test_verify_stripe_signature_missing_header() {
+        let raw = "POST /api/payments/webhook HTTP/1.1\r\nContent-Type: application/json\r\n\r\n{}";
+        assert!(verify_stripe_signature(raw, "{}", "whsec_secret").is_err());
+    }
+
+    #[test]
+    fn test_verify_stripe_signature_replay_rejected() {
+        use ring::hmac;
+        let secret = "whsec_test_secret";
+        // Use a timestamp 10 minutes in the past (> 5 min replay window)
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            .saturating_sub(610);
+        let body = r#"{"type":"checkout.session.completed"}"#;
+        let signed_payload = format!("{ts}.{body}");
+        let key = hmac::Key::new(hmac::HMAC_SHA256, secret.as_bytes());
+        let sig = hmac::sign(&key, signed_payload.as_bytes());
+        let sig_hex = hex::encode(sig.as_ref());
+        let raw = format!(
+            "POST /api/payments/webhook HTTP/1.1\r\nStripe-Signature: t={ts},v1={sig_hex}\r\n\r\n{body}"
+        );
+        let result = verify_stripe_signature(&raw, body, secret);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("replay protection"));
     }
 }

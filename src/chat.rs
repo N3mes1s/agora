@@ -1450,12 +1450,14 @@ pub fn vouch_count(agent_id: &str) -> usize {
 // ── Bounties ───────────────────────────────────────────────────
 
 /// Post a bounty — a task with a priority weight that boosts discoverer trust.
-pub fn bounty_post(title: &str, priority: u32, room_label: Option<&str>) -> Result<String, String> {
+///
+/// `acceptance_oracle`: optional shell command run against submissions to auto-verify (e.g. "cargo test").
+pub fn bounty_post(title: &str, priority: u32, acceptance_oracle: Option<&str>, room_label: Option<&str>) -> Result<String, String> {
     let room = resolve_room(room_label)?;
     let me = store::get_agent_id();
     let id = msg_id();
     let room_key = crypto::derive_room_key(&room.secret, &room.room_id);
-    let env = json!({
+    let mut env = json!({
         "v": VERSION, "id": id, "from": me, "ts": now(),
         "type": "bounty",
         "title": title,
@@ -1463,13 +1465,188 @@ pub fn bounty_post(title: &str, priority: u32, room_label: Option<&str>) -> Resu
         "status": "open",
         "text": format!("[bounty P{}] {title} (id: {})", priority, &id[..6]),
     });
+    if let Some(oracle) = acceptance_oracle {
+        env["acceptance_oracle"] = json!(oracle);
+    }
     let encrypted = encrypt_envelope(&env, &room_key, &room.room_id);
     transport::publish(&room.room_id, &encrypted);
     store::save_message(&room.room_id, &env);
 
-    // Also create as a task
-    let _ = task_add(title, room_label);
+    // Also create as a task (with oracle)
+    let _ = task_add_with_oracle(title, acceptance_oracle, room_label);
     Ok(id)
+}
+
+/// Internal: add a task with an optional acceptance oracle.
+fn task_add_with_oracle(title: &str, acceptance_oracle: Option<&str>, room_label: Option<&str>) -> Result<String, String> {
+    let room = resolve_room(room_label)?;
+    let me = store::get_agent_id();
+    let id = msg_id();
+    let mut tasks = store::load_tasks(&room.room_id);
+    tasks.push(store::Task {
+        id: id.clone(),
+        title: title.to_string(),
+        status: "open".to_string(),
+        created_by: me,
+        claimed_by: None,
+        created_at: now(),
+        updated_at: now(),
+        notes: None,
+        acceptance_oracle: acceptance_oracle.map(|s| s.to_string()),
+        submissions: vec![],
+    });
+    store::save_tasks(&room.room_id, &tasks);
+    Ok(id)
+}
+
+/// Submit a branch as a bounty/task solution.
+/// Records the submission on the task and optionally runs the acceptance oracle.
+pub fn bounty_submit(task_id: &str, branch: &str, room_label: Option<&str>) -> Result<String, String> {
+    let room = resolve_room(room_label)?;
+    let me = store::get_agent_id();
+    let mut tasks = store::load_tasks(&room.room_id);
+    let task = tasks.iter_mut()
+        .find(|t| t.id.starts_with(task_id))
+        .ok_or_else(|| format!("No task matching '{task_id}'"))?;
+
+    // Prevent duplicate submissions from same agent
+    if task.submissions.iter().any(|s| s.agent_id == me) {
+        return Err(format!("Agent {me} already submitted to task {task_id}"));
+    }
+
+    task.submissions.push(store::BountySubmission {
+        agent_id: me.clone(),
+        branch: branch.to_string(),
+        submitted_at: now(),
+        oracle_passed: None,
+    });
+    task.updated_at = now();
+    let title = task.title.clone();
+    let oracle = task.acceptance_oracle.clone();
+    store::save_tasks(&room.room_id, &tasks);
+
+    let room_key = crypto::derive_room_key(&room.secret, &room.room_id);
+    let env = make_envelope(
+        &format!("[bounty submit] {me} → branch '{branch}' for task {task_id}: {title}"),
+        None,
+    );
+    let encrypted = encrypt_envelope(&env, &room_key, &room.room_id);
+    transport::publish(&room.room_id, &encrypted);
+    store::save_message(&room.room_id, &env);
+
+    // Auto-verify if oracle is configured and repo has the branch
+    if let Some(ref cmd) = oracle {
+        match run_oracle_on_branch(branch, cmd) {
+            Ok(passed) => {
+                // Update oracle result
+                let mut tasks2 = store::load_tasks(&room.room_id);
+                if let Some(t) = tasks2.iter_mut().find(|t| t.id.starts_with(task_id)) {
+                    if let Some(sub) = t.submissions.iter_mut().find(|s| s.agent_id == me) {
+                        sub.oracle_passed = Some(passed);
+                    }
+                    t.updated_at = now();
+                }
+                store::save_tasks(&room.room_id, &tasks2);
+                let result = if passed { "PASS" } else { "FAIL" };
+                let env2 = make_envelope(
+                    &format!("[bounty oracle] {result}: '{cmd}' on branch '{branch}' (task {task_id})"),
+                    None,
+                );
+                let encrypted2 = encrypt_envelope(&env2, &room_key, &room.room_id);
+                transport::publish(&room.room_id, &encrypted2);
+                store::save_message(&room.room_id, &env2);
+                return Ok(format!("Submitted. Oracle: {result}"));
+            }
+            Err(e) => return Ok(format!("Submitted. Oracle error: {e}")),
+        }
+    }
+
+    Ok(format!("Submitted branch '{branch}' for task '{title}'. No oracle configured — manual review required."))
+}
+
+/// Run a shell command in the context of a git branch (stashes current state, checks out branch, runs, restores).
+fn run_oracle_on_branch(branch: &str, oracle_cmd: &str) -> Result<bool, String> {
+    use std::process::Command;
+
+    // Verify branch exists
+    let check = Command::new("git")
+        .args(["rev-parse", "--verify", &format!("refs/heads/{branch}")])
+        .output()
+        .map_err(|e| format!("git error: {e}"))?;
+    if !check.status.success() {
+        return Err(format!("Branch '{branch}' not found locally"));
+    }
+
+    // Stash any working-tree changes
+    let _ = Command::new("git").args(["stash", "--quiet"]).output();
+
+    // Remember current branch
+    let head = Command::new("git")
+        .args(["rev-parse", "--abbrev-ref", "HEAD"])
+        .output()
+        .map_err(|e| format!("git error: {e}"))?;
+    let original_branch = String::from_utf8_lossy(&head.stdout).trim().to_string();
+
+    // Checkout submission branch
+    let checkout = Command::new("git")
+        .args(["checkout", "--quiet", branch])
+        .output()
+        .map_err(|e| format!("git checkout error: {e}"))?;
+    if !checkout.status.success() {
+        return Err(format!("Could not checkout branch '{branch}'"));
+    }
+
+    // Run oracle
+    let parts: Vec<&str> = oracle_cmd.split_whitespace().collect();
+    let result = if parts.is_empty() {
+        Err("Empty oracle command".to_string())
+    } else {
+        Command::new(parts[0])
+            .args(&parts[1..])
+            .output()
+            .map(|o| o.status.success())
+            .map_err(|e| format!("Oracle exec error: {e}"))
+    };
+
+    // Restore original branch
+    let _ = Command::new("git")
+        .args(["checkout", "--quiet", &original_branch])
+        .output();
+    let _ = Command::new("git").args(["stash", "pop", "--quiet"]).output();
+
+    result
+}
+
+/// Verify an existing submission by running the oracle now (useful for deferred verification).
+pub fn bounty_verify(task_id: &str, agent_id: &str, room_label: Option<&str>) -> Result<String, String> {
+    let room = resolve_room(room_label)?;
+    let mut tasks = store::load_tasks(&room.room_id);
+    let task = tasks.iter_mut()
+        .find(|t| t.id.starts_with(task_id))
+        .ok_or_else(|| format!("No task matching '{task_id}'"))?;
+    let oracle = task.acceptance_oracle.clone()
+        .ok_or_else(|| "Task has no acceptance_oracle configured".to_string())?;
+    let sub = task.submissions.iter_mut()
+        .find(|s| s.agent_id.starts_with(agent_id))
+        .ok_or_else(|| format!("No submission from agent '{agent_id}'"))?;
+    let branch = sub.branch.clone();
+
+    let passed = run_oracle_on_branch(&branch, &oracle)?;
+    sub.oracle_passed = Some(passed);
+    task.updated_at = now();
+    store::save_tasks(&room.room_id, &tasks);
+
+    let result = if passed { "PASS" } else { "FAIL" };
+    let room_key = crypto::derive_room_key(&room.secret, &room.room_id);
+    let env = make_envelope(
+        &format!("[bounty verify] {result}: '{oracle}' on branch '{branch}' (agent {agent_id}, task {task_id})"),
+        None,
+    );
+    let encrypted = encrypt_envelope(&env, &room_key, &room.room_id);
+    transport::publish(&room.room_id, &encrypted);
+    store::save_message(&room.room_id, &env);
+
+    Ok(format!("{result}: oracle '{oracle}' on branch '{branch}'"))
 }
 
 /// List open bounties in a room.
@@ -2089,6 +2266,8 @@ pub fn task_add(title: &str, room_label: Option<&str>) -> Result<String, String>
         created_at: now(),
         updated_at: now(),
         notes: None,
+        acceptance_oracle: None,
+        submissions: vec![],
     };
     let mut tasks = store::load_tasks(&room.room_id);
     tasks.push(task);
@@ -2343,6 +2522,8 @@ pub fn seed_verify(seed_id: &str, answer: &str, room_label: Option<&str>) -> Res
         created_at: seed_snapshot.created_at,
         updated_at: now(),
         notes: Some(format!("difficulty:{}", seed_snapshot.difficulty)),
+        acceptance_oracle: None,
+        submissions: vec![],
     };
 
     publish_task_receipt(&room, &task, &me, "done", task.notes.as_deref(), task.updated_at);
@@ -2392,6 +2573,8 @@ pub fn task_list(room_label: Option<&str>) -> Result<Vec<store::Task>, String> {
                         created_at: msg["ts"].as_u64().unwrap_or(0),
                         updated_at: msg["ts"].as_u64().unwrap_or(0),
                         notes: None,
+                        acceptance_oracle: None,
+                        submissions: vec![],
                     });
                 }
             }
@@ -3708,6 +3891,8 @@ mod tests {
                 created_at: now_ts - 10 * 24 * 60 * 60,
                 updated_at: now_ts - 10 * 24 * 60 * 60,
                 notes: Some("went dark".to_string()),
+                acceptance_oracle: None,
+                submissions: vec![],
             }],
         );
 

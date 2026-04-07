@@ -835,6 +835,22 @@ pub struct Task {
     pub created_at: u64,
     pub updated_at: u64,
     pub notes: Option<String>,
+    /// Shell command run against a submission to determine pass/fail (e.g. "cargo test")
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub acceptance_oracle: Option<String>,
+    /// Submitted branches: vec of (agent_id, branch_name)
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub submissions: Vec<BountySubmission>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct BountySubmission {
+    pub agent_id: String,
+    pub branch: String,
+    pub submitted_at: u64,
+    /// None = not yet verified, Some(true/false) = oracle result
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub oracle_passed: Option<bool>,
 }
 
 pub fn load_tasks(room_id: &str) -> Vec<Task> {
@@ -923,24 +939,23 @@ pub fn find_payment_by_stripe_id(stripe_id: &str) -> Option<PaymentRecord> {
 
 // ── Role Leases ────────────────────────────────────────────────
 
-/// Specialist agent role lease. Stored globally (not per-room) in ~/.agora/roles.json.
-/// A role is held by at most one agent at a time; ownership expires after `lease_expires`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// A persistent specialist role lease. Agents claim a role for a TTL; the role is
+/// released on shutdown or expires automatically so another agent can claim it.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct RoleLease {
-    /// Role name, e.g. "backend", "security", "devops"
     pub role: String,
-    /// Agent ID currently holding the lease
     pub agent_id: String,
-    /// Unix timestamp when the lease expires (default: claim_time + 3600s)
-    pub lease_expires: u64,
-    /// Unix timestamp of last heartbeat
+    pub expires_at: u64,
     pub last_heartbeat: u64,
-    /// Free-text summary of what the agent is working on
-    pub context_summary: Option<String>,
+    pub context_summary: String,
 }
 
-pub fn load_roles() -> Vec<RoleLease> {
-    let path = agora_dir().join("roles.json");
+fn role_leases_path() -> std::path::PathBuf {
+    agora_dir().join("role_leases.json")
+}
+
+pub fn load_role_leases() -> Vec<RoleLease> {
+    let path = role_leases_path();
     if let Ok(data) = fs::read_to_string(&path) {
         serde_json::from_str(&data).unwrap_or_default()
     } else {
@@ -948,11 +963,65 @@ pub fn load_roles() -> Vec<RoleLease> {
     }
 }
 
-pub fn save_roles(roles: &[RoleLease]) {
-    let dir = agora_dir();
-    ensure_dir(&dir);
-    let data = serde_json::to_string_pretty(roles).unwrap();
-    let _ = fs::write(dir.join("roles.json"), data);
+pub fn save_role_leases(leases: &[RoleLease]) {
+    let data = serde_json::to_string_pretty(leases).unwrap();
+    let _ = fs::write(role_leases_path(), data);
+}
+
+/// Claim a role for `ttl_secs`. Returns Err if a non-expired lease already exists.
+pub fn role_claim(role: &str, agent_id: &str, ttl_secs: u64, now_ts: u64) -> Result<(), String> {
+    let mut leases = load_role_leases();
+    // Remove expired leases for this role
+    leases.retain(|l| l.role != role || l.expires_at > now_ts);
+    if leases.iter().any(|l| l.role == role) {
+        let holder = leases.iter().find(|l| l.role == role).unwrap();
+        return Err(format!("Role '{}' held by {} until {}", role, holder.agent_id, holder.expires_at));
+    }
+    leases.push(RoleLease {
+        role: role.to_string(),
+        agent_id: agent_id.to_string(),
+        expires_at: now_ts + ttl_secs,
+        last_heartbeat: now_ts,
+        context_summary: String::new(),
+    });
+    save_role_leases(&leases);
+    Ok(())
+}
+
+/// Extend a role lease and update context summary.
+pub fn role_heartbeat(role: &str, agent_id: &str, ttl_secs: u64, context: &str, now_ts: u64) -> Result<(), String> {
+    let mut leases = load_role_leases();
+    let lease = leases.iter_mut()
+        .find(|l| l.role == role && l.agent_id == agent_id)
+        .ok_or_else(|| format!("No active lease for role '{}' by agent '{}'", role, agent_id))?;
+    lease.expires_at = now_ts + ttl_secs;
+    lease.last_heartbeat = now_ts;
+    lease.context_summary = context.to_string();
+    save_role_leases(&leases);
+    Ok(())
+}
+
+/// Release a role lease and store final context summary.
+pub fn role_release(role: &str, agent_id: &str, context: &str) -> Result<(), String> {
+    let mut leases = load_role_leases();
+    let pos = leases.iter().position(|l| l.role == role && l.agent_id == agent_id)
+        .ok_or_else(|| format!("No active lease for role '{}' by agent '{}'", role, agent_id))?;
+    let mut lease = leases.remove(pos);
+    // Keep as expired tombstone so next agent can read context_summary
+    lease.expires_at = 0;
+    lease.context_summary = context.to_string();
+    leases.push(lease);
+    save_role_leases(&leases);
+    Ok(())
+}
+
+/// Get context summary from the last agent who held a role (even if expired).
+pub fn role_last_context(role: &str) -> Option<String> {
+    let leases = load_role_leases();
+    leases.iter()
+        .filter(|l| l.role == role)
+        .max_by_key(|l| l.last_heartbeat)
+        .map(|l| l.context_summary.clone())
 }
 
 // ── Calibration Seeds ──────────────────────────────────────────
@@ -1042,6 +1111,93 @@ pub fn upsert_work_receipt(room_id: &str, receipt: &WorkReceipt) {
     }
     receipts.sort_by(|a, b| a.created_at.cmp(&b.created_at));
     save_work_receipts(room_id, &receipts);
+}
+
+// ── Sandbox Leases ─────────────────────────────────────────────
+
+/// Maximum duration an active lease can exist before being considered stale on recovery.
+pub const MAX_LEASE_SECS: u64 = 3600; // 1 hour
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum LeaseStatus {
+    Active,
+    Closed,
+}
+
+/// Tracks credit authorization for a single sandbox session.
+/// Persisted so crash recovery can detect and close stale leases.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SandboxLease {
+    pub id: String,           // matches SandboxSession.id
+    pub agent_id: String,
+    pub max_cost_credits: i64,
+    pub credits_per_minute: i64,
+    pub started_at: u64,      // unix timestamp
+    pub status: LeaseStatus,
+    #[serde(default)]
+    pub actual_cost: Option<i64>, // set when closed
+    #[serde(default)]
+    pub closed_at: Option<u64>,
+}
+
+pub fn load_leases(room_id: &str) -> Vec<SandboxLease> {
+    let path = agora_dir().join("rooms").join(room_id).join("sandbox_leases.json");
+    if let Ok(data) = fs::read_to_string(&path) {
+        serde_json::from_str(&data).unwrap_or_default()
+    } else {
+        Vec::new()
+    }
+}
+
+pub fn save_leases(room_id: &str, leases: &[SandboxLease]) {
+    let dir = agora_dir().join("rooms").join(room_id);
+    ensure_dir(&dir);
+    let data = serde_json::to_string_pretty(leases).unwrap();
+    let _ = fs::write(dir.join("sandbox_leases.json"), data);
+}
+
+/// Open a new lease. Returns Err if the agent already has an active lease in this room.
+pub fn open_lease(room_id: &str, lease: SandboxLease) -> Result<(), String> {
+    let mut leases = load_leases(room_id);
+    if leases.iter().any(|l| l.agent_id == lease.agent_id && l.status == LeaseStatus::Active) {
+        return Err(format!("Agent {} already has an active lease", lease.agent_id));
+    }
+    leases.push(lease);
+    save_leases(room_id, &leases);
+    Ok(())
+}
+
+/// Close an existing lease with the actual cost incurred.
+pub fn close_lease(room_id: &str, lease_id: &str, actual_cost: i64) {
+    let mut leases = load_leases(room_id);
+    if let Some(lease) = leases.iter_mut().find(|l| l.id == lease_id) {
+        lease.status = LeaseStatus::Closed;
+        lease.actual_cost = Some(actual_cost);
+        lease.closed_at = Some(now());
+    }
+    save_leases(room_id, &leases);
+}
+
+/// On startup: scan all rooms for active leases older than MAX_LEASE_SECS and close them
+/// at ceiling cost (penalizes ungraceful shutdown, prevents credit escrow leaks).
+/// Returns the number of stale leases recovered.
+pub fn recover_stale_leases(room_id: &str) -> Vec<SandboxLease> {
+    let cutoff = now().saturating_sub(MAX_LEASE_SECS);
+    let mut leases = load_leases(room_id);
+    let mut recovered = Vec::new();
+    for lease in leases.iter_mut() {
+        if lease.status == LeaseStatus::Active && lease.started_at < cutoff {
+            lease.status = LeaseStatus::Closed;
+            lease.actual_cost = Some(lease.max_cost_credits); // charge ceiling
+            lease.closed_at = Some(now());
+            recovered.push(lease.clone());
+        }
+    }
+    if !recovered.is_empty() {
+        save_leases(room_id, &leases);
+    }
+    recovered
 }
 
 // ── Aliases ────────────────────────────────────────────────────
@@ -1322,5 +1478,120 @@ mod tests {
         let dollars_in_cents = 1000i64;
         let credits = dollars_in_cents * CREDITS_PER_USD_CENT;
         assert_eq!(credits, 10000);
+    }
+
+    #[test]
+    fn sandbox_lease_open_close_roundtrip() {
+        let _guard = test_env_lock().lock().unwrap();
+        let home = test_home("lease-roundtrip");
+        let agora = home.join(".agora");
+        let _ = fs::remove_dir_all(&home);
+        fs::create_dir_all(&agora).unwrap();
+        let old_home = env::var("HOME").ok();
+        unsafe { env::set_var("HOME", &home); }
+
+        let lease = SandboxLease {
+            id: "sandbox-1".to_string(),
+            agent_id: "agent-1".to_string(),
+            max_cost_credits: 100,
+            credits_per_minute: 5,
+            started_at: now(),
+            status: LeaseStatus::Active,
+            actual_cost: None,
+            closed_at: None,
+        };
+        open_lease("room-1", lease).unwrap();
+        close_lease("room-1", "sandbox-1", 42);
+
+        let leases = load_leases("room-1");
+        assert_eq!(leases.len(), 1);
+        assert_eq!(leases[0].status, LeaseStatus::Closed);
+        assert_eq!(leases[0].actual_cost, Some(42));
+
+        if let Some(old) = old_home { unsafe { env::set_var("HOME", old); } }
+        else { unsafe { env::remove_var("HOME"); } }
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn sandbox_lease_rejects_duplicate_active() {
+        let _guard = test_env_lock().lock().unwrap();
+        let home = test_home("lease-duplicate");
+        let agora = home.join(".agora");
+        let _ = fs::remove_dir_all(&home);
+        fs::create_dir_all(&agora).unwrap();
+        let old_home = env::var("HOME").ok();
+        unsafe { env::set_var("HOME", &home); }
+
+        let lease = SandboxLease {
+            id: "sandbox-1".to_string(),
+            agent_id: "agent-1".to_string(),
+            max_cost_credits: 100,
+            credits_per_minute: 5,
+            started_at: now(),
+            status: LeaseStatus::Active,
+            actual_cost: None,
+            closed_at: None,
+        };
+        open_lease("room-1", lease.clone()).unwrap();
+        let second = SandboxLease { id: "sandbox-2".to_string(), ..lease };
+        assert!(open_lease("room-1", second).is_err());
+
+        if let Some(old) = old_home { unsafe { env::set_var("HOME", old); } }
+        else { unsafe { env::remove_var("HOME"); } }
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn recover_stale_leases_charges_ceiling() {
+        let _guard = test_env_lock().lock().unwrap();
+        let home = test_home("lease-stale");
+        let agora = home.join(".agora");
+        let _ = fs::remove_dir_all(&home);
+        fs::create_dir_all(&agora).unwrap();
+        let old_home = env::var("HOME").ok();
+        unsafe { env::set_var("HOME", &home); }
+
+        // A lease that started well beyond MAX_LEASE_SECS ago
+        let stale_lease = SandboxLease {
+            id: "stale-sandbox".to_string(),
+            agent_id: "agent-crash".to_string(),
+            max_cost_credits: 200,
+            credits_per_minute: 10,
+            started_at: now().saturating_sub(MAX_LEASE_SECS + 60),
+            status: LeaseStatus::Active,
+            actual_cost: None,
+            closed_at: None,
+        };
+        // A fresh lease that should NOT be recovered
+        let fresh_lease = SandboxLease {
+            id: "fresh-sandbox".to_string(),
+            agent_id: "agent-ok".to_string(),
+            max_cost_credits: 50,
+            credits_per_minute: 2,
+            started_at: now(),
+            status: LeaseStatus::Active,
+            actual_cost: None,
+            closed_at: None,
+        };
+
+        let mut leases = vec![stale_lease, fresh_lease];
+        save_leases("room-1", &mut leases);
+
+        let recovered = recover_stale_leases("room-1");
+        assert_eq!(recovered.len(), 1);
+        assert_eq!(recovered[0].id, "stale-sandbox");
+        assert_eq!(recovered[0].actual_cost, Some(200)); // charged ceiling
+
+        let persisted = load_leases("room-1");
+        // stale is closed, fresh is still active
+        let stale = persisted.iter().find(|l| l.id == "stale-sandbox").unwrap();
+        let fresh = persisted.iter().find(|l| l.id == "fresh-sandbox").unwrap();
+        assert_eq!(stale.status, LeaseStatus::Closed);
+        assert_eq!(fresh.status, LeaseStatus::Active);
+
+        if let Some(old) = old_home { unsafe { env::set_var("HOME", old); } }
+        else { unsafe { env::remove_var("HOME"); } }
+        let _ = fs::remove_dir_all(&home);
     }
 }
