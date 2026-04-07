@@ -244,10 +244,11 @@ pub fn generate_agent_token(agent_id: &str, hours: u64) -> String {
         .unwrap_or_else(|_| "agora-sandbox-default-secret".to_string());
     let expiry = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() + hours * 3600;
-    let payload = format!("{agent_id}:{expiry}");
+    // Use JSON for canonical framing (prevents HMAC concatenation forgery)
+    let payload = serde_json::json!({"a": agent_id, "e": expiry}).to_string();
     let key = ring::hmac::Key::new(ring::hmac::HMAC_SHA256, secret.as_bytes());
     let sig = ring::hmac::sign(&key, payload.as_bytes());
-    let token = format!("{payload}:{}", hex::encode(sig.as_ref()));
+    let token = format!("{payload}|{}", hex::encode(sig.as_ref()));
     use base64::Engine;
     base64::engine::general_purpose::STANDARD.encode(token.as_bytes())
 }
@@ -258,22 +259,26 @@ pub fn verify_agent_token(token: &str) -> Result<(String, u64), String> {
     let decoded = base64::engine::general_purpose::STANDARD.decode(token)
         .map_err(|_| "Invalid token encoding")?;
     let token_str = String::from_utf8(decoded).map_err(|_| "Invalid token UTF-8")?;
-    let parts: Vec<&str> = token_str.splitn(3, ':').collect();
-    if parts.len() != 3 { return Err("Malformed token".to_string()); }
+    // Split on | (JSON payload | hex signature)
+    let parts: Vec<&str> = token_str.splitn(2, '|').collect();
+    if parts.len() != 2 { return Err("Malformed token".to_string()); }
 
-    let agent_id = parts[0].to_string();
-    let expiry: u64 = parts[1].parse().map_err(|_| "Invalid expiry")?;
-    let sig_hex = parts[2];
+    let payload = parts[0];
+    let sig_hex = parts[1];
+
+    // Parse JSON payload
+    let v: serde_json::Value = serde_json::from_str(payload).map_err(|_| "Invalid token payload")?;
+    let agent_id = v["a"].as_str().ok_or("Missing agent_id")?.to_string();
+    let expiry = v["e"].as_u64().ok_or("Missing expiry")?;
 
     // Check expiry
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
     if now > expiry { return Err("Token expired".to_string()); }
 
-    // Verify HMAC
+    // Verify HMAC over canonical JSON
     let secret = std::env::var("AGORA_SANDBOX_SECRET")
         .unwrap_or_else(|_| "agora-sandbox-default-secret".to_string());
-    let payload = format!("{agent_id}:{expiry}");
     let key = ring::hmac::Key::new(ring::hmac::HMAC_SHA256, secret.as_bytes());
     let expected_sig = ring::hmac::sign(&key, payload.as_bytes());
     if hex::encode(expected_sig.as_ref()) != sig_hex {
