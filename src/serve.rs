@@ -952,12 +952,12 @@ fn handle_connection(stream: TcpStream) {
 
         // POST /api/sandbox/exec — execute command in sandbox
         ("POST", ["api", "sandbox", "exec"]) => {
-            let api_key = form_field(body, "api_key").unwrap_or_default();
-            let expected = std::env::var("AGORA_SANDBOX_API_KEY").unwrap_or_default();
-            if expected.is_empty() || api_key != expected {
-                send_json(stream, 401, r#"{"error":"unauthorized"}"#);
-                return;
-            }
+            let token = form_field(body, "token").unwrap_or_default();
+            let (verified_agent_id, _expiry) = match sandbox::verify_agent_token(&token) {
+                Ok(v) => v,
+                Err(e) => { send_json(stream, 401, &format!(r#"{{"error":"{}"}}"#, e)); return; }
+            };
+            let _ = verified_agent_id; // TODO: verify session belongs to this agent
             let session_id = form_field(body, "session_id").unwrap_or_default();
             let command = form_field(body, "command").unwrap_or_default();
             let provider = form_field(body, "provider").unwrap_or_else(|| "daytona".to_string());
@@ -973,12 +973,12 @@ fn handle_connection(stream: TcpStream) {
 
         // DELETE /api/sandbox/:id — destroy sandbox
         ("POST", ["api", "sandbox", "destroy"]) => {
-            let api_key = form_field(body, "api_key").unwrap_or_default();
-            let expected = std::env::var("AGORA_SANDBOX_API_KEY").unwrap_or_default();
-            if expected.is_empty() || api_key != expected {
-                send_json(stream, 401, r#"{"error":"unauthorized"}"#);
-                return;
-            }
+            let token = form_field(body, "token").unwrap_or_default();
+            let (verified_agent_id, _expiry) = match sandbox::verify_agent_token(&token) {
+                Ok(v) => v,
+                Err(e) => { send_json(stream, 401, &format!(r#"{{"error":"{}"}}"#, e)); return; }
+            };
+            let _ = verified_agent_id; // TODO: verify session belongs to this agent
             let session_id = form_field(body, "session_id").unwrap_or_default();
             let provider = form_field(body, "provider").unwrap_or_else(|| "daytona".to_string());
             if session_id.is_empty() {
