@@ -894,6 +894,18 @@ pub enum PaymentKind {
     Withdrawal,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PaymentProvider {
+    Stripe,
+    Solana,
+    Manual,
+}
+
+fn default_payment_provider() -> PaymentProvider {
+    PaymentProvider::Stripe
+}
+
 /// Immutable record of a real-money transaction. Stored in ~/.agora/payments.json.
 /// Room-independent — payments are per-agent, not per-room.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -904,15 +916,17 @@ pub struct PaymentRecord {
     pub agent_id: String,
     pub kind: PaymentKind,
     pub status: PaymentStatus,
+    #[serde(default = "default_payment_provider")]
+    pub provider: PaymentProvider,
     /// Amount in USD cents (e.g. 1000 = $10.00)
     pub amount_cents: i64,
     /// Credits minted or burned (amount_cents * CREDITS_PER_USD_CENT)
     pub credits: i64,
     /// Platform fee in credits (10% of credits)
     pub fee_credits: i64,
-    /// Stripe checkout session ID or payout ID
+    /// External payment reference (e.g. Stripe checkout session or Solana tx signature)
     pub stripe_id: Option<String>,
-    /// Stripe checkout URL (for deposits awaiting completion)
+    /// Hosted checkout URL for pending flows
     pub checkout_url: Option<String>,
     pub created_at: u64,
     pub updated_at: u64,
@@ -935,6 +949,12 @@ pub fn save_payments(payments: &[PaymentRecord]) {
 
 pub fn find_payment_by_stripe_id(stripe_id: &str) -> Option<PaymentRecord> {
     load_payments().into_iter().find(|p| p.stripe_id.as_deref() == Some(stripe_id))
+}
+
+pub fn find_payment_by_reference(reference: &str) -> Option<PaymentRecord> {
+    load_payments()
+        .into_iter()
+        .find(|p| p.stripe_id.as_deref() == Some(reference))
 }
 
 // ── Calibration Seeds ──────────────────────────────────────────
@@ -1409,6 +1429,7 @@ mod tests {
             agent_id: "agent-abc".to_string(),
             kind: PaymentKind::Deposit,
             status: PaymentStatus::Pending,
+            provider: PaymentProvider::Stripe,
             amount_cents: 1000,
             credits: 10000,
             fee_credits: 1000,
@@ -1434,6 +1455,9 @@ mod tests {
 
         let not_found = find_payment_by_stripe_id("nonexistent");
         assert!(not_found.is_none());
+
+        let found_by_reference = find_payment_by_reference("cs_test_abc123");
+        assert!(found_by_reference.is_some());
 
         if let Some(old) = old_home {
             unsafe { env::set_var("HOME", old); }
