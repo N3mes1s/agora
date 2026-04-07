@@ -4117,7 +4117,7 @@ mod tests {
         role_heartbeat, role_release, payment_complete_solana_deposit,
         seed_plaza_rate_limit_state, send_watch_heartbeat,
         should_display_message, signing_message_bytes, soma_churn_decay, soma_correct,
-        bounty_submit, bounty_verify, stale_claim_weight, task_add, task_add_with_oracle,
+        bounties_for_api, bounty_post, bounty_submit, bounty_submit_api, bounty_verify, stale_claim_weight, task_add, task_add_with_oracle,
         task_checkpoint, task_done, unpin,
         verified_solana_deposit_from_tx, SignedWirePayload, VerifiedSolanaDeposit,
         SIGNED_WIRE_VERSION, BASE64, DISCOVERY_POSITIVE_HALF_LIFE_SECS,
@@ -5004,6 +5004,41 @@ mod tests {
             "no submission should be recorded for self-dealing attempt"
         );
     }
+
+    #[test]
+    fn bounties_for_api_returns_vec_with_correct_fields() {
+        let _guard = store::test_env_lock().lock().unwrap();
+        let (_home, room) = setup_plaza_room("bounty-api-test-agent", Role::Admin);
+
+        // Post a bounty so there is data.
+        let task_id = bounty_post("Test API bounty", 2, None, Some(50), None).unwrap();
+
+        let bounties = bounties_for_api();
+        assert!(!bounties.is_empty(), "should find the posted bounty");
+
+        let b = bounties.iter().find(|b| {
+            b["full_id"].as_str().map_or(false, |id| id == task_id)
+        }).expect("posted bounty must appear in bounties_for_api()");
+
+        assert_eq!(b["title"].as_str().unwrap(), "Test API bounty");
+        assert_eq!(b["priority"].as_u64().unwrap(), 2);
+        assert_eq!(b["status"].as_str().unwrap(), "open");
+        assert_eq!(b["reward_credits"].as_i64().unwrap(), 50);
+        assert_eq!(b["room"].as_str().unwrap(), room.label);
+        assert!(b["id"].as_str().is_some(), "short id must be present");
+        assert!(b["created_by"].as_str().is_some());
+        // Oracle field must not be leaked even if None
+        assert!(b.get("acceptance_oracle").is_none(), "acceptance_oracle must not be exposed");
+    }
+
+    #[test]
+    fn bounty_submit_api_rejects_unknown_task() {
+        let _guard = store::test_env_lock().lock().unwrap();
+        let (_home, _room) = setup_plaza_room("bounty-api-submit-test", Role::Admin);
+
+        let result = bounty_submit_api("deadbeef", "some-branch", None);
+        assert!(result.is_err(), "should fail for unknown task");
+    }
 }
 
 /// Search messages by text, optionally filtered by sender.
@@ -5375,4 +5410,68 @@ pub fn credit_transfer(to_agent: &str, amount: i64, reason: Option<&str>, room_l
     transport::publish(&room.room_id, &encrypted);
     store::save_message(&room.room_id, &env);
     Ok((my_balance, their_balance))
+}
+
+// ── Bounties REST API ────────────────────────────────────────────
+
+/// Return open bounties across all joined rooms, suitable for the REST API.
+/// Fields: id, title, priority, status, reward_credits, reward_trust,
+///         has_oracle, submissions_count, room, created_by, created_at.
+/// Does NOT expose the oracle command string (security: don't leak acceptance criteria).
+pub fn bounties_for_api() -> Vec<serde_json::Value> {
+    let rooms = store::load_registry();
+    let mut out = Vec::new();
+
+    for room in &rooms {
+        // Bounties live in the message store as type="bounty" + status="open"
+        let msgs = store::load_messages(&room.room_id, 604800);
+        for msg in msgs {
+            if msg["type"].as_str() != Some("bounty") {
+                continue;
+            }
+            // Include both open and done so callers can filter; status is explicit.
+            let id = msg["id"].as_str().unwrap_or("").to_string();
+            if id.is_empty() {
+                continue;
+            }
+            // Count submissions from the task store for this bounty.
+            let tasks = store::load_tasks(&room.room_id);
+            let submissions_count = tasks.iter()
+                .find(|t| t.id == id || id.starts_with(&t.id[..6.min(t.id.len())]))
+                .map(|t| t.submissions.len())
+                .unwrap_or(0);
+
+            let has_oracle = msg["acceptance_oracle"].is_string();
+            out.push(json!({
+                "id":               &id[..8.min(id.len())],
+                "full_id":          id,
+                "title":            msg["title"].as_str().unwrap_or(""),
+                "priority":         msg["priority"].as_u64().unwrap_or(0),
+                "status":           msg["status"].as_str().unwrap_or("open"),
+                "reward_credits":   msg["reward_credits"].as_i64().unwrap_or(0),
+                "reward_trust":     msg["reward_trust"].as_i64().unwrap_or(0),
+                "has_oracle":       has_oracle,
+                "submissions_count": submissions_count,
+                "room":             room.label,
+                "created_by":       msg["from"].as_str().unwrap_or(""),
+                "created_at":       msg["ts"].as_u64().unwrap_or(0),
+            }));
+        }
+    }
+
+    // Most recently created first.
+    out.sort_by(|a, b| {
+        let ta = a["created_at"].as_u64().unwrap_or(0);
+        let tb = b["created_at"].as_u64().unwrap_or(0);
+        tb.cmp(&ta)
+    });
+    out
+}
+
+/// Submit a branch as a bounty solution via the REST API.
+/// Returns (task_id_short, message) on success.
+pub fn bounty_submit_api(task_id: &str, branch: &str, room_label: Option<&str>) -> Result<(String, String), String> {
+    let short = task_id[..8.min(task_id.len())].to_string();
+    let msg = bounty_submit(task_id, branch, room_label)?;
+    Ok((short, msg))
 }
