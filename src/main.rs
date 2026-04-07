@@ -286,7 +286,11 @@ enum Commands {
     Mcp,
 
     /// Show read receipts for your messages
-    Status,
+    Status {
+        /// Output as machine-readable JSON (agent_id, trust_score, credit_balance, recent_receipts)
+        #[arg(long)]
+        json: bool,
+    },
 
     /// Grant credits to an agent (admin only)
     CreditGrant {
@@ -2043,30 +2047,43 @@ fn main() {
             mcp::run();
         }
 
-        Commands::Status => {
-            match chat::read_status(room) {
-                Ok(items) => {
-                    if items.is_empty() {
-                        println!("  (no messages with receipts)");
-                        return;
-                    }
-                    for item in &items {
-                        let mid = &item["id"].as_str().unwrap_or("?")[..6.min(item["id"].as_str().unwrap_or("?").len())];
-                        let text = item["text"].as_str().unwrap_or("");
-                        let time = ts(item["ts"].as_u64().unwrap_or(0));
-                        let readers = item["read_by"].as_array()
-                            .map(|a| a.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>().join(", "))
-                            .unwrap_or_default();
-                        let check = if readers.is_empty() { "  " } else { "\u{2713}\u{2713}" };
-                        println!("  [{mid}] {time} {check} {text}");
-                        if !readers.is_empty() {
-                            println!("         Read by: {readers}");
-                        }
-                    }
+        Commands::Status { json } => {
+            let agent_id = store::get_agent_id();
+            let (credits, trust_ledger) = chat::credit_balance_check(None, room)
+                .unwrap_or((0, 0));
+            let (trust_score, receipt_count, rooms_active, vouches) =
+                chat::compute_agent_trust_score(&agent_id);
+            let receipts = chat::read_status(room).unwrap_or_default();
+
+            if json {
+                let out = serde_json::json!({
+                    "agent_id": agent_id,
+                    "trust_score": trust_score,
+                    "credit_balance": credits,
+                    "trust_ledger": trust_ledger,
+                    "receipt_count": receipt_count,
+                    "rooms_active": rooms_active,
+                    "vouches": vouches,
+                    "recent_receipts": receipts,
+                });
+                println!("{}", serde_json::to_string_pretty(&out).unwrap());
+            } else {
+                if receipts.is_empty() {
+                    println!("  (no messages with receipts)");
+                    return;
                 }
-                Err(e) => {
-                    eprintln!("  Error: {e}");
-                    process::exit(1);
+                for item in &receipts {
+                    let mid = &item["id"].as_str().unwrap_or("?")[..6.min(item["id"].as_str().unwrap_or("?").len())];
+                    let text = item["text"].as_str().unwrap_or("");
+                    let time = ts(item["ts"].as_u64().unwrap_or(0));
+                    let readers = item["read_by"].as_array()
+                        .map(|a| a.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>().join(", "))
+                        .unwrap_or_default();
+                    let check = if readers.is_empty() { "  " } else { "\u{2713}\u{2713}" };
+                    println!("  [{mid}] {time} {check} {text}");
+                    if !readers.is_empty() {
+                        println!("         Read by: {readers}");
+                    }
                 }
             }
         }
@@ -3470,5 +3487,45 @@ mod tests {
         assert_eq!(parsed.payload.target_signing_pubkey, None);
         assert_eq!(parsed.payload.issued_at, None);
         assert_eq!(parsed.auth, InviteTokenAuth::Unsigned);
+    }
+
+    #[test]
+    fn status_json_output_has_required_fields() {
+        let _guard = store::test_env_lock().lock().unwrap();
+        let home = temp_home();
+        std::fs::create_dir_all(&home).unwrap();
+        unsafe {
+            std::env::set_var("HOME", &home);
+            std::env::set_var("AGORA_AGENT_ID", "test-agent-status");
+        }
+
+        let agent_id = store::get_agent_id();
+        let (credits, trust_ledger) = crate::chat::credit_balance_check(None, None).unwrap_or((0, 0));
+        let (trust_score, receipt_count, rooms_active, vouches) =
+            crate::chat::compute_agent_trust_score(&agent_id);
+        let receipts = crate::chat::read_status(None).unwrap_or_default();
+
+        let out = serde_json::json!({
+            "agent_id": agent_id,
+            "trust_score": trust_score,
+            "credit_balance": credits,
+            "trust_ledger": trust_ledger,
+            "receipt_count": receipt_count,
+            "rooms_active": rooms_active,
+            "vouches": vouches,
+            "recent_receipts": receipts,
+        });
+
+        // Verify all required fields are present
+        assert!(out["agent_id"].is_string(), "agent_id must be a string");
+        assert_eq!(out["agent_id"].as_str().unwrap(), "test-agent-status");
+        assert!(out["trust_score"].is_number(), "trust_score must be a number");
+        assert!(out["credit_balance"].is_number(), "credit_balance must be a number");
+        assert!(out["recent_receipts"].is_array(), "recent_receipts must be an array");
+
+        // Verify it serializes to valid JSON
+        let serialized = serde_json::to_string_pretty(&out).unwrap();
+        let reparsed: serde_json::Value = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(reparsed["agent_id"], out["agent_id"]);
     }
 }
