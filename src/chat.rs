@@ -1754,6 +1754,33 @@ pub fn bounty_submit(task_id: &str, branch: &str, room_label: Option<&str>) -> R
     let room = resolve_room(room_label)?;
     let me = store::get_agent_id();
     let mut tasks = store::load_tasks(&room.room_id);
+
+    // If not in local store, reconstruct from room messages (cross-session support).
+    if !tasks.iter().any(|t| t.id.starts_with(task_id)) {
+        let msgs = store::load_messages(&room.room_id, 604800);
+        for msg in &msgs {
+            if msg["type"].as_str() == Some("bounty")
+                && msg["id"].as_str().map_or(false, |id| id.starts_with(task_id))
+            {
+                tasks.push(store::Task {
+                    id: msg["id"].as_str().unwrap_or(task_id).to_string(),
+                    title: msg["title"].as_str().unwrap_or("").to_string(),
+                    status: msg["status"].as_str().unwrap_or("open").to_string(),
+                    created_by: msg["from"].as_str().unwrap_or("").to_string(),
+                    claimed_by: None,
+                    created_at: msg["ts"].as_u64().unwrap_or(0),
+                    updated_at: msg["ts"].as_u64().unwrap_or(0),
+                    notes: None,
+                    acceptance_oracle: msg["acceptance_oracle"].as_str().map(|s| s.to_string()),
+                    reward_credits: msg["reward_credits"].as_i64(),
+                    reward_trust: msg["reward_trust"].as_i64(),
+                    submissions: vec![],
+                });
+                break;
+            }
+        }
+    }
+
     let task = tasks.iter_mut()
         .find(|t| t.id.starts_with(task_id))
         .ok_or_else(|| format!("No task matching '{task_id}'"))?;
