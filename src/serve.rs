@@ -732,9 +732,18 @@ fn render_404(label: &str) -> String {
 
 // ── HTTP primitives ──────────────────────────────────────────────
 
+fn json_status(code: u16) -> &'static str {
+    match code {
+        200 => "200 OK",
+        400 => "400 Bad Request",
+        401 => "401 Unauthorized",
+        404 => "404 Not Found",
+        _ => "500 Internal Server Error",
+    }
+}
+
 fn send_json(stream: TcpStream, code: u16, body: &str) {
-    let status = match code { 200 => "200 OK", 400 => "400 Bad Request", _ => "500 Internal Server Error" };
-    send_response(stream, status, "application/json", body);
+    send_response(stream, json_status(code), "application/json", body);
 }
 
 fn send_response(mut stream: TcpStream, status: &str, content_type: &str, body: &str) {
@@ -1287,5 +1296,12 @@ mod tests {
         let body = "message_id=abc123&emoji=%F0%9F%94%A5";
         assert_eq!(form_field(body, "message_id"), Some("abc123".to_string()));
         assert!(form_field(body, "emoji").is_some());
+    }
+
+    #[test]
+    fn test_json_status_preserves_401_status() {
+        assert_eq!(json_status(401), "401 Unauthorized");
+        assert_eq!(json_status(404), "404 Not Found");
+        assert_eq!(json_status(500), "500 Internal Server Error");
     }
 }
