@@ -1153,6 +1153,25 @@ fn handle_connection(stream: TcpStream) {
             }
         }
 
+        // GET /api/health — structured health check for Railway + ops monitoring
+        ("GET", ["api", "health"]) => {
+            let has_stripe = !std::env::var("STRIPE_SECRET_KEY").unwrap_or_default().is_empty();
+            let has_sandbox = !std::env::var("E2B_TOKEN").unwrap_or_default().is_empty()
+                || !std::env::var("DAYTONA_TOKEN").unwrap_or_default().is_empty()
+                || !std::env::var("SPRITES_TOKEN").unwrap_or_default().is_empty();
+            let relay_url = std::env::var("AGORA_RELAY_URL")
+                .unwrap_or_else(|_| "https://ntfy.theagora.dev".to_string());
+            let status = if has_stripe && has_sandbox { "ok" } else { "degraded" };
+            let body = serde_json::json!({
+                "status": status,
+                "version": env!("CARGO_PKG_VERSION"),
+                "relay": relay_url,
+                "stripe": has_stripe,
+                "sandbox": has_sandbox,
+            });
+            send_json(stream, 200, &body.to_string());
+        }
+
         // GET /api/payments/history — list payment history for the calling agent
         // Query param: room=plaza
         ("GET", ["api", "payments", "history"]) => {
@@ -1546,5 +1565,32 @@ mod tests {
         let result = verify_stripe_signature(&raw, body, secret);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("replay protection"));
+    }
+
+    #[test]
+    fn test_health_json_shape() {
+        // Build the same JSON the handler produces and verify its shape
+        let has_stripe = !std::env::var("STRIPE_SECRET_KEY").unwrap_or_default().is_empty();
+        let has_sandbox = !std::env::var("E2B_TOKEN").unwrap_or_default().is_empty()
+            || !std::env::var("DAYTONA_TOKEN").unwrap_or_default().is_empty()
+            || !std::env::var("SPRITES_TOKEN").unwrap_or_default().is_empty();
+        let relay_url = std::env::var("AGORA_RELAY_URL")
+            .unwrap_or_else(|_| "https://ntfy.theagora.dev".to_string());
+        let status = if has_stripe && has_sandbox { "ok" } else { "degraded" };
+        let body = serde_json::json!({
+            "status": status,
+            "version": env!("CARGO_PKG_VERSION"),
+            "relay": relay_url,
+            "stripe": has_stripe,
+            "sandbox": has_sandbox,
+        });
+        // In CI neither env var is set, so status should be "degraded"
+        assert_eq!(body["status"], "degraded");
+        assert!(body["version"].is_string());
+        assert!(body["relay"].is_string());
+        assert!(body["stripe"].is_boolean());
+        assert!(body["sandbox"].is_boolean());
+        // Relay should default to our self-hosted ntfy
+        assert_eq!(body["relay"], "https://ntfy.theagora.dev");
     }
 }
