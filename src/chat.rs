@@ -1450,12 +1450,22 @@ pub fn vouch_count(agent_id: &str) -> usize {
 // ── Bounties ───────────────────────────────────────────────────
 
 /// Post a bounty — a task with a priority weight that boosts discoverer trust.
-pub fn bounty_post(title: &str, priority: u32, room_label: Option<&str>) -> Result<String, String> {
+///
+/// `acceptance_oracle` is an optional shell command run against each submission
+/// to determine pass/fail automatically (e.g. "cargo test"). When set, the
+/// platform can settle the bounty without a human judge.
+pub fn bounty_post(
+    title: &str,
+    priority: u32,
+    acceptance_oracle: Option<&str>,
+    acceptance_criteria: Option<&[String]>,
+    room_label: Option<&str>,
+) -> Result<String, String> {
     let room = resolve_room(room_label)?;
     let me = store::get_agent_id();
     let id = msg_id();
     let room_key = crypto::derive_room_key(&room.secret, &room.room_id);
-    let env = json!({
+    let mut env = json!({
         "v": VERSION, "id": id, "from": me, "ts": now(),
         "type": "bounty",
         "title": title,
@@ -1463,6 +1473,14 @@ pub fn bounty_post(title: &str, priority: u32, room_label: Option<&str>) -> Resu
         "status": "open",
         "text": format!("[bounty P{}] {title} (id: {})", priority, &id[..6]),
     });
+    if let Some(oracle) = acceptance_oracle {
+        env["acceptance_oracle"] = json!(oracle);
+    }
+    if let Some(criteria) = acceptance_criteria {
+        if !criteria.is_empty() {
+            env["acceptance_criteria"] = json!(criteria);
+        }
+    }
     let encrypted = encrypt_envelope(&env, &room_key, &room.room_id);
     transport::publish(&room.room_id, &encrypted);
     store::save_message(&room.room_id, &env);
@@ -1480,6 +1498,153 @@ pub fn bounty_list(room_label: Option<&str>) -> Result<Vec<serde_json::Value>, S
         .filter(|m| m["type"].as_str() == Some("bounty") && m["status"].as_str() == Some("open"))
         .collect();
     Ok(bounties)
+}
+
+// ── Role Lease Protocol ────────────────────────────────────────
+
+const ROLE_LEASE_SECS: u64 = 3600; // 1 hour default lease
+
+/// Claim a specialist role. Returns an error if the role is held by another agent
+/// with an unexpired lease. Publishes a hidden `role_state` event to the room so
+/// other agents can observe the assignment without chat spam.
+pub fn role_claim(
+    role: &str,
+    context: Option<&str>,
+    room_label: Option<&str>,
+) -> Result<String, String> {
+    let room = resolve_room(room_label)?;
+    let me = store::get_agent_id();
+    let t = now();
+
+    let mut roles = store::load_roles();
+
+    // Check for an unexpired, non-self lease.
+    if let Some(existing) = roles.iter().find(|r| r.role == role) {
+        if existing.agent_id != me && existing.lease_expires > t {
+            return Err(format!(
+                "Role '{}' is held by {} (expires in {}s).",
+                role,
+                existing.agent_id,
+                existing.lease_expires.saturating_sub(t)
+            ));
+        }
+    }
+
+    // Upsert lease.
+    let lease = store::RoleLease {
+        role: role.to_string(),
+        agent_id: me.clone(),
+        lease_expires: t + ROLE_LEASE_SECS,
+        last_heartbeat: t,
+        context_summary: context.map(|s| s.to_string()),
+    };
+    roles.retain(|r| r.role != role);
+    roles.push(lease.clone());
+    store::save_roles(&roles);
+
+    // Publish hidden role_state event.
+    let room_key = crypto::derive_room_key(&room.secret, &room.room_id);
+    let ctx_str = context.unwrap_or("—");
+    let env = json!({
+        "v": VERSION, "id": msg_id(), "from": me, "ts": t,
+        "type": "role_state",
+        "role": role,
+        "action": "claim",
+        "context": ctx_str,
+        "lease_expires": lease.lease_expires,
+        "text": format!("[role] {me} claimed '{role}': {ctx_str}"),
+        "hidden": true,
+    });
+    let encrypted = encrypt_envelope(&env, &room_key, &room.room_id);
+    transport::publish(&room.room_id, &encrypted);
+    store::save_message(&room.room_id, &env);
+
+    Ok(format!("Claimed role '{}' until +{}s. Context: {}", role, ROLE_LEASE_SECS, ctx_str))
+}
+
+/// Refresh the heartbeat for a role you hold, optionally updating context.
+pub fn role_heartbeat(
+    role: &str,
+    context: Option<&str>,
+    room_label: Option<&str>,
+) -> Result<String, String> {
+    let room = resolve_room(room_label)?;
+    let me = store::get_agent_id();
+    let t = now();
+
+    let mut roles = store::load_roles();
+    let lease = roles
+        .iter_mut()
+        .find(|r| r.role == role && r.agent_id == me)
+        .ok_or_else(|| format!("You don't hold role '{role}'."))?;
+
+    lease.last_heartbeat = t;
+    lease.lease_expires = t + ROLE_LEASE_SECS; // renew
+    if let Some(ctx) = context {
+        lease.context_summary = Some(ctx.to_string());
+    }
+    let summary = lease.context_summary.clone().unwrap_or_else(|| "—".to_string());
+    store::save_roles(&roles);
+
+    // Publish hidden heartbeat event.
+    let room_key = crypto::derive_room_key(&room.secret, &room.room_id);
+    let env = json!({
+        "v": VERSION, "id": msg_id(), "from": me, "ts": t,
+        "type": "role_state",
+        "role": role,
+        "action": "heartbeat",
+        "context": summary,
+        "lease_expires": t + ROLE_LEASE_SECS,
+        "text": format!("[role] {me} heartbeat '{role}': {summary}"),
+        "hidden": true,
+    });
+    let encrypted = encrypt_envelope(&env, &room_key, &room.room_id);
+    transport::publish(&room.room_id, &encrypted);
+    store::save_message(&room.room_id, &env);
+
+    Ok(format!("Heartbeat for role '{}'. Lease extended +{}s.", role, ROLE_LEASE_SECS))
+}
+
+/// Release a role you hold before the lease expires.
+pub fn role_release(role: &str, room_label: Option<&str>) -> Result<String, String> {
+    let room = resolve_room(room_label)?;
+    let me = store::get_agent_id();
+    let t = now();
+
+    let mut roles = store::load_roles();
+    let held = roles.iter().any(|r| r.role == role && r.agent_id == me);
+    if !held {
+        return Err(format!("You don't hold role '{role}'."));
+    }
+    roles.retain(|r| !(r.role == role && r.agent_id == me));
+    store::save_roles(&roles);
+
+    let room_key = crypto::derive_room_key(&room.secret, &room.room_id);
+    let env = json!({
+        "v": VERSION, "id": msg_id(), "from": me, "ts": t,
+        "type": "role_state",
+        "role": role,
+        "action": "release",
+        "text": format!("[role] {me} released '{role}'"),
+        "hidden": true,
+    });
+    let encrypted = encrypt_envelope(&env, &room_key, &room.room_id);
+    transport::publish(&room.room_id, &encrypted);
+    store::save_message(&room.room_id, &env);
+
+    Ok(format!("Released role '{role}'."))
+}
+
+/// List all current role leases (expired leases are pruned).
+pub fn role_list() -> Vec<store::RoleLease> {
+    let t = now();
+    let mut roles = store::load_roles();
+    let before = roles.len();
+    roles.retain(|r| r.lease_expires > t);
+    if roles.len() != before {
+        store::save_roles(&roles); // prune expired
+    }
+    roles
 }
 
 // ── SOMA — Shared Observable Memory for Agents ─────────────────

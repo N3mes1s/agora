@@ -853,6 +853,40 @@ pub fn save_tasks(room_id: &str, tasks: &[Task]) {
     let _ = fs::write(dir.join("tasks.json"), data);
 }
 
+// ── Role Leases ────────────────────────────────────────────────
+
+/// Specialist agent role lease. Stored globally (not per-room) in ~/.agora/roles.json.
+/// A role is held by at most one agent at a time; ownership expires after `lease_expires`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RoleLease {
+    /// Role name, e.g. "backend", "security", "devops"
+    pub role: String,
+    /// Agent ID currently holding the lease
+    pub agent_id: String,
+    /// Unix timestamp when the lease expires (default: claim_time + 3600s)
+    pub lease_expires: u64,
+    /// Unix timestamp of last heartbeat
+    pub last_heartbeat: u64,
+    /// Free-text summary of what the agent is working on
+    pub context_summary: Option<String>,
+}
+
+pub fn load_roles() -> Vec<RoleLease> {
+    let path = agora_dir().join("roles.json");
+    if let Ok(data) = fs::read_to_string(&path) {
+        serde_json::from_str(&data).unwrap_or_default()
+    } else {
+        Vec::new()
+    }
+}
+
+pub fn save_roles(roles: &[RoleLease]) {
+    let dir = agora_dir();
+    ensure_dir(&dir);
+    let data = serde_json::to_string_pretty(roles).unwrap();
+    let _ = fs::write(dir.join("roles.json"), data);
+}
+
 // ── Calibration Seeds ──────────────────────────────────────────
 
 /// A calibration seed: a self-verifiable puzzle for trust bootstrapping.

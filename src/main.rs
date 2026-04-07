@@ -407,10 +407,44 @@ enum Commands {
         /// Priority (1-5, higher = more important)
         #[arg(long, default_value = "3")]
         priority: u32,
+        /// Shell command used as an automated acceptance oracle (e.g. "cargo test")
+        #[arg(long)]
+        oracle: Option<String>,
+        /// Acceptance criteria (repeatable, e.g. --criteria "tests pass" --criteria "binary < 5MB")
+        #[arg(long = "criteria")]
+        acceptance_criteria: Vec<String>,
     },
 
     /// List open bounties
     Bounties,
+
+    /// Claim a specialist role (backend, security, devops, economics, community, builder).
+    /// The lease lasts 1 hour; use role-heartbeat to renew.
+    RoleClaim {
+        /// Role name, e.g. "backend"
+        role: String,
+        /// What you are working on
+        #[arg(long)]
+        context: Option<String>,
+    },
+
+    /// Renew your specialist role lease and optionally update context.
+    RoleHeartbeat {
+        /// Role name
+        role: String,
+        /// Updated context summary
+        #[arg(long)]
+        context: Option<String>,
+    },
+
+    /// Release a specialist role before the lease expires.
+    RoleRelease {
+        /// Role name
+        role: String,
+    },
+
+    /// List active specialist role leases.
+    Roles,
 
     /// Vouch for another agent (adds to their trust score)
     Vouch {
@@ -2240,10 +2274,23 @@ fn main() {
             }
         }
 
-        Commands::Bounty { title, priority } => {
+        Commands::Bounty { title, priority, oracle, acceptance_criteria } => {
             let t = title.join(" ");
-            match chat::bounty_post(&t, priority, room) {
-                Ok(id) => println!("  Bounty [{id}] posted (P{priority}): {t}"),
+            let criteria_ref: Option<&[String]> = if acceptance_criteria.is_empty() {
+                None
+            } else {
+                Some(&acceptance_criteria)
+            };
+            match chat::bounty_post(&t, priority, oracle.as_deref(), criteria_ref, room) {
+                Ok(id) => {
+                    println!("  Bounty [{id}] posted (P{priority}): {t}");
+                    if let Some(ref o) = oracle {
+                        println!("  Oracle: {o}");
+                    }
+                    if !acceptance_criteria.is_empty() {
+                        println!("  Criteria: {}", acceptance_criteria.join("; "));
+                    }
+                }
                 Err(e) => { eprintln!("  Error: {e}"); process::exit(1); }
             }
         }
@@ -2261,10 +2308,57 @@ fn main() {
                         let title = b["title"].as_str().unwrap_or("?");
                         let priority = b["priority"].as_u64().unwrap_or(0);
                         let from = b["from"].as_str().unwrap_or("?");
-                        println!("  [{id}] P{priority} {title} (by {from})");
+                        let oracle_str = b["acceptance_oracle"].as_str()
+                            .map(|o| format!(" [oracle: {o}]"))
+                            .unwrap_or_default();
+                        println!("  [{id}] P{priority} {title} (by {from}){oracle_str}");
                     }
                 }
                 Err(e) => { eprintln!("  Error: {e}"); process::exit(1); }
+            }
+        }
+
+        Commands::RoleClaim { role, context } => {
+            match chat::role_claim(&role, context.as_deref(), room) {
+                Ok(msg) => println!("  {msg}"),
+                Err(e) => { eprintln!("  Error: {e}"); process::exit(1); }
+            }
+        }
+
+        Commands::RoleHeartbeat { role, context } => {
+            match chat::role_heartbeat(&role, context.as_deref(), room) {
+                Ok(msg) => println!("  {msg}"),
+                Err(e) => { eprintln!("  Error: {e}"); process::exit(1); }
+            }
+        }
+
+        Commands::RoleRelease { role } => {
+            match chat::role_release(&role, room) {
+                Ok(msg) => println!("  {msg}"),
+                Err(e) => { eprintln!("  Error: {e}"); process::exit(1); }
+            }
+        }
+
+        Commands::Roles => {
+            let roles = chat::role_list();
+            if roles.is_empty() {
+                println!("  No active role leases.");
+            } else {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs();
+                println!("  Active specialist roles:\n");
+                for r in &roles {
+                    let expires_in = r.lease_expires.saturating_sub(now);
+                    let ctx = r.context_summary.as_deref().unwrap_or("—");
+                    println!("  [{role}] {agent} (expires in {e}s) — {ctx}",
+                        role = r.role,
+                        agent = &r.agent_id[..8.min(r.agent_id.len())],
+                        e = expires_in,
+                        ctx = ctx,
+                    );
+                }
             }
         }
 
