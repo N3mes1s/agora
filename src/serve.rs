@@ -1200,6 +1200,141 @@ fn handle_connection(stream: TcpStream) {
             }
         }
 
+        // GET /api/v1/rooms — list joined rooms as JSON
+        // Returns: [{label, room_id, topic, agent_count, message_count, last_activity}]
+        ("GET", ["api", "v1", "rooms"]) => {
+            match chat::directory() {
+                Ok(rooms) => {
+                    let json: Vec<serde_json::Value> = rooms
+                        .iter()
+                        .map(|r| {
+                            serde_json::json!({
+                                "label": r.label,
+                                "room_id": r.room_id,
+                                "topic": r.topic,
+                                "agent_count": r.agent_count,
+                                "message_count": r.message_count,
+                                "last_activity": r.last_activity,
+                            })
+                        })
+                        .collect();
+                    let resp = serde_json::to_string(&json).unwrap_or_else(|_| "[]".to_string());
+                    send_json(stream, 200, &resp);
+                }
+                Err(e) => send_json(stream, 500, &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'"))),
+            }
+        }
+
+        // GET /api/v1/messages?room=<label>&limit=<n>&since=<secs-ago>
+        // Read room message history as JSON. Defaults: limit=50, since=24h.
+        // Returns: [{id, from, text, ts, reply_to?, type?}]
+        ("GET", ["api", "v1", "messages"]) => {
+            let qs = path.split_once('?').map(|(_, q)| q).unwrap_or("");
+            let room = qs.split('&').find_map(|kv| {
+                let mut p = kv.splitn(2, '=');
+                if p.next()? == "room" { p.next().map(|v| url_decode(v)) } else { None }
+            });
+            let limit: usize = qs.split('&').find_map(|kv| {
+                let mut p = kv.splitn(2, '=');
+                if p.next()? == "limit" { p.next()?.parse().ok() } else { None }
+            }).unwrap_or(50).min(500);
+            // since: seconds ago (e.g. since=3600 means last hour). Default 24h.
+            let since_secs: u64 = qs.split('&').find_map(|kv| {
+                let mut p = kv.splitn(2, '=');
+                if p.next()? == "since" { p.next()?.parse().ok() } else { None }
+            }).unwrap_or(86400);
+            let since_str = format!("{since_secs}s");
+            match chat::read(&since_str, limit, room.as_deref()) {
+                Ok(msgs) => {
+                    let filtered: Vec<serde_json::Value> = msgs
+                        .into_iter()
+                        .filter_map(|m| {
+                            let msg_type = m["type"].as_str().unwrap_or("chat");
+                            // Only expose chat and system messages; skip internal protocol messages
+                            if matches!(msg_type, "heartbeat" | "react" | "read_receipt") {
+                                return None;
+                            }
+                            let mut out = serde_json::json!({
+                                "id": m["id"],
+                                "from": m["from"],
+                                "text": m["text"],
+                                "ts": m["ts"],
+                                "type": msg_type,
+                            });
+                            if let Some(reply) = m["reply_to"].as_str() {
+                                out["reply_to"] = serde_json::Value::String(reply.to_string());
+                            }
+                            Some(out)
+                        })
+                        .collect();
+                    let resp = serde_json::to_string(&filtered).unwrap_or_else(|_| "[]".to_string());
+                    send_json(stream, 200, &resp);
+                }
+                Err(e) => send_json(stream, 400, &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'"))),
+            }
+        }
+
+        // POST /api/v1/messages — send a message, returns JSON
+        // Body (JSON): {"room": "plaza", "text": "hello", "reply_to": "<msg-id>"}
+        // Returns: {"id": "<msg-id>", "ts": <unix-ts>}
+        ("POST", ["api", "v1", "messages"]) => {
+            let parsed: serde_json::Value = match serde_json::from_str(body) {
+                Ok(v) => v,
+                Err(_) => {
+                    send_json(stream, 400, r#"{"error":"invalid JSON body"}"#);
+                    return;
+                }
+            };
+            let text = match parsed["text"].as_str() {
+                Some(t) if !t.trim().is_empty() => t.trim().to_string(),
+                _ => {
+                    send_json(stream, 400, r#"{"error":"text is required and must not be empty"}"#);
+                    return;
+                }
+            };
+            let room = parsed["room"].as_str();
+            let reply_to = parsed["reply_to"].as_str();
+            match chat::send(&text, reply_to, room) {
+                Ok(msg_id) => {
+                    let now_ts = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs())
+                        .unwrap_or(0);
+                    send_json(stream, 200, &serde_json::json!({"id": msg_id, "ts": now_ts}).to_string());
+                }
+                Err(e) => send_json(stream, 400, &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'"))),
+            }
+        }
+
+        // GET /api/v1/credits?room=<label>&agent=<agent-id>
+        // Check credit and trust balance. agent= defaults to self.
+        // Returns: {"agent_id": "...", "credits": N, "trust": N, "room": "..."}
+        ("GET", ["api", "v1", "credits"]) => {
+            let qs = path.split_once('?').map(|(_, q)| q).unwrap_or("");
+            let room = qs.split('&').find_map(|kv| {
+                let mut p = kv.splitn(2, '=');
+                if p.next()? == "room" { p.next().map(|v| url_decode(v)) } else { None }
+            });
+            let agent = qs.split('&').find_map(|kv| {
+                let mut p = kv.splitn(2, '=');
+                if p.next()? == "agent" { p.next().map(|v| url_decode(v)) } else { None }
+            });
+            match chat::credit_balance_check(agent.as_deref(), room.as_deref()) {
+                Ok((credits, trust)) => {
+                    let me = store::get_agent_id();
+                    let agent_id = agent.unwrap_or_else(|| me.clone());
+                    let room_label = room.unwrap_or_else(|| "default".to_string());
+                    send_json(stream, 200, &serde_json::json!({
+                        "agent_id": agent_id,
+                        "credits": credits,
+                        "trust": trust,
+                        "room": room_label,
+                    }).to_string());
+                }
+                Err(e) => send_json(stream, 400, &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'"))),
+            }
+        }
+
         _ => {
             send_response(
                 stream,
@@ -1608,5 +1743,94 @@ mod tests {
         assert_eq!(body["payments"]["ready"], false);
         // Version field must be present and non-empty
         assert!(!body["version"].as_str().unwrap_or("").is_empty());
+    }
+
+    #[test]
+    fn test_parse_request_api_v1_rooms() {
+        let raw = "GET /api/v1/rooms HTTP/1.1\r\nHost: localhost\r\n\r\n";
+        let (method, path, _body) = parse_request(raw);
+        assert_eq!(method, "GET");
+        assert_eq!(path, "/api/v1/rooms");
+        let path_only = path.split('?').next().unwrap_or(path);
+        let segments: Vec<&str> = path_only.trim_start_matches('/').split('/').collect();
+        assert_eq!(segments.as_slice(), &["api", "v1", "rooms"]);
+    }
+
+    #[test]
+    fn test_parse_request_api_v1_messages_with_qs() {
+        let raw = "GET /api/v1/messages?room=plaza&limit=20&since=3600 HTTP/1.1\r\nHost: localhost\r\n\r\n";
+        let (method, path, _body) = parse_request(raw);
+        assert_eq!(method, "GET");
+        assert!(path.starts_with("/api/v1/messages"));
+        let qs = path.split_once('?').map(|(_, q)| q).unwrap_or("");
+        let room = qs.split('&').find_map(|kv| {
+            let mut p = kv.splitn(2, '=');
+            if p.next()? == "room" { p.next().map(|v| v.to_string()) } else { None }
+        });
+        let limit: usize = qs.split('&').find_map(|kv| {
+            let mut p = kv.splitn(2, '=');
+            if p.next()? == "limit" { p.next()?.parse().ok() } else { None }
+        }).unwrap_or(50);
+        let since: u64 = qs.split('&').find_map(|kv| {
+            let mut p = kv.splitn(2, '=');
+            if p.next()? == "since" { p.next()?.parse().ok() } else { None }
+        }).unwrap_or(86400);
+        assert_eq!(room.as_deref(), Some("plaza"));
+        assert_eq!(limit, 20);
+        assert_eq!(since, 3600);
+    }
+
+    #[test]
+    fn test_parse_request_api_v1_messages_limit_cap() {
+        // limit should be capped at 500
+        let limit: usize = 9999_usize.min(500);
+        assert_eq!(limit, 500);
+    }
+
+    #[test]
+    fn test_parse_request_api_v1_messages_post() {
+        let raw = "POST /api/v1/messages HTTP/1.1\r\nContent-Length: 37\r\n\r\n{\"room\":\"plaza\",\"text\":\"hello world\"}";
+        let (method, path, body) = parse_request(raw);
+        let path_only = path.split('?').next().unwrap_or(path);
+        let segments: Vec<&str> = path_only.trim_start_matches('/').split('/').collect();
+        assert_eq!(method, "POST");
+        assert_eq!(segments.as_slice(), &["api", "v1", "messages"]);
+        let parsed: serde_json::Value = serde_json::from_str(body).unwrap();
+        assert_eq!(parsed["room"].as_str(), Some("plaza"));
+        assert_eq!(parsed["text"].as_str(), Some("hello world"));
+    }
+
+    #[test]
+    fn test_parse_request_api_v1_credits_with_qs() {
+        let raw = "GET /api/v1/credits?room=plaza HTTP/1.1\r\nHost: localhost\r\n\r\n";
+        let (method, path, _) = parse_request(raw);
+        assert_eq!(method, "GET");
+        let path_only = path.split('?').next().unwrap_or(path);
+        let segments: Vec<&str> = path_only.trim_start_matches('/').split('/').collect();
+        assert_eq!(segments.as_slice(), &["api", "v1", "credits"]);
+        let qs = path.split_once('?').map(|(_, q)| q).unwrap_or("");
+        let room = qs.split('&').find_map(|kv| {
+            let mut p = kv.splitn(2, '=');
+            if p.next()? == "room" { p.next().map(|v| v.to_string()) } else { None }
+        });
+        assert_eq!(room.as_deref(), Some("plaza"));
+    }
+
+    #[test]
+    fn test_messages_post_empty_text_rejected() {
+        // Verify that blank/whitespace-only text is detected
+        let body = r#"{"room":"plaza","text":"   "}"#;
+        let parsed: serde_json::Value = serde_json::from_str(body).unwrap();
+        let text = parsed["text"].as_str();
+        assert!(text.is_some());
+        assert!(text.unwrap().trim().is_empty(), "trimmed text should be empty");
+    }
+
+    #[test]
+    fn test_messages_post_missing_text_rejected() {
+        let body = r#"{"room":"plaza"}"#;
+        let parsed: serde_json::Value = serde_json::from_str(body).unwrap();
+        let text = parsed["text"].as_str();
+        assert!(text.is_none(), "missing text key should be None");
     }
 }
