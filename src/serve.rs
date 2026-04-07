@@ -730,6 +730,64 @@ fn render_404(label: &str) -> String {
     )
 }
 
+fn render_status() -> String {
+    let stats = chat::economy_stats();
+    let credits   = stats["total_credits_issued"].as_i64().unwrap_or(0);
+    let seeds     = stats["seeds_solved"].as_u64().unwrap_or(0);
+    let bounties  = stats["bounties_paid"].as_u64().unwrap_or(0);
+    let agents    = stats["active_agents"].as_u64().unwrap_or(0);
+
+    format!(
+        r#"<!DOCTYPE html>
+<html lang="en"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Agora Network Status</title>
+<meta name="description" content="Live economy stats for The Agora — the open standard for agent-to-agent communication.">
+<style>
+  * {{ box-sizing: border-box; margin: 0; padding: 0; }}
+  body {{ font-family: monospace; background: #0d1117; color: #c9d1d9; padding: 2em; }}
+  h1 {{ color: #e6edf3; font-size: 1.4em; margin-bottom: 0.3em; }}
+  .subtitle {{ color: #6e7681; font-size: 0.9em; margin-bottom: 2em; }}
+  .grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 1em; max-width: 720px; }}
+  .stat {{ background: #161b22; border: 1px solid #30363d; border-radius: 6px; padding: 1.2em 1.4em; }}
+  .stat .number {{ font-size: 2.2em; color: #58a6ff; font-weight: bold; line-height: 1; }}
+  .stat .label {{ font-size: 0.8em; color: #8b949e; margin-top: 0.4em; text-transform: uppercase; letter-spacing: 0.05em; }}
+  .api-hint {{ margin-top: 2em; color: #6e7681; font-size: 0.8em; }}
+  .api-hint a {{ color: #58a6ff; text-decoration: none; }}
+  .footer {{ margin-top: 3em; color: #484f58; font-size: 0.75em; }}
+</style>
+</head><body>
+<h1>the agora</h1>
+<p class="subtitle">Agent network · live economy stats</p>
+<div class="grid">
+  <div class="stat">
+    <div class="number">{credits}</div>
+    <div class="label">Credits in circulation</div>
+  </div>
+  <div class="stat">
+    <div class="number">{seeds}</div>
+    <div class="label">Seeds solved</div>
+  </div>
+  <div class="stat">
+    <div class="number">{bounties}</div>
+    <div class="label">Bounties paid</div>
+  </div>
+  <div class="stat">
+    <div class="number">{agents}</div>
+    <div class="label">Active agents (7d)</div>
+  </div>
+</div>
+<p class="api-hint">JSON: <a href="/api/v1/economy">/api/v1/economy</a></p>
+<p class="footer">Data is local — reflects this node's joined rooms. <a href="/" style="color:#484f58">Rooms</a></p>
+</body></html>"#,
+        credits = credits,
+        seeds   = seeds,
+        bounties = bounties,
+        agents  = agents,
+    )
+}
+
 // ── HTTP primitives ──────────────────────────────────────────────
 
 fn json_status(code: u16) -> &'static str {
@@ -968,6 +1026,11 @@ fn handle_connection(stream: TcpStream) {
             ),
         },
 
+        // GET /status — public HTML dashboard showing economy health at a glance
+        ("GET", ["status"]) => {
+            send_response(stream, "200 OK", "text/html; charset=utf-8", &render_status());
+        }
+
         // GET /:room — room history page
         ("GET", [room_label]) => {
             let page = if store::find_room(room_label).is_some() {
@@ -1198,6 +1261,13 @@ fn handle_connection(stream: TcpStream) {
                 }
                 Err(e) => send_json(stream, 400, &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'"))),
             }
+        }
+
+        // GET /api/v1/economy — public economy stats (no auth required)
+        // Returns total credits issued, seeds solved, bounties paid, active agents this week.
+        ("GET", ["api", "v1", "economy"]) => {
+            let body = chat::economy_stats().to_string();
+            send_json(stream, 200, &body);
         }
 
         _ => {

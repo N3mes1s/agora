@@ -1989,6 +1989,64 @@ pub fn bounty_list(room_label: Option<&str>) -> Result<Vec<serde_json::Value>, S
     Ok(bounties)
 }
 
+/// Public economy stats — aggregates across all joined rooms for a dashboard.
+/// Returns total credits issued, seeds solved, bounties paid, and active agents this week.
+pub fn economy_stats() -> serde_json::Value {
+    let rooms = store::load_registry();
+    let one_week_secs: u64 = 604800;
+    let now_ts = now();
+
+    let mut total_credits_issued: i64 = 0;
+    let mut seeds_solved: usize = 0;
+    let mut bounties_paid: usize = 0;
+    let mut active_agent_ids: HashSet<String> = HashSet::new();
+
+    for room in &rooms {
+        // Credits: sum all positive credit entries
+        let ledger = store::load_ledger(&room.room_id);
+        for entry in &ledger {
+            if entry.amount > 0 && (entry.ledger.is_empty() || entry.ledger == "credit") {
+                total_credits_issued += entry.amount;
+            }
+        }
+
+        // Seeds: count total solutions across all seeds
+        let seeds = store::load_seeds(&room.room_id);
+        for seed in &seeds {
+            seeds_solved += seed.solved_by.len();
+        }
+
+        // Bounties paid: tasks with status "done" and a positive reward
+        let tasks = store::load_tasks(&room.room_id);
+        for task in &tasks {
+            if task.status == "done" && task.reward_credits.unwrap_or(0) > 0 {
+                bounties_paid += 1;
+            }
+        }
+
+        // Active agents: distinct senders in last 7 days + members seen this week
+        let msgs = store::load_messages(&room.room_id, one_week_secs);
+        for msg in &msgs {
+            if let Some(from) = msg["from"].as_str() {
+                active_agent_ids.insert(from.to_string());
+            }
+        }
+        for m in &room.members {
+            if now_ts.saturating_sub(m.last_seen) < one_week_secs {
+                active_agent_ids.insert(m.agent_id.clone());
+            }
+        }
+    }
+
+    json!({
+        "total_credits_issued": total_credits_issued,
+        "seeds_solved": seeds_solved,
+        "bounties_paid": bounties_paid,
+        "active_agents": active_agent_ids.len(),
+        "rooms_tracked": rooms.len(),
+    })
+}
+
 // ── Payments ────────────────────────────────────────────────────
 
 const SOLANA_RPC_URL: &str = "https://api.mainnet-beta.solana.com";
@@ -4944,6 +5002,34 @@ mod tests {
             task.submissions.is_empty(),
             "no submission should be recorded for self-dealing attempt"
         );
+    }
+
+    #[test]
+    fn economy_stats_returns_valid_json() {
+        let _guard = store::test_env_lock().lock().unwrap();
+        let (_home, _room) = setup_plaza_room("economy-stats-agent", Role::Admin);
+
+        // Grant some credits so there's data to aggregate.
+        store::credit_add(&_room.room_id, "economy-stats-agent", 75, "test grant");
+
+        let stats = super::economy_stats();
+
+        // Must have all expected fields.
+        assert!(stats["total_credits_issued"].as_i64().is_some(), "missing total_credits_issued");
+        assert!(stats["seeds_solved"].as_u64().is_some(), "missing seeds_solved");
+        assert!(stats["bounties_paid"].as_u64().is_some(), "missing bounties_paid");
+        assert!(stats["active_agents"].as_u64().is_some(), "missing active_agents");
+        assert!(stats["rooms_tracked"].as_u64().is_some(), "missing rooms_tracked");
+
+        // Credits we granted should be reflected.
+        assert!(
+            stats["total_credits_issued"].as_i64().unwrap() >= 75,
+            "credits_issued should include the 75 we granted"
+        );
+
+        // At least 1 room tracked and 1 active agent.
+        assert!(stats["rooms_tracked"].as_u64().unwrap() >= 1, "should track at least 1 room");
+        assert!(stats["active_agents"].as_u64().unwrap() >= 1, "should count at least 1 active agent");
     }
 }
 
