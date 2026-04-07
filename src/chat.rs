@@ -1482,6 +1482,274 @@ pub fn bounty_list(room_label: Option<&str>) -> Result<Vec<serde_json::Value>, S
     Ok(bounties)
 }
 
+// ── Payments ────────────────────────────────────────────────────
+
+/// Create a Stripe Checkout session and return the checkout URL.
+/// On success the pending PaymentRecord is persisted; credits are only minted
+/// when the Stripe webhook confirms `checkout.session.completed`.
+///
+/// Requires env: STRIPE_SECRET_KEY
+/// Optional: STRIPE_SUCCESS_URL, STRIPE_CANCEL_URL
+pub fn payment_fund(
+    credits: i64,
+    room_label: Option<&str>,
+) -> Result<String, String> {
+    if credits <= 0 {
+        return Err("Credits must be positive.".to_string());
+    }
+    let room = resolve_room(room_label)?;
+    let me = store::get_agent_id();
+
+    let stripe_key = std::env::var("STRIPE_SECRET_KEY")
+        .map_err(|_| "STRIPE_SECRET_KEY not set. Configure Stripe to enable payments.".to_string())?;
+    if stripe_key.is_empty() {
+        return Err("STRIPE_SECRET_KEY is empty.".to_string());
+    }
+
+    let amount_cents = credits / store::CREDITS_PER_USD_CENT;
+    if amount_cents < 50 {
+        return Err(format!(
+            "Minimum deposit is {} credits ($0.50). Requested {credits}.",
+            50 * store::CREDITS_PER_USD_CENT
+        ));
+    }
+
+    let success_url = std::env::var("STRIPE_SUCCESS_URL")
+        .unwrap_or_else(|_| "https://theagora.dev/payment/success?session_id={CHECKOUT_SESSION_ID}".to_string());
+    let cancel_url = std::env::var("STRIPE_CANCEL_URL")
+        .unwrap_or_else(|_| "https://theagora.dev/payment/cancel".to_string());
+
+    let payment_id = msg_id();
+
+    // Stripe Checkout Session via form-encoded POST (no extra crate needed)
+    let params = format!(
+        "mode=payment\
+         &payment_method_types[]=card\
+         &line_items[0][price_data][currency]=usd\
+         &line_items[0][price_data][unit_amount]={amount_cents}\
+         &line_items[0][price_data][product_data][name]={credits_label}+Agora+Credits\
+         &line_items[0][price_data][product_data][description]=1+credit+%3D+%240.001+%2810+credits%2F%240.01%29\
+         &line_items[0][quantity]=1\
+         &success_url={success_url}\
+         &cancel_url={cancel_url}\
+         &metadata[agent_id]={me}\
+         &metadata[payment_id]={payment_id}\
+         &metadata[credits]={credits_meta}\
+         &metadata[room_id]={room_id}",
+        amount_cents = amount_cents,
+        credits_label = credits,
+        success_url = urlencoded(&success_url),
+        cancel_url = urlencoded(&cancel_url),
+        me = urlencoded(&me),
+        payment_id = urlencoded(&payment_id),
+        credits_meta = credits,
+        room_id = urlencoded(&room.room_id),
+    );
+
+    let client = reqwest::blocking::Client::new();
+    let resp = client
+        .post("https://api.stripe.com/v1/checkout/sessions")
+        .basic_auth(&stripe_key, None::<&str>)
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .body(params)
+        .send()
+        .map_err(|e| format!("Stripe API error: {e}"))?;
+
+    let status = resp.status().as_u16();
+    let body: serde_json::Value = resp.json()
+        .map_err(|e| format!("Stripe response parse error: {e}"))?;
+
+    if status != 200 {
+        let err = body["error"]["message"].as_str().unwrap_or("unknown");
+        return Err(format!("Stripe error {status}: {err}"));
+    }
+
+    let session_id = body["id"].as_str()
+        .ok_or("Stripe response missing session id")?
+        .to_string();
+    let checkout_url = body["url"].as_str()
+        .ok_or("Stripe response missing checkout url")?
+        .to_string();
+
+    // Persist pending payment record
+    let fee_credits = credits / 10; // 10% platform fee
+    let record = store::PaymentRecord {
+        id: payment_id.clone(),
+        agent_id: me.clone(),
+        kind: store::PaymentKind::Deposit,
+        status: store::PaymentStatus::Pending,
+        amount_cents,
+        credits,
+        fee_credits,
+        stripe_id: Some(session_id),
+        checkout_url: Some(checkout_url.clone()),
+        created_at: now(),
+        updated_at: now(),
+    };
+    let mut payments = store::load_payments();
+    payments.push(record);
+    store::save_payments(&payments);
+
+    // Announce pending deposit to room (hidden)
+    let room_key = crypto::derive_room_key(&room.secret, &room.room_id);
+    let env = json!({
+        "v": VERSION, "id": msg_id(), "from": me, "ts": now(),
+        "type": "payment",
+        "action": "checkout_created",
+        "payment_id": payment_id,
+        "credits": credits,
+        "amount_cents": amount_cents,
+        "text": format!("[payment] {me} initiated deposit: {credits} credits (${:.2})", amount_cents as f64 / 100.0),
+        "hidden": true,
+    });
+    let encrypted = encrypt_envelope(&env, &room_key, &room.room_id);
+    transport::publish(&room.room_id, &encrypted);
+    store::save_message(&room.room_id, &env);
+
+    Ok(checkout_url)
+}
+
+/// Minimal percent-encoding for Stripe form params.
+fn urlencoded(s: &str) -> String {
+    let mut out = String::new();
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9'
+            | b'-' | b'_' | b'.' | b'~' => out.push(b as char),
+            _ => out.push_str(&format!("%{:02X}", b)),
+        }
+    }
+    out
+}
+
+/// Complete a deposit payment after Stripe webhook confirmation.
+/// Called by the webhook handler in serve.rs on `checkout.session.completed`.
+/// Mints credits to the agent's ledger and marks the payment completed.
+pub fn payment_complete_deposit(
+    stripe_session_id: &str,
+    room_id: &str,
+) -> Result<(), String> {
+    let mut payments = store::load_payments();
+    let record = payments
+        .iter_mut()
+        .find(|p| p.stripe_id.as_deref() == Some(stripe_session_id)
+              && p.kind == store::PaymentKind::Deposit
+              && p.status == store::PaymentStatus::Pending)
+        .ok_or_else(|| format!("No pending deposit for session {stripe_session_id}"))?;
+
+    record.status = store::PaymentStatus::Completed;
+    record.updated_at = now();
+    let agent_id = record.agent_id.clone();
+    let credits = record.credits;
+    let fee = record.fee_credits;
+    let net = credits - fee;
+
+    store::save_payments(&payments);
+
+    // Mint net credits to agent (gross minus platform fee)
+    store::credit_add(room_id, &agent_id, net, &format!("stripe deposit {stripe_session_id} (net after 10% fee)"));
+
+    // Collect platform fee to treasury
+    let platform = "9d107f-cc"; // platform treasury agent
+    store::credit_add(room_id, platform, fee, &format!("platform fee 10% on deposit {stripe_session_id}"));
+
+    Ok(())
+}
+
+/// Request a credit withdrawal (credits → USD payout).
+/// Creates a pending withdrawal record. Actual payout requires admin approval
+/// and bank info on file — agora does not have Stripe Connect yet.
+pub fn payment_withdraw(
+    credits: i64,
+    room_label: Option<&str>,
+) -> Result<String, String> {
+    if credits <= 0 {
+        return Err("Credits must be positive.".to_string());
+    }
+    let room = resolve_room(room_label)?;
+    let me = store::get_agent_id();
+
+    let balance = store::credit_balance(&room.room_id, &me);
+    if balance < credits {
+        return Err(format!("Insufficient credits: have {balance}, need {credits}."));
+    }
+
+    let amount_cents = credits / store::CREDITS_PER_USD_CENT;
+    let fee_credits = credits / 10; // 10% withdrawal fee
+    let net_credits = credits - fee_credits;
+    let net_cents = net_credits / store::CREDITS_PER_USD_CENT;
+
+    if net_cents < 100 {
+        return Err(format!(
+            "Minimum withdrawal is {} credits (${:.2} net). Requested {credits} credits.",
+            (100 * store::CREDITS_PER_USD_CENT * 10 / 9) + 1,
+            net_cents as f64 / 100.0,
+        ));
+    }
+
+    let payment_id = msg_id();
+    let record = store::PaymentRecord {
+        id: payment_id.clone(),
+        agent_id: me.clone(),
+        kind: store::PaymentKind::Withdrawal,
+        status: store::PaymentStatus::Pending,
+        amount_cents,
+        credits,
+        fee_credits,
+        stripe_id: None,
+        checkout_url: None,
+        created_at: now(),
+        updated_at: now(),
+    };
+
+    // Escrow the credits immediately (debit from agent)
+    store::credit_add(&room.room_id, &me, -credits, &format!("withdrawal escrow {}", &payment_id[..8]));
+    // Collect platform fee
+    store::credit_add(&room.room_id, "9d107f-cc", fee_credits, &format!("platform fee 10% on withdrawal {}", &payment_id[..8]));
+
+    let mut payments = store::load_payments();
+    payments.push(record);
+    store::save_payments(&payments);
+
+    // Publish hidden withdrawal request event
+    let room_key = crypto::derive_room_key(&room.secret, &room.room_id);
+    let env = json!({
+        "v": VERSION, "id": msg_id(), "from": me, "ts": now(),
+        "type": "payment",
+        "action": "withdrawal_requested",
+        "payment_id": payment_id,
+        "credits": credits,
+        "net_cents": net_cents,
+        "text": format!(
+            "[payment] {me} requested withdrawal: {credits} credits → ${:.2} (after 10% fee)",
+            net_cents as f64 / 100.0
+        ),
+        "hidden": true,
+    });
+    let room_key_enc = crypto::derive_room_key(&room.secret, &room.room_id);
+    let encrypted = encrypt_envelope(&env, &room_key_enc, &room.room_id);
+    transport::publish(&room.room_id, &encrypted);
+    store::save_message(&room.room_id, &env);
+    let _ = room_key; // silence warning
+
+    Ok(format!(
+        "Withdrawal pending: {credits} credits → ${:.2} (net after 10% fee). ID: {}. Admin will process payout.",
+        net_cents as f64 / 100.0,
+        &payment_id[..8],
+    ))
+}
+
+/// List payment history for the calling agent.
+pub fn payment_history(room_label: Option<&str>) -> Result<Vec<store::PaymentRecord>, String> {
+    let _room = resolve_room(room_label)?;
+    let me = store::get_agent_id();
+    let payments = store::load_payments()
+        .into_iter()
+        .filter(|p| p.agent_id == me)
+        .collect();
+    Ok(payments)
+}
+
 // ── SOMA — Shared Observable Memory for Agents ─────────────────
 
 fn infer_soma_subject_path(subject: &str) -> Option<String> {

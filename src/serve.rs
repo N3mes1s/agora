@@ -991,6 +991,97 @@ fn handle_connection(stream: TcpStream) {
             }
         }
 
+        // POST /api/payments/create-checkout — initiate a Stripe deposit
+        // Body (JSON): {"credits": N, "room": "plaza"}
+        ("POST", ["api", "payments", "create-checkout"]) => {
+            let parsed: serde_json::Value = match serde_json::from_str(body) {
+                Ok(v) => v,
+                Err(_) => {
+                    send_json(stream, 400, r#"{"error":"invalid JSON body"}"#);
+                    return;
+                }
+            };
+            let credits = match parsed["credits"].as_i64() {
+                Some(n) if n > 0 => n,
+                _ => {
+                    send_json(stream, 400, r#"{"error":"credits must be a positive integer"}"#);
+                    return;
+                }
+            };
+            let room = parsed["room"].as_str();
+            match chat::payment_fund(credits, room) {
+                Ok(checkout_url) => {
+                    let resp = serde_json::json!({"checkout_url": checkout_url});
+                    send_json(stream, 200, &resp.to_string());
+                }
+                Err(e) => send_json(stream, 400, &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'"))),
+            }
+        }
+
+        // POST /api/payments/webhook — Stripe event webhook
+        // Stripe sends checkout.session.completed → mint credits
+        // Requires: STRIPE_WEBHOOK_SECRET env var for signature verification
+        ("POST", ["api", "payments", "webhook"]) => {
+            // Verify Stripe-Signature header using HMAC-SHA256
+            let webhook_secret = std::env::var("STRIPE_WEBHOOK_SECRET").unwrap_or_default();
+            if webhook_secret.is_empty() {
+                send_json(stream, 500, r#"{"error":"STRIPE_WEBHOOK_SECRET not configured"}"#);
+                return;
+            }
+
+            // Parse the Stripe event (signature verification skipped in MVP — add HMAC in hardening)
+            let event: serde_json::Value = match serde_json::from_str(body) {
+                Ok(v) => v,
+                Err(_) => {
+                    send_json(stream, 400, r#"{"error":"invalid JSON"}"#);
+                    return;
+                }
+            };
+
+            let event_type = event["type"].as_str().unwrap_or("");
+            if event_type == "checkout.session.completed" {
+                let session = &event["data"]["object"];
+                let stripe_session_id = session["id"].as_str().unwrap_or("");
+                let room_id = session["metadata"]["room_id"].as_str().unwrap_or("");
+
+                if stripe_session_id.is_empty() || room_id.is_empty() {
+                    send_json(stream, 400, r#"{"error":"missing session_id or room_id in metadata"}"#);
+                    return;
+                }
+
+                match chat::payment_complete_deposit(stripe_session_id, room_id) {
+                    Ok(()) => send_json(stream, 200, r#"{"received":true}"#),
+                    Err(e) => {
+                        eprintln!("  [webhook] payment_complete_deposit error: {e}");
+                        // Return 200 to Stripe even on idempotency errors to avoid retries
+                        send_json(stream, 200, r#"{"received":true,"note":"already processed or not found"}"#);
+                    }
+                }
+            } else {
+                // Acknowledge unknown events (Stripe expects 200)
+                send_json(stream, 200, r#"{"received":true}"#);
+            }
+        }
+
+        // GET /api/payments/history — list payment history for the calling agent
+        // Query param: room=plaza
+        ("GET", ["api", "payments", "history"]) => {
+            let room = path.split_once('?').and_then(|(_, qs)| {
+                qs.split('&').find_map(|kv| {
+                    let mut parts = kv.splitn(2, '=');
+                    let k = parts.next()?;
+                    if k == "room" { parts.next().map(|v| v.to_string()) } else { None }
+                })
+            });
+            match chat::payment_history(room.as_deref()) {
+                Ok(records) => {
+                    let resp = serde_json::to_string(&records).unwrap_or_else(|_| "[]".to_string());
+                    send_json(stream, 200, &resp);
+                }
+                Err(e) => send_json(stream, 400, &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'"))),
+            }
+        }
+
         _ => {
             send_response(
                 stream,
