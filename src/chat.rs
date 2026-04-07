@@ -136,6 +136,10 @@ fn is_work_receipt(env: &serde_json::Value) -> bool {
     env["type"].as_str() == Some("work_receipt")
 }
 
+fn is_role_state(env: &serde_json::Value) -> bool {
+    env["type"].as_str() == Some("role_state")
+}
+
 fn make_reaction(target_id: &str, emoji: &str) -> serde_json::Value {
     json!({
         "v": VERSION,
@@ -220,6 +224,7 @@ fn is_system_msg(env: &serde_json::Value) -> bool {
     is_heartbeat(env)
         || is_receipt(env)
         || is_work_receipt(env)
+        || is_role_state(env)
         || is_file_msg(env)
         || is_reaction(env)
         || is_invite_redeem(env)
@@ -404,6 +409,38 @@ fn ingest_auxiliary_event(room_id: &str, env: &serde_json::Value) {
         return;
     }
 
+    if is_role_state(env) {
+        let role = env["role_name"].as_str().unwrap_or("").trim().to_string();
+        if role.is_empty() {
+            return;
+        }
+        if env["role_action"].as_str() == Some("release") {
+            store::remove_role_lease(room_id, &role);
+            return;
+        }
+        let lease = store::RoleLease {
+            role,
+            agent_id: from.to_string(),
+            lease_expires: env["lease_expires"].as_u64().unwrap_or(0),
+            last_heartbeat: env["last_heartbeat"]
+                .as_u64()
+                .unwrap_or_else(|| env["ts"].as_u64().unwrap_or(0)),
+            context_summary: env["context_summary"].as_str().map(|s| s.to_string()),
+            last_task_ids: env["last_task_ids"]
+                .as_array()
+                .map(|items| {
+                    items
+                        .iter()
+                        .filter_map(|item| item.as_str().map(|s| s.to_string()))
+                        .collect()
+                })
+                .unwrap_or_default(),
+            updated_at: env["ts"].as_u64().unwrap_or(0),
+        };
+        store::upsert_role_lease(room_id, &lease);
+        return;
+    }
+
     if is_capability_card(env) {
         let capabilities = env["card_capabilities"]
             .as_array()
@@ -434,6 +471,7 @@ fn should_display_message(env: &serde_json::Value) -> bool {
         && !is_invite_redeem(env)
         && !is_receipt(env)
         && !is_work_receipt(env)
+        && !is_role_state(env)
         && !is_reaction(env)
         && !is_capability_card(env)
 }
@@ -992,6 +1030,148 @@ pub fn set_profile(name: Option<&str>, role: Option<&str>, room_label: Option<&s
 pub fn whois(agent_id: &str, room_label: Option<&str>) -> Result<Option<store::AgentProfile>, String> {
     let room = resolve_room(room_label)?;
     Ok(store::get_profile(&room.room_id, agent_id))
+}
+
+fn claimed_task_ids(room_id: &str, agent_id: &str) -> Vec<String> {
+    store::load_tasks(room_id)
+        .into_iter()
+        .filter(|task| task.status != "done" && task.claimed_by.as_deref() == Some(agent_id))
+        .map(|task| task.id)
+        .collect()
+}
+
+fn publish_role_state(
+    room: &store::RoomEntry,
+    lease: &store::RoleLease,
+    action: &str,
+) -> Result<(), String> {
+    let room_key = crypto::derive_room_key(&room.secret, &room.room_id);
+    let text = match action {
+        "claim" => format!("[role] {} claimed {}", lease.agent_id, lease.role),
+        "release" => format!("[role] {} released {}", lease.agent_id, lease.role),
+        _ => format!("[role] {} heartbeat {}", lease.agent_id, lease.role),
+    };
+    let env = json!({
+        "v": VERSION,
+        "id": msg_id(),
+        "from": lease.agent_id,
+        "ts": now(),
+        "type": "role_state",
+        "role_name": lease.role,
+        "role_action": action,
+        "lease_expires": lease.lease_expires,
+        "last_heartbeat": lease.last_heartbeat,
+        "context_summary": lease.context_summary,
+        "last_task_ids": lease.last_task_ids,
+        "text": text,
+    });
+    let encrypted = encrypt_envelope(&env, &room_key, &room.room_id);
+    transport::publish(&room.room_id, &encrypted);
+    store::save_message(&room.room_id, &env);
+    Ok(())
+}
+
+pub fn role_claim(
+    role: &str,
+    summary: Option<&str>,
+    ttl_secs: u64,
+    room_label: Option<&str>,
+) -> Result<store::RoleLease, String> {
+    let room = resolve_room(room_label)?;
+    let me = store::get_agent_id();
+    let now_ts = now();
+
+    if let Some(existing) = store::get_role_lease(&room.room_id, role) {
+        if existing.agent_id != me && existing.lease_expires > now_ts {
+            return Err(format!(
+                "Role '{}' is currently held by '{}' for another {}s.",
+                role,
+                existing.agent_id,
+                existing.lease_expires.saturating_sub(now_ts)
+            ));
+        }
+    }
+
+    let lease = store::RoleLease {
+        role: role.to_string(),
+        agent_id: me.clone(),
+        lease_expires: now_ts + ttl_secs,
+        last_heartbeat: now_ts,
+        context_summary: summary.map(|s| s.to_string()),
+        last_task_ids: claimed_task_ids(&room.room_id, &me),
+        updated_at: now_ts,
+    };
+    store::upsert_role_lease(&room.room_id, &lease);
+    publish_role_state(&room, &lease, "claim")?;
+    Ok(lease)
+}
+
+pub fn role_heartbeat(
+    role: &str,
+    summary: Option<&str>,
+    ttl_secs: u64,
+    room_label: Option<&str>,
+) -> Result<store::RoleLease, String> {
+    let room = resolve_room(room_label)?;
+    let me = store::get_agent_id();
+    let now_ts = now();
+    let existing = store::get_role_lease(&room.room_id, role);
+
+    if let Some(current) = &existing {
+        if current.agent_id != me && current.lease_expires > now_ts {
+            return Err(format!(
+                "Role '{}' is currently held by '{}' for another {}s.",
+                role,
+                current.agent_id,
+                current.lease_expires.saturating_sub(now_ts)
+            ));
+        }
+    }
+
+    let lease = store::RoleLease {
+        role: role.to_string(),
+        agent_id: me.clone(),
+        lease_expires: now_ts + ttl_secs,
+        last_heartbeat: now_ts,
+        context_summary: summary
+            .map(|s| s.to_string())
+            .or_else(|| existing.and_then(|current| current.context_summary)),
+        last_task_ids: claimed_task_ids(&room.room_id, &me),
+        updated_at: now_ts,
+    };
+    store::upsert_role_lease(&room.room_id, &lease);
+    publish_role_state(&room, &lease, "heartbeat")?;
+    Ok(lease)
+}
+
+pub fn role_release(role: &str, room_label: Option<&str>) -> Result<(), String> {
+    let room = resolve_room(room_label)?;
+    let me = store::get_agent_id();
+    let now_ts = now();
+    let existing = store::get_role_lease(&room.room_id, role)
+        .ok_or_else(|| format!("Role '{}' is not currently claimed.", role))?;
+
+    if existing.agent_id != me && existing.lease_expires > now_ts {
+        return Err(format!("Role '{}' is currently held by '{}'.", role, existing.agent_id));
+    }
+
+    let released = store::RoleLease {
+        role: existing.role.clone(),
+        agent_id: me,
+        lease_expires: now_ts,
+        last_heartbeat: now_ts,
+        context_summary: existing.context_summary.clone(),
+        last_task_ids: existing.last_task_ids.clone(),
+        updated_at: now_ts,
+    };
+    store::remove_role_lease(&room.room_id, role);
+    publish_role_state(&room, &released, "release")?;
+    Ok(())
+}
+
+pub fn list_role_leases(room_label: Option<&str>) -> Result<Vec<store::RoleLease>, String> {
+    let room = resolve_room(room_label)?;
+    Ok(store::load_role_leases(&room.room_id))
 }
 
 // ── Room Directory ─────────────────────────────────────────────
@@ -3523,10 +3703,11 @@ mod tests {
         allow_incoming_message, annotate_soma_message, count_invite_redemptions_in_envs,
         decrypt_payload, discover, discovery_decay_weight, enforce_outbound_plaza_rate_limit,
         encrypt_envelope,
-        infer_soma_subject_path, ingest_auxiliary_event, list_work_receipts, make_envelope,
-        make_invite_redemption, pin, pins, resolve_room, seed_plaza_rate_limit_state,
-        send_watch_heartbeat, should_display_message, signing_message_bytes, soma_churn_decay,
-        soma_correct, stale_claim_weight, task_add, task_checkpoint, task_done, unpin,
+        infer_soma_subject_path, ingest_auxiliary_event, list_role_leases, list_work_receipts,
+        make_envelope, make_invite_redemption, pin, pins, resolve_room, role_claim,
+        role_heartbeat, role_release, seed_plaza_rate_limit_state, send_watch_heartbeat,
+        should_display_message, signing_message_bytes, soma_churn_decay, soma_correct,
+        stale_claim_weight, task_add, task_checkpoint, task_done, unpin,
         SignedWirePayload, SIGNED_WIRE_VERSION, BASE64, DISCOVERY_POSITIVE_HALF_LIFE_SECS,
         PLAZA_RATE_LIMIT_WINDOW_SECS,
     };
@@ -3828,6 +4009,58 @@ mod tests {
         assert_eq!(receipts[0].receipt.status, "checkpoint");
         assert_eq!(receipts[0].receipt.witness_ids.len(), 2);
         assert_eq!(receipts[0].receipt.auth, "verified");
+    }
+
+    #[test]
+    fn role_state_messages_are_hidden_but_cached() {
+        let _guard = store::test_env_lock().lock().unwrap();
+        let (_home, room) = setup_plaza_room("role-reader", Role::Admin);
+        let now_ts = current_ts();
+        let env = json!({
+            "id": "role1",
+            "from": "backend-peer",
+            "ts": now_ts,
+            "type": "role_state",
+            "role_name": "backend",
+            "role_action": "claim",
+            "lease_expires": now_ts + 900,
+            "last_heartbeat": now_ts,
+            "context_summary": "Owns transport",
+            "last_task_ids": ["task123"],
+            "text": "[role] backend-peer claimed backend",
+        });
+
+        assert!(!should_display_message(&env));
+        ingest_auxiliary_event(&room.room_id, &env);
+
+        let lease = store::get_role_lease(&room.room_id, "backend").unwrap();
+        assert_eq!(lease.agent_id, "backend-peer");
+        assert_eq!(lease.context_summary.as_deref(), Some("Owns transport"));
+        assert_eq!(lease.last_task_ids, vec!["task123".to_string()]);
+    }
+
+    #[test]
+    fn role_claim_heartbeat_and_release_manage_leases() {
+        let _guard = store::test_env_lock().lock().unwrap();
+        let (_home, room) = setup_plaza_room("backend-agent", Role::Admin);
+
+        let claimed = role_claim("backend", Some("Owns chat/store"), 900, Some("plaza")).unwrap();
+        assert_eq!(claimed.role, "backend");
+        assert_eq!(claimed.agent_id, "backend-agent");
+        assert_eq!(claimed.context_summary.as_deref(), Some("Owns chat/store"));
+
+        let leases = list_role_leases(Some("plaza")).unwrap();
+        assert_eq!(leases.len(), 1);
+        assert_eq!(leases[0].role, "backend");
+
+        let heartbeat =
+            role_heartbeat("backend", Some("Owns transport too"), 1200, Some("plaza")).unwrap();
+        assert!(heartbeat.lease_expires >= claimed.lease_expires);
+        let stored = store::get_role_lease(&room.room_id, "backend").unwrap();
+        assert_eq!(stored.context_summary.as_deref(), Some("Owns transport too"));
+
+        role_release("backend", Some("plaza")).unwrap();
+        assert!(store::get_role_lease(&room.room_id, "backend").is_none());
     }
 
     #[test]

@@ -450,37 +450,6 @@ enum Commands {
         agent_id: String,
     },
 
-    /// Claim a persistent specialist role (e.g. "backend", "security")
-    RoleClaim {
-        /// Role name
-        role: String,
-        /// Lease duration in seconds (default: 3600)
-        #[arg(long, default_value = "3600")]
-        ttl: u64,
-    },
-
-    /// Send a heartbeat for a held role (extends lease, saves context)
-    RoleHeartbeat {
-        /// Role name
-        role: String,
-        /// Context summary — what you are working on
-        context: Vec<String>,
-        /// Lease extension in seconds (default: 3600)
-        #[arg(long, default_value = "3600")]
-        ttl: u64,
-    },
-
-    /// Release a role lease (stores final context for the next holder)
-    RoleRelease {
-        /// Role name
-        role: String,
-        /// Final context summary
-        context: Vec<String>,
-    },
-
-    /// Show active role leases and last context summaries
-    Roles,
-
     /// Vouch for another agent (adds to their trust score)
     Vouch {
         /// Agent ID to vouch for
@@ -573,6 +542,39 @@ enum Commands {
 
     /// List tasks in the room
     Tasks,
+
+    /// Claim a persistent specialist role in the room
+    RoleClaim {
+        /// Role name (e.g. backend, security)
+        role: String,
+        /// Optional context summary
+        #[arg(long)]
+        summary: Option<String>,
+        /// Lease duration in seconds
+        #[arg(long, default_value = "900")]
+        ttl: u64,
+    },
+
+    /// Refresh a claimed specialist role lease
+    RoleHeartbeat {
+        /// Role name (e.g. backend, security)
+        role: String,
+        /// Optional context summary override
+        #[arg(long)]
+        summary: Option<String>,
+        /// Lease duration in seconds
+        #[arg(long, default_value = "900")]
+        ttl: u64,
+    },
+
+    /// Release a claimed specialist role
+    RoleRelease {
+        /// Role name (e.g. backend, security)
+        role: String,
+    },
+
+    /// List cached specialist role leases
+    Roles,
 
     /// Show cached work receipts
     Receipts {
@@ -1064,7 +1066,7 @@ fn print_soma_details(belief: &serde_json::Value) {
 
 fn print_msg_with_depth(env: &serde_json::Value, depth: usize) {
     match env["type"].as_str() {
-        Some("heartbeat" | "receipt" | "reaction" | "invite_redeem" | "work_receipt") => return,
+        Some("heartbeat" | "receipt" | "reaction" | "invite_redeem" | "work_receipt" | "role_state") => return,
         _ => {}
     }
     let time = ts(env["ts"].as_u64().unwrap_or(0));
@@ -2337,56 +2339,6 @@ fn main() {
             }
         }
 
-        Commands::RoleClaim { role, ttl } => {
-            let me = store::get_agent_id();
-            let ts = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
-            match store::role_claim(&role, &me, ttl, ts) {
-                Ok(()) => println!("  Role '{role}' claimed by {me} for {ttl}s."),
-                Err(e) => { eprintln!("  Error: {e}"); process::exit(1); }
-            }
-        }
-
-        Commands::RoleHeartbeat { role, context, ttl } => {
-            let me = store::get_agent_id();
-            let ts = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
-            let ctx = context.join(" ");
-            match store::role_heartbeat(&role, &me, ttl, &ctx, ts) {
-                Ok(()) => println!("  Heartbeat sent for role '{role}'. Context saved."),
-                Err(e) => { eprintln!("  Error: {e}"); process::exit(1); }
-            }
-        }
-
-        Commands::RoleRelease { role, context } => {
-            let me = store::get_agent_id();
-            let ctx = context.join(" ");
-            match store::role_release(&role, &me, &ctx) {
-                Ok(()) => println!("  Role '{role}' released. Context stored for next holder."),
-                Err(e) => { eprintln!("  Error: {e}"); process::exit(1); }
-            }
-        }
-
-        Commands::Roles => {
-            let ts = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
-            let leases = store::load_role_leases();
-            if leases.is_empty() {
-                println!("  No role leases on file.");
-            } else {
-                for l in &leases {
-                    let status = if l.expires_at > ts {
-                        format!("ACTIVE ({}s remaining)", l.expires_at - ts)
-                    } else {
-                        "EXPIRED".to_string()
-                    };
-                    println!("  {:12} {:20} {}  context: {}",
-                        l.role, l.agent_id, status,
-                        if l.context_summary.is_empty() { "(none)" } else { &l.context_summary });
-                }
-            }
-        }
-
         Commands::Bounties => {
             match chat::bounty_list(room) {
                 Ok(bounties) => {
@@ -2657,6 +2609,80 @@ fn main() {
                         for t in &done {
                             let note = t.notes.as_deref().unwrap_or("");
                             println!("    [{}] {} {}", &t.id[..6.min(t.id.len())], t.title, if note.is_empty() { String::new() } else { format!("— {note}") });
+                        }
+                    }
+                }
+                Err(e) => { eprintln!("  Error: {e}"); process::exit(1); }
+            }
+        }
+
+        Commands::RoleClaim { role, summary, ttl } => {
+            match chat::role_claim(&role, summary.as_deref(), ttl, room) {
+                Ok(lease) => {
+                    println!(
+                        "  Claimed role '{}' until {} ({}s).",
+                        lease.role,
+                        ts(lease.lease_expires),
+                        lease.lease_expires.saturating_sub(lease.last_heartbeat)
+                    );
+                    if let Some(summary) = lease.context_summary {
+                        println!("  Context: {summary}");
+                    }
+                }
+                Err(e) => { eprintln!("  Error: {e}"); process::exit(1); }
+            }
+        }
+
+        Commands::RoleHeartbeat { role, summary, ttl } => {
+            match chat::role_heartbeat(&role, summary.as_deref(), ttl, room) {
+                Ok(lease) => {
+                    println!(
+                        "  Refreshed role '{}' until {} ({}s).",
+                        lease.role,
+                        ts(lease.lease_expires),
+                        lease.lease_expires.saturating_sub(lease.last_heartbeat)
+                    );
+                    if let Some(summary) = lease.context_summary {
+                        println!("  Context: {summary}");
+                    }
+                }
+                Err(e) => { eprintln!("  Error: {e}"); process::exit(1); }
+            }
+        }
+
+        Commands::RoleRelease { role } => {
+            match chat::role_release(&role, room) {
+                Ok(()) => println!("  Released role '{}'.", role),
+                Err(e) => { eprintln!("  Error: {e}"); process::exit(1); }
+            }
+        }
+
+        Commands::Roles => {
+            match chat::list_role_leases(room) {
+                Ok(leases) => {
+                    if leases.is_empty() {
+                        println!("  (no role leases)");
+                        return;
+                    }
+                    let now_ts = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_secs();
+                    for lease in leases {
+                        let holder = resolve_display_name(&lease.agent_id);
+                        let state = if lease.lease_expires > now_ts { "active" } else { "expired" };
+                        println!(
+                            "  {} — {} [{}] until {}",
+                            lease.role,
+                            holder,
+                            state,
+                            ts(lease.lease_expires)
+                        );
+                        if let Some(summary) = lease.context_summary {
+                            println!("    {summary}");
+                        }
+                        if !lease.last_task_ids.is_empty() {
+                            println!("    tasks: {}", lease.last_task_ids.join(", "));
                         }
                     }
                 }
