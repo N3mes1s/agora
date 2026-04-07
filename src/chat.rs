@@ -6961,3 +6961,70 @@ pub fn credit_transfer(
     store::save_message(&room.room_id, &env);
     Ok((my_balance, their_balance))
 }
+
+// ── Seeds REST API helpers ────────────────────────────────────────
+
+/// Return seed data across all joined rooms suitable for the REST API.
+/// Each entry includes: id (short 8-char), full_id, title, puzzle, difficulty,
+/// credit_reward, solved_count, room_label — but NOT the answer_hash.
+pub fn seeds_for_api() -> Vec<serde_json::Value> {
+    let rooms = store::load_registry();
+    let me = store::get_agent_id();
+    let mut out = Vec::new();
+
+    for room in &rooms {
+        let seeds = store::load_seeds(&room.room_id);
+        for seed in seeds {
+            let credit_reward = match seed.difficulty.as_str() {
+                "easy"   => 0i64,
+                "medium" => 5,
+                "hard"   => 25,
+                _        => 0,
+            };
+            let already_solved = seed.solved_by.contains(&me);
+            out.push(json!({
+                "id":            &seed.id[..8.min(seed.id.len())],
+                "full_id":       seed.id,
+                "title":         seed.title,
+                "puzzle":        seed.puzzle,
+                "difficulty":    seed.difficulty,
+                "credit_reward": credit_reward,
+                "solved_count":  seed.solved_by.len(),
+                "already_solved": already_solved,
+                "room":          room.label,
+                "created_at":    seed.created_at,
+            }));
+        }
+    }
+
+    // Most recently created first.
+    out.sort_by(|a, b| {
+        let ta = a["created_at"].as_u64().unwrap_or(0);
+        let tb = b["created_at"].as_u64().unwrap_or(0);
+        tb.cmp(&ta)
+    });
+    out
+}
+
+/// Solve a seed via the REST API.  Returns (solved, credits_earned, message).
+pub fn seed_solve_api(seed_id: &str, answer: &str, room_label: Option<&str>) -> Result<(bool, i64, String), String> {
+    // Peek at the reward before consuming seed_verify (which mutates).
+    let room = resolve_room(room_label)?;
+    let seeds = store::load_seeds(&room.room_id);
+    let seed = seeds.iter().find(|s| s.id.starts_with(seed_id))
+        .ok_or_else(|| format!("No calibration seed matching '{seed_id}'"))?;
+    let credit_reward: i64 = match seed.difficulty.as_str() {
+        "easy"   => 0,
+        "medium" => 5,
+        "hard"   => 25,
+        _        => 0,
+    };
+    let difficulty = seed.difficulty.clone();
+    let _ = difficulty; // used implicitly via credit_reward
+
+    match seed_verify(seed_id, answer, room_label) {
+        Ok(true)  => Ok((true,  credit_reward, format!("Correct! Seed solved. +{credit_reward} credits awarded."))),
+        Ok(false) => Ok((false, 0,             "Incorrect answer.".to_string())),
+        Err(e)    => Err(e),
+    }
+}

@@ -6,6 +6,8 @@
 //!   GET  /:room/thread/:id — thread view rooted at one cached message
 //!   GET  /:room/events — SSE stream (new messages as HTML fragments)
 //!   POST /:room/send   — send a message, redirect back
+//!   GET  /api/v1/seeds — list calibration seeds (JSON, no answer hashes)
+//!   POST /api/v1/seeds/solve — submit an answer {seed_id, answer, room?}
 
 use crate::sandbox;
 use std::io::{Read as IoRead, Write as IoWrite};
@@ -2250,6 +2252,59 @@ fn handle_connection(stream: TcpStream) {
             }
         }
 
+        // GET /api/v1/seeds — list calibration seeds across all joined rooms.
+        // Optional query param: room=<label> to filter to one room.
+        // Returns JSON array sorted newest-first. Does NOT reveal answer hashes.
+        ("GET", ["api", "v1", "seeds"]) => {
+            let seeds = chat::seeds_for_api();
+            // Optional room filter.
+            let filter_room: Option<String> = path.split_once('?').and_then(|(_, qs)| {
+                qs.split('&').find_map(|kv| {
+                    let mut parts = kv.splitn(2, '=');
+                    let k = parts.next()?;
+                    if k == "room" { parts.next().map(|v| url_decode(v)) } else { None }
+                })
+            });
+            let filtered: Vec<_> = if let Some(ref label) = filter_room {
+                seeds.into_iter().filter(|s| s["room"].as_str() == Some(label.as_str())).collect()
+            } else {
+                seeds
+            };
+            let resp = serde_json::to_string(&filtered).unwrap_or_else(|_| "[]".to_string());
+            send_json(stream, 200, &resp);
+        }
+
+        // POST /api/v1/seeds/solve — submit an answer to a calibration seed.
+        // JSON body: {"seed_id": "b16707a0", "answer": "aroga", "room": "plaza"}
+        // "room" is optional; uses the active room if omitted.
+        // Returns: {"solved": true, "credits_earned": 0, "message": "..."}
+        ("POST", ["api", "v1", "seeds", "solve"]) => {
+            let parsed: serde_json::Value = match serde_json::from_str(body) {
+                Ok(v) => v,
+                Err(_) => { send_json(stream, 400, r#"{"error":"invalid JSON body"}"#); return; }
+            };
+            let seed_id = match parsed["seed_id"].as_str() {
+                Some(s) if !s.is_empty() => s.to_string(),
+                _ => { send_json(stream, 400, r#"{"error":"seed_id required"}"#); return; }
+            };
+            let answer = match parsed["answer"].as_str() {
+                Some(s) if !s.is_empty() => s.to_string(),
+                _ => { send_json(stream, 400, r#"{"error":"answer required"}"#); return; }
+            };
+            let room = parsed["room"].as_str().map(|s| s.to_string());
+            match chat::seed_solve_api(&seed_id, &answer, room.as_deref()) {
+                Ok((solved, credits, msg)) => {
+                    let resp = serde_json::json!({
+                        "solved": solved,
+                        "credits_earned": credits,
+                        "message": msg,
+                    });
+                    send_json(stream, 200, &resp.to_string());
+                }
+                Err(e) => send_json(stream, 400, &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'"))),
+            }
+        }
+
         _ => {
             send_response(
                 stream,
@@ -2905,6 +2960,7 @@ mod tests {
     }
 
     #[test]
+
     fn tasks_api_query_param_parsing() {
         // Simulate the same query-string extraction used in GET /api/v1/tasks
         let path = "/api/v1/tasks?room=plaza&status=open";
