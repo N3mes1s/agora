@@ -415,6 +415,25 @@ enum Commands {
     /// List open bounties
     Bounties,
 
+    /// Purchase credits with real money via Stripe Checkout.
+    /// Requires STRIPE_SECRET_KEY env var. Prints a checkout URL to complete payment.
+    /// Exchange rate: 10 credits = $0.01 (1000 credits = $1.00). Minimum: 500 credits ($0.50).
+    Fund {
+        /// Number of credits to purchase
+        credits: i64,
+    },
+
+    /// Request a credit withdrawal (credits → USD). Requires STRIPE_SECRET_KEY.
+    /// A 10% platform fee applies. Minimum net payout is $1.00.
+    /// Withdrawal requests are processed manually by platform admins.
+    Withdraw {
+        /// Number of credits to withdraw
+        credits: i64,
+    },
+
+    /// Show payment history (deposits and withdrawals).
+    Payments,
+
     /// Submit a branch as a bounty solution (runs oracle if configured)
     BountySubmit {
         /// Task/bounty ID (prefix ok)
@@ -2382,6 +2401,61 @@ fn main() {
                         let priority = b["priority"].as_u64().unwrap_or(0);
                         let from = b["from"].as_str().unwrap_or("?");
                         println!("  [{id}] P{priority} {title} (by {from})");
+                    }
+                }
+                Err(e) => { eprintln!("  Error: {e}"); process::exit(1); }
+            }
+        }
+
+        Commands::Fund { credits } => {
+            match chat::payment_fund(credits, room) {
+                Ok(checkout_url) => {
+                    let amount_usd = (credits / store::CREDITS_PER_USD_CENT) as f64 / 100.0;
+                    println!("  Stripe Checkout created for {credits} credits (${:.2}).", amount_usd);
+                    println!("  Complete payment at:");
+                    println!("  {checkout_url}");
+                    println!();
+                    println!("  Credits will be minted after payment confirmation.");
+                    println!("  10% platform fee applies — you receive {} credits net.", credits - credits / 10);
+                }
+                Err(e) => { eprintln!("  Error: {e}"); process::exit(1); }
+            }
+        }
+
+        Commands::Withdraw { credits } => {
+            match chat::payment_withdraw(credits, room) {
+                Ok(msg) => println!("  {msg}"),
+                Err(e) => { eprintln!("  Error: {e}"); process::exit(1); }
+            }
+        }
+
+        Commands::Payments => {
+            match chat::payment_history(room) {
+                Ok(records) => {
+                    if records.is_empty() {
+                        println!("  No payment history.");
+                        return;
+                    }
+                    println!("  Payment history ({} records):\n", records.len());
+                    for r in &records {
+                        let kind = match r.kind {
+                            store::PaymentKind::Deposit => "deposit",
+                            store::PaymentKind::Withdrawal => "withdrawal",
+                        };
+                        let status = match r.status {
+                            store::PaymentStatus::Pending => "pending",
+                            store::PaymentStatus::Completed => "completed",
+                            store::PaymentStatus::Failed => "failed",
+                            store::PaymentStatus::Refunded => "refunded",
+                        };
+                        let amount_usd = r.amount_cents as f64 / 100.0;
+                        println!(
+                            "  [{}] {} {} — {} credits (${:.2}) — {}",
+                            &r.id[..8.min(r.id.len())],
+                            kind, status,
+                            r.credits, amount_usd,
+                            if r.checkout_url.is_some() { "awaiting payment" } else { "" }
+                        );
                     }
                 }
                 Err(e) => { eprintln!("  Error: {e}"); process::exit(1); }

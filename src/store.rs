@@ -869,6 +869,74 @@ pub fn save_tasks(room_id: &str, tasks: &[Task]) {
     let _ = fs::write(dir.join("tasks.json"), data);
 }
 
+// ── Payments ───────────────────────────────────────────────────
+
+/// Exchange rate: 10 credits per USD cent (i.e. 1000 credits = $1.00).
+pub const CREDITS_PER_USD_CENT: i64 = 10;
+
+/// Status of a payment transaction.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PaymentStatus {
+    Pending,
+    Completed,
+    Failed,
+    Refunded,
+}
+
+/// Direction of a payment.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PaymentKind {
+    /// External USD → internal credits (fund-bounty / top-up)
+    Deposit,
+    /// Internal credits → external USD (withdrawal / payout request)
+    Withdrawal,
+}
+
+/// Immutable record of a real-money transaction. Stored in ~/.agora/payments.json.
+/// Room-independent — payments are per-agent, not per-room.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PaymentRecord {
+    /// Our internal payment ID
+    pub id: String,
+    /// Agent who initiated the payment
+    pub agent_id: String,
+    pub kind: PaymentKind,
+    pub status: PaymentStatus,
+    /// Amount in USD cents (e.g. 1000 = $10.00)
+    pub amount_cents: i64,
+    /// Credits minted or burned (amount_cents * CREDITS_PER_USD_CENT)
+    pub credits: i64,
+    /// Platform fee in credits (10% of credits)
+    pub fee_credits: i64,
+    /// Stripe checkout session ID or payout ID
+    pub stripe_id: Option<String>,
+    /// Stripe checkout URL (for deposits awaiting completion)
+    pub checkout_url: Option<String>,
+    pub created_at: u64,
+    pub updated_at: u64,
+}
+
+pub fn load_payments() -> Vec<PaymentRecord> {
+    let path = agora_dir().join("payments.json");
+    if let Ok(data) = fs::read_to_string(&path) {
+        serde_json::from_str(&data).unwrap_or_default()
+    } else {
+        Vec::new()
+    }
+}
+
+pub fn save_payments(payments: &[PaymentRecord]) {
+    let dir = agora_dir();
+    ensure_dir(&dir);
+    let _ = fs::write(dir.join("payments.json"), serde_json::to_string_pretty(payments).unwrap());
+}
+
+pub fn find_payment_by_stripe_id(stripe_id: &str) -> Option<PaymentRecord> {
+    load_payments().into_iter().find(|p| p.stripe_id.as_deref() == Some(stripe_id))
+}
+
 // ── Role Leases ────────────────────────────────────────────────
 
 /// A persistent specialist role lease. Agents claim a role for a TTL; the role is
@@ -1350,6 +1418,66 @@ mod tests {
             unsafe { env::remove_var("HOME"); }
         }
         let _ = fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn payment_record_round_trips() {
+        let _guard = test_env_lock().lock().unwrap();
+        let home = test_home("payment-rt");
+        let agora = home.join(".agora");
+        let _ = fs::remove_dir_all(&home);
+        fs::create_dir_all(&agora).unwrap();
+
+        let old_home = env::var("HOME").ok();
+        unsafe { env::set_var("HOME", &home); }
+
+        let record = PaymentRecord {
+            id: "pay-test-001".to_string(),
+            agent_id: "agent-abc".to_string(),
+            kind: PaymentKind::Deposit,
+            status: PaymentStatus::Pending,
+            amount_cents: 1000,
+            credits: 10000,
+            fee_credits: 1000,
+            stripe_id: Some("cs_test_abc123".to_string()),
+            checkout_url: Some("https://checkout.stripe.com/pay/cs_test".to_string()),
+            created_at: 1700000000,
+            updated_at: 1700000000,
+        };
+
+        save_payments(&[record.clone()]);
+        let loaded = load_payments();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].id, "pay-test-001");
+        assert_eq!(loaded[0].credits, 10000);
+        assert_eq!(loaded[0].fee_credits, 1000);
+        assert!(matches!(loaded[0].kind, PaymentKind::Deposit));
+        assert!(matches!(loaded[0].status, PaymentStatus::Pending));
+
+        // find_payment_by_stripe_id
+        let found = find_payment_by_stripe_id("cs_test_abc123");
+        assert!(found.is_some());
+        assert_eq!(found.unwrap().id, "pay-test-001");
+
+        let not_found = find_payment_by_stripe_id("nonexistent");
+        assert!(not_found.is_none());
+
+        if let Some(old) = old_home {
+            unsafe { env::set_var("HOME", old); }
+        } else {
+            unsafe { env::remove_var("HOME"); }
+        }
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn credits_per_usd_cent_constant_is_correct() {
+        // 10 credits = $0.01 means 1000 credits = $1.00
+        assert_eq!(CREDITS_PER_USD_CENT, 10);
+        // $10 should give 10000 credits
+        let dollars_in_cents = 1000i64;
+        let credits = dollars_in_cents * CREDITS_PER_USD_CENT;
+        assert_eq!(credits, 10000);
     }
 
     #[test]
