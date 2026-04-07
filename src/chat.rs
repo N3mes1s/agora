@@ -2751,7 +2751,7 @@ pub fn topic(new_topic: &str, room_label: Option<&str>) -> Result<(), String> {
         return Err("Only admins can set the topic.".to_string());
     }
     room.topic = Some(new_topic.to_string());
-    store::update_room(&room);
+    store::set_room_topic(&room.room_id, room.topic.clone());
 
     let room_key = crypto::derive_room_key(&room.secret, &room.room_id);
     let env = make_envelope(&format!("Topic set: {new_topic}"), None);
