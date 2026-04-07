@@ -1772,7 +1772,9 @@ pub fn bounty_submit(task_id: &str, branch: &str, room_label: Option<&str>) -> R
                     updated_at: msg["ts"].as_u64().unwrap_or(0),
                     notes: None,
                     acceptance_oracle: msg["acceptance_oracle"].as_str().map(|s| s.to_string()),
-                    reward_credits: msg["reward_credits"].as_i64(),
+                    // Bounty messages may use "reward_credits" or the legacy "reward" key.
+                    reward_credits: msg["reward_credits"].as_i64()
+                        .or_else(|| msg["reward"].as_i64()),
                     reward_trust: msg["reward_trust"].as_i64(),
                     submissions: vec![],
                 });
