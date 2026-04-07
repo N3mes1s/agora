@@ -81,6 +81,52 @@ required_check_buckets() {
     echo "$output"
 }
 
+open_pr_numbers() {
+    gh pr list --repo "$REPO" --state open --json number --jq '.[].number' 2>/dev/null || true
+}
+
+pr_review_signal_tsv() {
+    local pr_num="$1"
+    local output=""
+    local status=0
+
+    set +e
+    output=$(gh pr view "$pr_num" --repo "$REPO" --json number,title,reviewDecision,reviews --jq '
+        [
+            ("#" + (.number | tostring)),
+            (.title // ""),
+            (.reviewDecision // ""),
+            (
+                (.reviews // [])
+                | map(select(.state == "CHANGES_REQUESTED" or .state == "COMMENTED") | .state)
+                | unique
+                | join(",")
+            )
+        ] | @tsv
+    ' 2>/dev/null)
+    status=$?
+    set -e
+
+    if [ "$status" -eq 0 ] && [ -n "$output" ]; then
+        echo "$output"
+    fi
+}
+
+review_follow_up_lines() {
+    local pr_num=""
+    local row=""
+    for pr_num in $(open_pr_numbers); do
+        row="$(pr_review_signal_tsv "$pr_num" || true)"
+        if [ -z "$row" ]; then
+            continue
+        fi
+        IFS=$'\t' read -r _ title review_decision review_states <<<"$row"
+        if [ "$review_decision" = "CHANGES_REQUESTED" ] || [ -n "$review_states" ]; then
+            echo "$row"
+        fi
+    done
+}
+
 should_merge_pr() {
     local is_draft="$1"
     local merge_state="$2"
@@ -136,7 +182,18 @@ while true; do
     done
 
     # 2. Check for open tasks and claim one if available
-    if has_claimed_task; then
+    review_follow_up="$(review_follow_up_lines || true)"
+    if [ -n "$review_follow_up" ]; then
+        log "PRs with review activity:"
+        while IFS=$'\t' read -r pr_ref pr_title review_decision review_states; do
+            [ -z "$pr_ref" ] && continue
+            log "  $pr_ref $pr_title (decision=${review_decision:-none} reviews=${review_states:-none})"
+        done <<<"$review_follow_up"
+    fi
+
+    if [ -n "$review_follow_up" ] && printf '%s\n' "$review_follow_up" | awk -F'\t' '$3 == "CHANGES_REQUESTED" || $4 ~ /CHANGES_REQUESTED/ { found=1 } END { exit(found ? 0 : 1) }'; then
+        log "Skipping new task claim until CHANGES_REQUESTED PR reviews are handled"
+    elif has_claimed_task; then
         log "Already have in-progress work, skipping new task claim"
     else
         TASK_ID=$(first_open_task_id || true)
@@ -152,7 +209,7 @@ while true; do
     if command -v gh &>/dev/null; then
         OPEN_PRS=$(gh pr list --repo "$REPO" --state open --json number,title 2>/dev/null || echo "[]")
         if [ "$OPEN_PRS" != "[]" ] && [ -n "$OPEN_PRS" ]; then
-            for PR_NUM in $(echo "$OPEN_PRS" | grep -oP '"number":\K\d+' || true); do
+            for PR_NUM in $(open_pr_numbers); do
                 PR_META=$(gh pr view "$PR_NUM" --repo "$REPO" --json isDraft,mergeStateStatus,reviewDecision --jq '[.isDraft, .mergeStateStatus, (.reviewDecision // "")] | @tsv' 2>/dev/null || true)
                 if [ -z "$PR_META" ]; then
                     log "PR #$PR_NUM metadata unavailable, skipping"

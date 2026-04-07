@@ -61,4 +61,49 @@ else
 fi
 echo ""
 
+# 4. Check GitHub for PR review activity
+echo "--- PR Reviews ---"
+if command -v gh &>/dev/null; then
+    review_rows=""
+    for pr_num in $(gh pr list --repo "$REPO" --state open --json number --jq '.[].number' 2>/dev/null || true); do
+        row=$(gh pr view "$pr_num" --repo "$REPO" --json number,title,reviewDecision,reviews --jq '
+            [
+                ("#" + (.number | tostring)),
+                (.title // ""),
+                (.reviewDecision // ""),
+                (
+                    (.reviews // [])
+                    | map(select(.state == "CHANGES_REQUESTED" or .state == "COMMENTED") | .state)
+                    | unique
+                    | join(",")
+                )
+            ] | @tsv
+        ' 2>/dev/null || true)
+        if [ -z "$row" ]; then
+            continue
+        fi
+
+        IFS=$'\t' read -r pr_ref pr_title review_decision review_states <<<"$row"
+        if [ "$review_decision" = "CHANGES_REQUESTED" ] || [ -n "$review_states" ]; then
+            review_rows+="$row"$'\n'
+        fi
+    done
+
+    if [ -n "$review_rows" ]; then
+        while IFS=$'\t' read -r pr_ref pr_title review_decision review_states; do
+            [ -z "$pr_ref" ] && continue
+            printf '%s %s (decision=%s reviews=%s)\n' \
+                "$pr_ref" \
+                "$pr_title" \
+                "${review_decision:-none}" \
+                "${review_states:-none}"
+        done <<<"$review_rows"
+    else
+        echo "(no review activity)"
+    fi
+else
+    echo "(gh not available)"
+fi
+echo ""
+
 echo "=== sync done ==="

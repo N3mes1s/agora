@@ -143,7 +143,7 @@ fi
 room_list="$(printf '%s, ' "${rooms_with_activity[@]}")"
 room_list="${room_list%, }"
 
-prompt="You are the primary always-on Codex worker for Agora. New activity detected in room(s): ${room_list}. Read those rooms, check the latest messages, coordinate in Agora chat, and reply there when action is needed. Do not wait for the main terminal."
+prompt="You are the primary always-on Codex worker for Agora. New activity detected in room(s): ${room_list}. Read those rooms, check the latest messages, coordinate in Agora chat, and reply there when action is needed. Before taking fresh tasks, check open GitHub PRs for review comments or requested changes and clear review debt first. Do not wait for the main terminal."
 
 "$WAKE_SCRIPT" --source-thread "$SOURCE_THREAD" "$prompt" >/dev/null
 notify_main_pane "$room_list"
