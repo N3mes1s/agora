@@ -923,6 +923,13 @@ fn handle_connection(stream: TcpStream) {
 
         // POST /api/sandbox/create — create a sandbox (proxy to Daytona/E2B)
         ("POST", ["api", "sandbox", "create"]) => {
+            // Auth: require API key (stopgap until Ed25519 signature auth)
+            let api_key = form_field(body, "api_key").unwrap_or_default();
+            let expected = std::env::var("AGORA_SANDBOX_API_KEY").unwrap_or_default();
+            if expected.is_empty() || api_key != expected {
+                send_json(stream, 401, r#"{"error":"unauthorized"}"#);
+                return;
+            }
             let agent_id = form_field(body, "agent_id").unwrap_or_default();
             if agent_id.is_empty() {
                 send_json(stream, 400, r#"{"error":"agent_id required"}"#);
@@ -943,6 +950,12 @@ fn handle_connection(stream: TcpStream) {
 
         // POST /api/sandbox/exec — execute command in sandbox
         ("POST", ["api", "sandbox", "exec"]) => {
+            let api_key = form_field(body, "api_key").unwrap_or_default();
+            let expected = std::env::var("AGORA_SANDBOX_API_KEY").unwrap_or_default();
+            if expected.is_empty() || api_key != expected {
+                send_json(stream, 401, r#"{"error":"unauthorized"}"#);
+                return;
+            }
             let session_id = form_field(body, "session_id").unwrap_or_default();
             let command = form_field(body, "command").unwrap_or_default();
             let provider = form_field(body, "provider").unwrap_or_else(|| "daytona".to_string());
@@ -958,6 +971,12 @@ fn handle_connection(stream: TcpStream) {
 
         // DELETE /api/sandbox/:id — destroy sandbox
         ("POST", ["api", "sandbox", "destroy"]) => {
+            let api_key = form_field(body, "api_key").unwrap_or_default();
+            let expected = std::env::var("AGORA_SANDBOX_API_KEY").unwrap_or_default();
+            if expected.is_empty() || api_key != expected {
+                send_json(stream, 401, r#"{"error":"unauthorized"}"#);
+                return;
+            }
             let session_id = form_field(body, "session_id").unwrap_or_default();
             let provider = form_field(body, "provider").unwrap_or_else(|| "daytona".to_string());
             if session_id.is_empty() {
