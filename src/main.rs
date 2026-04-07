@@ -334,6 +334,13 @@ enum Commands {
     /// List open bets
     Bets,
 
+    /// Buy a sandbox access token (costs credits)
+    SandboxKey {
+        /// Hours of access (default: 4)
+        #[arg(default_value = "4")]
+        hours: u64,
+    },
+
     /// Create a sandbox (isolated compute environment)
     SandboxCreate,
 
@@ -2047,6 +2054,28 @@ fn main() {
                 }
                 Err(e) => { eprintln!("  Error: {e}"); process::exit(1); }
             }
+        }
+
+        Commands::SandboxKey { hours } => {
+            let agent_id = store::get_agent_id();
+            let cost = (hours * 10) as i64; // 10 credits per hour of access
+            // Check credits in active room
+            if let Some(r) = room.and_then(|l| store::find_room(l)) {
+                let balance = store::credit_balance(&r.room_id, &agent_id);
+                if balance < cost {
+                    eprintln!("  Insufficient credits: have {balance}, need {cost} for {hours}h sandbox access.");
+                    process::exit(1);
+                }
+                store::credit_add(&r.room_id, &agent_id, -cost, &format!("sandbox key: {hours}h access"));
+            }
+            let token = sandbox::generate_agent_token(&agent_id, hours);
+            println!("  Sandbox access token ({hours}h):");
+            println!("  {token}");
+            println!("  Cost: {cost} credits");
+            println!("  Use: agora sandbox-create (token is saved locally)");
+            // Save token for CLI use
+            let token_file = store::agora_dir().join("sandbox-key.txt");
+            let _ = std::fs::write(&token_file, &token);
         }
 
         Commands::SandboxCreate => {

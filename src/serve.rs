@@ -923,11 +923,10 @@ fn handle_connection(stream: TcpStream) {
 
         // POST /api/sandbox/create — create a sandbox (proxy to Daytona/E2B)
         ("POST", ["api", "sandbox", "create"]) => {
-            // Auth: require API key (stopgap until Ed25519 signature auth)
-            let api_key = form_field(body, "api_key").unwrap_or_default();
-            let expected = std::env::var("AGORA_SANDBOX_API_KEY").unwrap_or_default();
-            if expected.is_empty() || api_key != expected {
-                send_json(stream, 401, r#"{"error":"unauthorized"}"#);
+            // Auth: per-agent signed token
+            let token = form_field(body, "token").unwrap_or_default();
+            if let Err(e) = sandbox::verify_agent_token(&token) {
+                send_json(stream, 401, &format!(r#"{{"error":"{}"}}"#, e));
                 return;
             }
             let agent_id = form_field(body, "agent_id").unwrap_or_default();

@@ -234,3 +234,51 @@ fn destroy_sprites(session_id: &str) -> Result<(), String> {
         .map_err(|e| format!("Sprites destroy failed: {e}"))?;
     Ok(())
 }
+
+// ── Per-agent sandbox tokens ───────────────────────────────────
+
+/// Generate a time-limited sandbox access token for an agent.
+/// Token = base64(agent_id:expiry:HMAC(agent_id:expiry, server_secret))
+pub fn generate_agent_token(agent_id: &str, hours: u64) -> String {
+    let secret = std::env::var("AGORA_SANDBOX_SECRET")
+        .unwrap_or_else(|_| "agora-sandbox-default-secret".to_string());
+    let expiry = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() + hours * 3600;
+    let payload = format!("{agent_id}:{expiry}");
+    let key = ring::hmac::Key::new(ring::hmac::HMAC_SHA256, secret.as_bytes());
+    let sig = ring::hmac::sign(&key, payload.as_bytes());
+    let token = format!("{payload}:{}", hex::encode(sig.as_ref()));
+    use base64::Engine;
+    base64::engine::general_purpose::STANDARD.encode(token.as_bytes())
+}
+
+/// Verify an agent sandbox token. Returns (agent_id, expiry) if valid.
+pub fn verify_agent_token(token: &str) -> Result<(String, u64), String> {
+    use base64::Engine;
+    let decoded = base64::engine::general_purpose::STANDARD.decode(token)
+        .map_err(|_| "Invalid token encoding")?;
+    let token_str = String::from_utf8(decoded).map_err(|_| "Invalid token UTF-8")?;
+    let parts: Vec<&str> = token_str.splitn(3, ':').collect();
+    if parts.len() != 3 { return Err("Malformed token".to_string()); }
+
+    let agent_id = parts[0].to_string();
+    let expiry: u64 = parts[1].parse().map_err(|_| "Invalid expiry")?;
+    let sig_hex = parts[2];
+
+    // Check expiry
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+    if now > expiry { return Err("Token expired".to_string()); }
+
+    // Verify HMAC
+    let secret = std::env::var("AGORA_SANDBOX_SECRET")
+        .unwrap_or_else(|_| "agora-sandbox-default-secret".to_string());
+    let payload = format!("{agent_id}:{expiry}");
+    let key = ring::hmac::Key::new(ring::hmac::HMAC_SHA256, secret.as_bytes());
+    let expected_sig = ring::hmac::sign(&key, payload.as_bytes());
+    if hex::encode(expected_sig.as_ref()) != sig_hex {
+        return Err("Invalid signature".to_string());
+    }
+
+    Ok((agent_id, expiry))
+}
