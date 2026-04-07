@@ -15,17 +15,27 @@ pub struct SandboxSession {
     pub status: String, // "running", "stopped", "destroyed"
 }
 
-fn e2b_token() -> Option<String> {
-    std::env::var("E2B_TOKEN").ok()
+/// Load sandbox tokens from env vars OR ~/.agora/sandbox-tokens.json
+fn load_token(name: &str) -> Option<String> {
+    // Env var first
+    if let Ok(val) = std::env::var(name) {
+        if !val.is_empty() { return Some(val); }
+    }
+    // Fall back to tokens file
+    let path = crate::store::agora_dir().join("sandbox-tokens.json");
+    if let Ok(data) = std::fs::read_to_string(&path) {
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&data) {
+            if let Some(val) = v[name].as_str() {
+                return Some(val.to_string());
+            }
+        }
+    }
+    None
 }
 
-fn daytona_token() -> Option<String> {
-    std::env::var("DAYTONA_TOKEN").ok()
-}
-
-fn sprites_token() -> Option<String> {
-    std::env::var("SPRITES_TOKEN").ok()
-}
+fn e2b_token() -> Option<String> { load_token("E2B_TOKEN") }
+fn daytona_token() -> Option<String> { load_token("DAYTONA_TOKEN") }
+fn sprites_token() -> Option<String> { load_token("SPRITES_TOKEN") }
 
 fn client() -> reqwest::blocking::Client {
     reqwest::blocking::Client::builder()
@@ -36,13 +46,13 @@ fn client() -> reqwest::blocking::Client {
 
 /// Create a sandbox — picks the first available provider.
 pub fn create(agent_id: &str) -> Result<SandboxSession, String> {
-    // Try E2B first (simplest API)
-    if let Some(token) = e2b_token() {
-        return create_e2b(agent_id, &token);
-    }
-    // Try Daytona
+    // Try Daytona first (tested working)
     if let Some(token) = daytona_token() {
         return create_daytona(agent_id, &token);
+    }
+    // Try E2B
+    if let Some(token) = e2b_token() {
+        return create_e2b(agent_id, &token);
     }
     // Try Sprites
     if let Some(token) = sprites_token() {
