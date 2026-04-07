@@ -2920,7 +2920,7 @@ const PUZZLES: &[(&str, &str, &str, &str)] = &[
     (
         "Vowel count",
         "Count the vowels (a,e,i,o,u) in 'cryptographic' (answer is a decimal integer).",
-        "4",
+        "3",
         "easy",
     ),
     (
