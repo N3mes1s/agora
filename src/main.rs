@@ -5,6 +5,7 @@
 
 mod chat;
 mod crypto;
+mod lease;
 mod mcp;
 mod sandbox;
 mod serve;
@@ -2051,42 +2052,82 @@ fn main() {
 
         Commands::SandboxCreate => {
             let agent_id = store::get_agent_id();
-            // Bounded debt: check credit balance before provisioning
-            let max_session_cost: i64 = 50; // max credits per sandbox session
-            if let Some(r) = room.and_then(|l| store::find_room(l)) {
-                let balance = store::credit_balance(&r.room_id, &agent_id);
-                if balance < max_session_cost {
-                    eprintln!("  Insufficient credits: have {balance}, need {max_session_cost} for sandbox.");
-                    eprintln!("  Earn credits by completing bounties or calibration seeds.");
+            let max_session_cost: i64 = 50;
+            let credits_per_min: i64 = 1;
+            let room_id = room
+                .and_then(|l| store::find_room(l))
+                .map(|r| r.room_id)
+                .unwrap_or_default();
+
+            // Recover any stale leases before attempting to open a new one
+            let _ = lease::recover_stale();
+
+            match lease::open_lease(
+                &agent_id, &room_id, max_session_cost, credits_per_min,
+                3600, // 1-hour max session
+                &[("exec", 1), ("file_read", 0), ("file_write", 1)],
+            ) {
+                Err(lease::LeaseError::DebtCeiling { current, max }) => {
+                    eprintln!("  Debt ceiling: {current}/{max} credits owed. Submit receipts to resume.");
                     process::exit(1);
                 }
-                // Check for existing open lease
-                let session_file = store::agora_dir().join("sandbox_session.json");
-                if session_file.exists() {
-                    eprintln!("  You already have an active sandbox. Destroy it first: agora sandbox-destroy <id>");
+                Err(lease::LeaseError::Suspended(id)) => {
+                    eprintln!("  Active lease {id} already open. Destroy it first: agora sandbox-destroy <id>");
                     process::exit(1);
                 }
-            }
-            match sandbox::create(&agent_id) {
-                Ok(session) => {
-                    println!("  Sandbox created!");
-                    println!("  Provider: {}", session.provider);
-                    println!("  Session:  {}", session.id);
-                    println!("  Run: agora sandbox-exec <command>");
-                    // Save session for later use
-                    let session_file = store::agora_dir().join("sandbox_session.json");
-                    let _ = std::fs::write(&session_file, serde_json::to_string_pretty(&session).unwrap());
+                Err(e) => { eprintln!("  Lease error: {e}"); process::exit(1); }
+                Ok(l) => {
+                    match sandbox::create(&agent_id) {
+                        Ok(session) => {
+                            // Persist lease_id alongside session for close_lease on destroy
+                            let session_file = store::agora_dir().join("sandbox_session.json");
+                            let mut v = serde_json::to_value(&session).unwrap();
+                            v["lease_id"] = serde_json::Value::String(l.id.clone());
+                            let _ = std::fs::write(&session_file, serde_json::to_string_pretty(&v).unwrap());
+                            println!("  Sandbox created!");
+                            println!("  Provider: {}", session.provider);
+                            println!("  Session:  {}", session.id);
+                            println!("  Lease:    {}", l.id);
+                            println!("  Budget:   {max_session_cost} credits ({credits_per_min}/min)");
+                            println!("  Run: agora sandbox-exec <command>");
+                        }
+                        Err(e) => {
+                            // Roll back the lease we just opened
+                            let _ = lease::close_lease(&l.id);
+                            eprintln!("  Error: {e}");
+                            process::exit(1);
+                        }
+                    }
                 }
-                Err(e) => { eprintln!("  Error: {e}"); process::exit(1); }
             }
         }
 
         Commands::SandboxExec { command } => {
             let cmd = command.join(" ");
             let session_file = store::agora_dir().join("sandbox_session.json");
-            let session: sandbox::SandboxSession = serde_json::from_str(
+            let v: serde_json::Value = serde_json::from_str(
                 &std::fs::read_to_string(&session_file).unwrap_or_default()
-            ).map_err(|_| "No active sandbox. Run: agora sandbox-create").unwrap();
+            ).unwrap_or_default();
+            let session: sandbox::SandboxSession = serde_json::from_value(v.clone())
+                .map_err(|_| "No active sandbox. Run: agora sandbox-create").unwrap();
+            let lease_id = v["lease_id"].as_str().unwrap_or("").to_string();
+
+            // Gate on lease status and charge for exec call
+            if !lease_id.is_empty() {
+                match lease::charge_tool_call(&lease_id, "exec") {
+                    Err(lease::LeaseError::Suspended(id)) => {
+                        eprintln!("  Lease suspended ({id}): debt ceiling hit. Submit receipts to resume.");
+                        process::exit(1);
+                    }
+                    Err(e) => eprintln!("  Lease charge warning: {e}"),
+                    Ok(debt) => {
+                        if debt > 0 {
+                            let _ = lease::heartbeat(&lease_id);
+                        }
+                    }
+                }
+            }
+
             match sandbox::exec(&session.id, &cmd, &session.provider) {
                 Ok(output) => println!("{output}"),
                 Err(e) => { eprintln!("  Error: {e}"); process::exit(1); }
@@ -2095,16 +2136,27 @@ fn main() {
 
         Commands::SandboxDestroy { session_id } => {
             let session_file = store::agora_dir().join("sandbox_session.json");
-            let session: sandbox::SandboxSession = serde_json::from_str(
+            let v: serde_json::Value = serde_json::from_str(
                 &std::fs::read_to_string(&session_file).unwrap_or_default()
-            ).unwrap_or_else(|_| sandbox::SandboxSession {
-                id: session_id.clone(), provider: "e2b".to_string(),
-                agent_id: String::new(), created_at: 0, status: "unknown".to_string(),
-            });
+            ).unwrap_or_default();
+            let session: sandbox::SandboxSession = serde_json::from_value(v.clone())
+                .unwrap_or_else(|_| sandbox::SandboxSession {
+                    id: session_id.clone(), provider: "e2b".to_string(),
+                    agent_id: String::new(), created_at: 0, status: "unknown".to_string(),
+                });
+            let lease_id = v["lease_id"].as_str().unwrap_or("").to_string();
+
             match sandbox::destroy(&session.id, &session.provider) {
                 Ok(()) => {
                     let _ = std::fs::remove_file(&session_file);
-                    println!("  Sandbox destroyed.");
+                    if !lease_id.is_empty() {
+                        match lease::close_lease(&lease_id) {
+                            Ok(cost) => println!("  Sandbox destroyed. Actual cost: {cost} credits."),
+                            Err(e) => println!("  Sandbox destroyed (lease close warning: {e})."),
+                        }
+                    } else {
+                        println!("  Sandbox destroyed.");
+                    }
                 }
                 Err(e) => { eprintln!("  Error: {e}"); process::exit(1); }
             }
