@@ -930,18 +930,14 @@ fn handle_connection(stream: TcpStream) {
 
         // POST /api/sandbox/create — create a sandbox (proxy to Daytona/E2B)
         ("POST", ["api", "sandbox", "create"]) => {
-            // Auth: per-agent signed token
+            // Auth: per-agent signed token — use verified agent_id, not body field
             let token = form_field(body, "token").unwrap_or_default();
-            if let Err(e) = sandbox::verify_agent_token(&token) {
-                send_json(stream, 401, &format!(r#"{{"error":"{}"}}"#, e));
-                return;
-            }
-            let agent_id = form_field(body, "agent_id").unwrap_or_default();
-            if agent_id.is_empty() {
-                send_json(stream, 400, r#"{"error":"agent_id required"}"#);
-                return;
-            }
-            match sandbox::create(&agent_id) {
+            let (verified_agent_id, _expiry) = match sandbox::verify_agent_token(&token) {
+                Ok(v) => v,
+                Err(e) => { send_json(stream, 401, &format!(r#"{{"error":"{}"}}"#, e)); return; }
+            };
+            // Bug fix: always use the verified agent_id from the token
+            match sandbox::create(&verified_agent_id) {
                 Ok(session) => {
                     let resp = serde_json::json!({
                         "id": session.id,

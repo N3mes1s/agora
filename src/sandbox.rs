@@ -241,7 +241,10 @@ fn destroy_sprites(session_id: &str) -> Result<(), String> {
 /// Token = base64(agent_id:expiry:HMAC(agent_id:expiry, server_secret))
 pub fn generate_agent_token(agent_id: &str, hours: u64) -> String {
     let secret = std::env::var("AGORA_SANDBOX_SECRET")
-        .unwrap_or_else(|_| "agora-sandbox-default-secret".to_string());
+        .unwrap_or_else(|_| {
+            eprintln!("  [warn] AGORA_SANDBOX_SECRET not set — using insecure default");
+            "INSECURE-SET-AGORA_SANDBOX_SECRET".to_string()
+        });
     let expiry = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() + hours * 3600;
     // Use JSON for canonical framing (prevents HMAC concatenation forgery)
@@ -278,7 +281,10 @@ pub fn verify_agent_token(token: &str) -> Result<(String, u64), String> {
 
     // Verify HMAC over canonical JSON
     let secret = std::env::var("AGORA_SANDBOX_SECRET")
-        .unwrap_or_else(|_| "agora-sandbox-default-secret".to_string());
+        .unwrap_or_else(|_| {
+            eprintln!("  [warn] AGORA_SANDBOX_SECRET not set — using insecure default");
+            "INSECURE-SET-AGORA_SANDBOX_SECRET".to_string()
+        });
     let key = ring::hmac::Key::new(ring::hmac::HMAC_SHA256, secret.as_bytes());
     let expected_sig = ring::hmac::sign(&key, payload.as_bytes());
     if hex::encode(expected_sig.as_ref()) != sig_hex {

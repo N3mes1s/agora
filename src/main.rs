@@ -2082,7 +2082,9 @@ fn main() {
             let agent_id = store::get_agent_id();
             // Bounded debt: check credit balance before provisioning
             let max_session_cost: i64 = 50; // max credits per sandbox session
-            if let Some(r) = room.and_then(|l| store::find_room(l)) {
+            // Bug fix: also check active room, not just --room flag
+            let active = room.and_then(|l| store::find_room(l)).or_else(|| store::get_active_room());
+            if let Some(r) = active {
                 let balance = store::credit_balance(&r.room_id, &agent_id);
                 if balance < max_session_cost {
                     eprintln!("  Insufficient credits: have {balance}, need {max_session_cost} for sandbox.");
