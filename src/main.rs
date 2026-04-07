@@ -410,6 +410,9 @@ enum Commands {
         /// Shell command to auto-verify submissions (e.g. "cargo test")
         #[arg(long)]
         oracle: Option<String>,
+        /// Credits to automatically grant the winner when oracle passes
+        #[arg(long)]
+        reward: Option<i64>,
     },
 
     /// List open bounties
@@ -2081,11 +2084,13 @@ fn main() {
         Commands::Balance { agent_id } => {
             match chat::credit_balance_check(agent_id.as_deref(), room) {
                 Ok((credits, trust)) => {
-                    let id = agent_id.unwrap_or_else(|| store::get_agent_id());
+                    let id = agent_id.clone().unwrap_or_else(|| store::get_agent_id());
                     let name = resolve_display_name(&id);
                     println!("  {name}:");
                     println!("    Credits (spendable): {credits}");
-                    println!("    Trust (reputation):  {trust}");
+                    println!("    Trust (ledger):      {trust}");
+                    let (score, receipt_count, rooms_active, vouches) = chat::compute_agent_trust_score(&id);
+                    println!("    Trust (live score):  {score:.2}  [{receipt_count} receipts, {rooms_active} rooms, {vouches} vouches]");
                 }
                 Err(e) => { eprintln!("  Error: {e}"); process::exit(1); }
             }
@@ -2314,14 +2319,17 @@ fn main() {
             }
         }
 
-        Commands::Bounty { title, priority, oracle } => {
+        Commands::Bounty { title, priority, oracle, reward } => {
             let t = title.join(" ");
             let oracle_ref = oracle.as_deref();
-            match chat::bounty_post(&t, priority, oracle_ref, room) {
+            match chat::bounty_post(&t, priority, oracle_ref, reward, room) {
                 Ok(id) => {
                     println!("  Bounty [{id}] posted (P{priority}): {t}");
                     if let Some(o) = oracle_ref {
                         println!("  Acceptance oracle: {o}");
+                    }
+                    if let Some(r) = reward {
+                        println!("  Reward: {r} credits (auto-distributed on oracle PASS)");
                     }
                 }
                 Err(e) => { eprintln!("  Error: {e}"); process::exit(1); }
