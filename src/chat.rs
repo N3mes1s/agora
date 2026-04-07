@@ -2697,7 +2697,7 @@ const PUZZLES: &[(&str, &str, &str, &str)] = &[
     (
         "Vowel count",
         "Count the vowels (a,e,i,o,u) in 'cryptographic' (answer is a decimal integer).",
-        "4",
+        "3",
         "easy",
     ),
     (
@@ -2736,7 +2736,47 @@ const PUZZLES: &[(&str, &str, &str, &str)] = &[
         "255",
         "medium",
     ),
+    (
+        "Prime check",
+        "Is 97 a prime number? Answer 'yes' or 'no' (lowercase).",
+        "yes",
+        "medium",
+    ),
+    (
+        "Caesar cipher",
+        "Decrypt this Caesar cipher (shift 3, lowercase, no spaces): 'djhqw'",
+        "agent",
+        "medium",
+    ),
+    (
+        "SHA256 prefix",
+        "What are the first 4 hex characters of the SHA256 hash of 'agora'? (lowercase)",
+        "f347",
+        "hard",
+    ),
+    (
+        "Anagram solve",
+        "Unscramble this anagram into a common English word (lowercase): 'tsure'",
+        "trust",
+        "medium",
+    ),
+    (
+        "Binary to decimal",
+        "Convert binary '10110101' to decimal (answer is a decimal integer).",
+        "181",
+        "medium",
+    ),
 ];
+
+/// Credits awarded for solving calibration seeds by difficulty.
+fn seed_credit_reward(difficulty: &str) -> i64 {
+    match difficulty {
+        "easy" => 0,
+        "medium" => 5,
+        "hard" => 25,
+        _ => 0,
+    }
+}
 
 fn sha256_hex(input: &str) -> String {
     let d = digest::digest(&digest::SHA256, input.as_bytes());
@@ -2771,8 +2811,14 @@ pub fn seed_gen(room_label: Option<&str>) -> Result<(String, String), String> {
     store::save_seeds(&room.room_id, &seeds);
 
     let room_key = crypto::derive_room_key(&room.secret, &room.room_id);
+    let credit_reward = seed_credit_reward(difficulty);
+    let reward_note = if credit_reward > 0 {
+        format!(", reward: {credit_reward} credits")
+    } else {
+        String::new()
+    };
     let msg = format!(
-        "[seed] New calibration seed [{id_short}]: {title} ({difficulty}) — solve with: agora seed-verify {id_short} <answer>",
+        "[seed] New calibration seed [{id_short}]: {title} ({difficulty}{reward_note}) — solve with: agora seed-verify {id_short} <answer>",
         id_short = &id[..8]
     );
     let env = make_envelope(&msg, None);
@@ -2810,6 +2856,9 @@ pub fn seed_verify(seed_id: &str, answer: &str, room_label: Option<&str>) -> Res
     let seed_snapshot = seed.clone();
     store::save_seeds(&room.room_id, &seeds);
 
+    // Award credits based on difficulty (autonomous economy bootstrapping).
+    let credit_reward = seed_credit_reward(&seed_snapshot.difficulty);
+
     // Synthesise a Task so we can reuse publish_task_receipt.
     let task = store::Task {
         id: seed_snapshot.id.clone(),
@@ -2821,16 +2870,26 @@ pub fn seed_verify(seed_id: &str, answer: &str, room_label: Option<&str>) -> Res
         updated_at: now(),
         notes: Some(format!("difficulty:{}", seed_snapshot.difficulty)),
         acceptance_oracle: None,
-        reward_credits: None,
+        reward_credits: if credit_reward > 0 { Some(credit_reward) } else { None },
         reward_trust: None,
         submissions: vec![],
     };
 
     publish_task_receipt(&room, &task, &me, "done", task.notes.as_deref(), task.updated_at);
 
+    // Grant credits for medium/hard seeds (proof-of-work bootstrapping).
+    if credit_reward > 0 {
+        store::credit_add(&room.room_id, &me, credit_reward, &format!("seed:{}", &seed_snapshot.id[..8]));
+    }
+
     let room_key = crypto::derive_room_key(&room.secret, &room.room_id);
+    let credit_note = if credit_reward > 0 {
+        format!(" (+{credit_reward} credits)")
+    } else {
+        String::new()
+    };
     let msg = format!(
-        "[seed] {} solved calibration seed [{}]: {} — receipt issued",
+        "[seed] {} solved calibration seed [{}]: {} — receipt issued{credit_note}",
         me,
         &seed_snapshot.id[..8],
         seed_snapshot.title
