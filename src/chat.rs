@@ -1841,6 +1841,193 @@ pub fn bounty_list(room_label: Option<&str>) -> Result<Vec<serde_json::Value>, S
 
 // ── Payments ────────────────────────────────────────────────────
 
+const SOLANA_RPC_URL: &str = "https://api.mainnet-beta.solana.com";
+const SOLANA_USDC_MINT: &str = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
+const SOLANA_TOKEN_PROGRAM: &str = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
+const SOLANA_TREASURY_WALLET: &str = "Kh2hZ9Kga9i8WLVxM78VnS51hf7AgGug83rtkSk8vNH";
+const SOLANA_USDC_BASE_UNITS_PER_CENT: i64 = 10_000;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct VerifiedSolanaDeposit {
+    signature: String,
+    amount_raw: i64,
+    amount_cents: i64,
+    credits: i64,
+}
+
+fn parse_token_amount(raw: &serde_json::Value) -> Option<i64> {
+    raw.as_str()?.parse::<i64>().ok()
+}
+
+fn sum_owner_token_amount(
+    balances: &serde_json::Value,
+    owner: &str,
+    mint: &str,
+    program_id: &str,
+) -> i64 {
+    balances
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|entry| {
+            entry["owner"].as_str() == Some(owner)
+                && entry["mint"].as_str() == Some(mint)
+                && entry["programId"].as_str() == Some(program_id)
+        })
+        .filter_map(|entry| parse_token_amount(&entry["uiTokenAmount"]["amount"]))
+        .sum()
+}
+
+fn verified_solana_deposit_from_tx(
+    signature: &str,
+    tx: &serde_json::Value,
+    wallet: &str,
+) -> Result<VerifiedSolanaDeposit, String> {
+    if tx.is_null() {
+        return Err(format!("Transaction {signature} not found or not finalized yet."));
+    }
+    if !tx["meta"]["err"].is_null() {
+        return Err(format!("Transaction {signature} failed on-chain."));
+    }
+
+    let pre_raw = sum_owner_token_amount(
+        &tx["meta"]["preTokenBalances"],
+        wallet,
+        SOLANA_USDC_MINT,
+        SOLANA_TOKEN_PROGRAM,
+    );
+    let post_raw = sum_owner_token_amount(
+        &tx["meta"]["postTokenBalances"],
+        wallet,
+        SOLANA_USDC_MINT,
+        SOLANA_TOKEN_PROGRAM,
+    );
+    let delta_raw = post_raw - pre_raw;
+    if delta_raw <= 0 {
+        return Err(format!(
+            "Transaction {signature} does not deliver USDC to {wallet}."
+        ));
+    }
+    if delta_raw < SOLANA_USDC_BASE_UNITS_PER_CENT {
+        return Err(format!(
+            "Transaction {signature} delivered less than $0.01 USDC."
+        ));
+    }
+    if delta_raw % SOLANA_USDC_BASE_UNITS_PER_CENT != 0 {
+        return Err(format!(
+            "Transaction {signature} amount is not a whole US-cent amount of USDC."
+        ));
+    }
+
+    let amount_cents = delta_raw / SOLANA_USDC_BASE_UNITS_PER_CENT;
+    Ok(VerifiedSolanaDeposit {
+        signature: signature.to_string(),
+        amount_raw: delta_raw,
+        amount_cents,
+        credits: amount_cents * store::CREDITS_PER_USD_CENT,
+    })
+}
+
+fn verify_solana_usdc_transfer(signature: &str) -> Result<VerifiedSolanaDeposit, String> {
+    let rpc_url = std::env::var("SOLANA_RPC_URL").unwrap_or_else(|_| SOLANA_RPC_URL.to_string());
+    let body = json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "getTransaction",
+        "params": [
+            signature,
+            {
+                "commitment": "finalized",
+                "encoding": "json",
+                "maxSupportedTransactionVersion": 0
+            }
+        ]
+    });
+
+    let client = reqwest::blocking::Client::new();
+    let response: serde_json::Value = client
+        .post(rpc_url)
+        .json(&body)
+        .send()
+        .map_err(|e| format!("Solana RPC error: {e}"))?
+        .json()
+        .map_err(|e| format!("Solana RPC parse error: {e}"))?;
+
+    if let Some(err) = response["error"]["message"].as_str() {
+        return Err(format!("Solana RPC rejected {signature}: {err}"));
+    }
+
+    verified_solana_deposit_from_tx(signature, &response["result"], SOLANA_TREASURY_WALLET)
+}
+
+fn payment_complete_solana_deposit(
+    verified: &VerifiedSolanaDeposit,
+    room_label: Option<&str>,
+) -> Result<String, String> {
+    if store::find_payment_by_reference(&verified.signature).is_some() {
+        return Err(format!(
+            "Transaction {} was already claimed.",
+            verified.signature
+        ));
+    }
+
+    let room = resolve_room(room_label)?;
+    let me = store::get_agent_id();
+    let record = store::PaymentRecord {
+        id: msg_id(),
+        agent_id: me.clone(),
+        kind: store::PaymentKind::Deposit,
+        status: store::PaymentStatus::Completed,
+        provider: store::PaymentProvider::Solana,
+        amount_cents: verified.amount_cents,
+        credits: verified.credits,
+        fee_credits: 0,
+        stripe_id: Some(verified.signature.clone()),
+        checkout_url: None,
+        created_at: now(),
+        updated_at: now(),
+    };
+
+    let mut payments = store::load_payments();
+    payments.push(record);
+    store::save_payments(&payments);
+
+    store::credit_add(
+        &room.room_id,
+        &me,
+        verified.credits,
+        &format!("solana usdc deposit {}", verified.signature),
+    );
+
+    let room_key = crypto::derive_room_key(&room.secret, &room.room_id);
+    let env = json!({
+        "v": VERSION, "id": msg_id(), "from": me, "ts": now(),
+        "type": "payment",
+        "action": "solana_verified",
+        "tx": verified.signature,
+        "credits": verified.credits,
+        "amount_cents": verified.amount_cents,
+        "text": format!(
+            "[payment] {} verified Solana USDC deposit {}: {} credits (${:.2})",
+            store::get_agent_id(),
+            &verified.signature[..8.min(verified.signature.len())],
+            verified.credits,
+            verified.amount_cents as f64 / 100.0
+        ),
+        "hidden": true,
+    });
+    let encrypted = encrypt_envelope(&env, &room_key, &room.room_id);
+    transport::publish(&room.room_id, &encrypted);
+    store::save_message(&room.room_id, &env);
+
+    Ok(format!(
+        "Verified Solana USDC deposit {} and minted {} credits (${:.2}).",
+        &verified.signature[..8.min(verified.signature.len())],
+        verified.credits,
+        verified.amount_cents as f64 / 100.0
+    ))
+}
+
 /// Create a Stripe Checkout session and return the checkout URL.
 /// On success the pending PaymentRecord is persisted; credits are only minted
 /// when the Stripe webhook confirms `checkout.session.completed`.
@@ -1935,6 +2122,7 @@ pub fn payment_fund(
         agent_id: me.clone(),
         kind: store::PaymentKind::Deposit,
         status: store::PaymentStatus::Pending,
+        provider: store::PaymentProvider::Stripe,
         amount_cents,
         credits,
         fee_credits,
@@ -1964,6 +2152,11 @@ pub fn payment_fund(
     store::save_message(&room.room_id, &env);
 
     Ok(checkout_url)
+}
+
+pub fn payment_fund_via_tx(tx_sig: &str, room_label: Option<&str>) -> Result<String, String> {
+    let verified = verify_solana_usdc_transfer(tx_sig)?;
+    payment_complete_solana_deposit(&verified, room_label)
 }
 
 /// Minimal percent-encoding for Stripe form params.
@@ -2050,6 +2243,7 @@ pub fn payment_withdraw(
         agent_id: me.clone(),
         kind: store::PaymentKind::Withdrawal,
         status: store::PaymentStatus::Pending,
+        provider: store::PaymentProvider::Manual,
         amount_cents,
         credits,
         fee_credits,
@@ -3705,11 +3899,14 @@ mod tests {
         encrypt_envelope,
         infer_soma_subject_path, ingest_auxiliary_event, list_role_leases, list_work_receipts,
         make_envelope, make_invite_redemption, pin, pins, resolve_room, role_claim,
-        role_heartbeat, role_release, seed_plaza_rate_limit_state, send_watch_heartbeat,
+        role_heartbeat, role_release, payment_complete_solana_deposit,
+        seed_plaza_rate_limit_state, send_watch_heartbeat,
         should_display_message, signing_message_bytes, soma_churn_decay, soma_correct,
         stale_claim_weight, task_add, task_checkpoint, task_done, unpin,
-        SignedWirePayload, SIGNED_WIRE_VERSION, BASE64, DISCOVERY_POSITIVE_HALF_LIFE_SECS,
-        PLAZA_RATE_LIMIT_WINDOW_SECS,
+        verified_solana_deposit_from_tx, SignedWirePayload, VerifiedSolanaDeposit,
+        SIGNED_WIRE_VERSION, BASE64, DISCOVERY_POSITIVE_HALF_LIFE_SECS,
+        PLAZA_RATE_LIMIT_WINDOW_SECS, SOLANA_TOKEN_PROGRAM, SOLANA_TREASURY_WALLET,
+        SOLANA_USDC_MINT,
     };
     use crate::crypto;
     use crate::store::{self, Role};
@@ -4009,6 +4206,73 @@ mod tests {
         assert_eq!(receipts[0].receipt.status, "checkpoint");
         assert_eq!(receipts[0].receipt.witness_ids.len(), 2);
         assert_eq!(receipts[0].receipt.auth, "verified");
+    }
+
+    #[test]
+    fn verified_solana_deposit_extracts_wallet_usdc_delta() {
+        let tx = json!({
+            "meta": {
+                "err": null,
+                "preTokenBalances": [
+                    {
+                        "owner": SOLANA_TREASURY_WALLET,
+                        "mint": SOLANA_USDC_MINT,
+                        "programId": SOLANA_TOKEN_PROGRAM,
+                        "uiTokenAmount": { "amount": "1500000" }
+                    },
+                    {
+                        "owner": "other-owner",
+                        "mint": SOLANA_USDC_MINT,
+                        "programId": SOLANA_TOKEN_PROGRAM,
+                        "uiTokenAmount": { "amount": "900000" }
+                    }
+                ],
+                "postTokenBalances": [
+                    {
+                        "owner": SOLANA_TREASURY_WALLET,
+                        "mint": SOLANA_USDC_MINT,
+                        "programId": SOLANA_TOKEN_PROGRAM,
+                        "uiTokenAmount": { "amount": "2500000" }
+                    },
+                    {
+                        "owner": "other-owner",
+                        "mint": SOLANA_USDC_MINT,
+                        "programId": SOLANA_TOKEN_PROGRAM,
+                        "uiTokenAmount": { "amount": "100000" }
+                    }
+                ]
+            }
+        });
+
+        let verified =
+            verified_solana_deposit_from_tx("sig123", &tx, SOLANA_TREASURY_WALLET).unwrap();
+        assert_eq!(verified.amount_raw, 1_000_000);
+        assert_eq!(verified.amount_cents, 100);
+        assert_eq!(verified.credits, 1000);
+    }
+
+    #[test]
+    fn payment_complete_solana_deposit_mints_once() {
+        let _guard = store::test_env_lock().lock().unwrap();
+        let (_home, room) = setup_plaza_room("solana-funder", Role::Admin);
+        let verified = VerifiedSolanaDeposit {
+            signature: "solsig123".to_string(),
+            amount_raw: 2_500_000,
+            amount_cents: 250,
+            credits: 2500,
+        };
+
+        let msg = payment_complete_solana_deposit(&verified, Some("plaza")).unwrap();
+        assert!(msg.contains("minted 2500 credits"));
+        assert_eq!(store::credit_balance(&room.room_id, "solana-funder"), 2500);
+
+        let payments = store::load_payments();
+        assert_eq!(payments.len(), 1);
+        assert_eq!(payments[0].stripe_id.as_deref(), Some("solsig123"));
+        assert!(matches!(payments[0].provider, store::PaymentProvider::Solana));
+
+        let dup = payment_complete_solana_deposit(&verified, Some("plaza")).unwrap_err();
+        assert!(dup.contains("already claimed"));
     }
 
     #[test]

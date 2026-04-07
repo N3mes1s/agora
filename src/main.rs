@@ -415,12 +415,15 @@ enum Commands {
     /// List open bounties
     Bounties,
 
-    /// Purchase credits with real money via Stripe Checkout.
-    /// Requires STRIPE_SECRET_KEY env var. Prints a checkout URL to complete payment.
-    /// Exchange rate: 10 credits = $0.01 (1000 credits = $1.00). Minimum: 500 credits ($0.50).
+    /// Purchase credits via hosted checkout or verify a Solana USDC deposit.
+    /// `agora fund <credits>` creates a Stripe Checkout session.
+    /// `agora fund --tx <signature>` verifies a finalized USDC transfer on Solana.
     Fund {
-        /// Number of credits to purchase
-        credits: i64,
+        /// Number of credits to purchase through Stripe Checkout
+        credits: Option<i64>,
+        /// Solana transaction signature for a USDC transfer to the Agora treasury wallet
+        #[arg(long)]
+        tx: Option<String>,
     },
 
     /// Request a credit withdrawal (credits → USD). Requires STRIPE_SECRET_KEY.
@@ -2359,18 +2362,32 @@ fn main() {
             }
         }
 
-        Commands::Fund { credits } => {
-            match chat::payment_fund(credits, room) {
-                Ok(checkout_url) => {
-                    let amount_usd = (credits / store::CREDITS_PER_USD_CENT) as f64 / 100.0;
-                    println!("  Stripe Checkout created for {credits} credits (${:.2}).", amount_usd);
-                    println!("  Complete payment at:");
-                    println!("  {checkout_url}");
-                    println!();
-                    println!("  Credits will be minted after payment confirmation.");
-                    println!("  10% platform fee applies — you receive {} credits net.", credits - credits / 10);
+        Commands::Fund { credits, tx } => {
+            match (credits, tx.as_deref()) {
+                (Some(_), Some(_)) => {
+                    eprintln!("  Error: choose either Stripe checkout credits or --tx, not both.");
+                    process::exit(1);
                 }
-                Err(e) => { eprintln!("  Error: {e}"); process::exit(1); }
+                (None, None) => {
+                    eprintln!("  Usage: agora fund <credits> OR agora fund --tx <solana-signature>");
+                    process::exit(1);
+                }
+                (_, Some(signature)) => match chat::payment_fund_via_tx(signature, room) {
+                    Ok(msg) => println!("  {msg}"),
+                    Err(e) => { eprintln!("  Error: {e}"); process::exit(1); }
+                },
+                (Some(credits), None) => match chat::payment_fund(credits, room) {
+                    Ok(checkout_url) => {
+                        let amount_usd = (credits / store::CREDITS_PER_USD_CENT) as f64 / 100.0;
+                        println!("  Stripe Checkout created for {credits} credits (${:.2}).", amount_usd);
+                        println!("  Complete payment at:");
+                        println!("  {checkout_url}");
+                        println!();
+                        println!("  Credits will be minted after payment confirmation.");
+                        println!("  10% platform fee applies — you receive {} credits net.", credits - credits / 10);
+                    }
+                    Err(e) => { eprintln!("  Error: {e}"); process::exit(1); }
+                },
             }
         }
 
