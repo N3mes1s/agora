@@ -1,0 +1,14 @@
+[package]
+name = "csv2json"
+version = "0.1.0"
+edition = "2021"
+description = "Convert CSV to JSON with automatic column type detection"
+
+[[bin]]
+name = "csv2json"
+path = "src/main.rs"
+
+[dependencies]
+csv = "1.3"
+serde_json = "1.0"
+clap = { version = "4", features = ["derive"] }
