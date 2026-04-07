@@ -91,8 +91,11 @@ fn generate_identity() -> (String, Vec<u8>) {
     if let Ok(seed) = std::env::var("AGORA_IDENTITY_SEED") {
         let hk = ring::hmac::Key::new(ring::hmac::HMAC_SHA256, b"agora-identity-v1");
         let derived = ring::hmac::sign(&hk, seed.as_bytes());
-        let seed_bytes: [u8; 32] = derived.as_ref()[..32].try_into().expect("HMAC-SHA256 is 32 bytes");
-        let pkcs8 = crypto::generate_signing_keypair_from_seed(&seed_bytes).expect("keygen from seed");
+        let seed_bytes: [u8; 32] = derived.as_ref()[..32]
+            .try_into()
+            .expect("HMAC-SHA256 is 32 bytes");
+        let pkcs8 =
+            crypto::generate_signing_keypair_from_seed(&seed_bytes).expect("keygen from seed");
         let pubkey = crypto::signing_public_key(&pkcs8).unwrap();
         let id = derive_key_id(&pubkey);
         return (id, pkcs8);
@@ -392,10 +395,7 @@ pub fn remove_room(label_or_id: &str) -> Option<RoomEntry> {
 // ── Message Persistence ─────────────────────────────────────────
 
 pub fn save_message(room_id: &str, envelope: &serde_json::Value) {
-    let dir = agora_dir()
-        .join("rooms")
-        .join(room_id)
-        .join("messages");
+    let dir = agora_dir().join("rooms").join(room_id).join("messages");
     ensure_dir(&dir);
     let ts = envelope["ts"].as_u64().unwrap_or_else(now);
     let mid = envelope["id"].as_str().unwrap_or("x");
@@ -407,7 +407,9 @@ pub fn save_message(room_id: &str, envelope: &serde_json::Value) {
 
 pub fn delete_message(room_id: &str, msg_id: &str) {
     let dir = agora_dir().join("rooms").join(room_id).join("messages");
-    if !dir.exists() { return; }
+    if !dir.exists() {
+        return;
+    }
     if let Ok(entries) = fs::read_dir(&dir) {
         for entry in entries.flatten() {
             let name = entry.file_name().to_string_lossy().to_string();
@@ -420,10 +422,7 @@ pub fn delete_message(room_id: &str, msg_id: &str) {
 }
 
 pub fn load_messages(room_id: &str, since_secs: u64) -> Vec<serde_json::Value> {
-    let dir = agora_dir()
-        .join("rooms")
-        .join(room_id)
-        .join("messages");
+    let dir = agora_dir().join("rooms").join(room_id).join("messages");
     if !dir.exists() {
         return vec![];
     }
@@ -502,7 +501,10 @@ pub struct AgentProfile {
 }
 
 pub fn load_profiles(room_id: &str) -> Vec<AgentProfile> {
-    let path = agora_dir().join("rooms").join(room_id).join("profiles.json");
+    let path = agora_dir()
+        .join("rooms")
+        .join(room_id)
+        .join("profiles.json");
     if let Ok(data) = fs::read_to_string(&path) {
         serde_json::from_str(&data).unwrap_or_default()
     } else {
@@ -528,7 +530,9 @@ pub fn upsert_profile(room_id: &str, profile: &AgentProfile) {
 }
 
 pub fn get_profile(room_id: &str, agent_id: &str) -> Option<AgentProfile> {
-    load_profiles(room_id).into_iter().find(|p| p.agent_id == agent_id)
+    load_profiles(room_id)
+        .into_iter()
+        .find(|p| p.agent_id == agent_id)
 }
 
 // ── Agent Capability Cards ─────────────────────────────────────
@@ -615,7 +619,10 @@ pub fn unmute_agent(room_id: &str, agent_id: &str) {
 // receipts.json: { "msg_id": ["agent1", "agent2"], ... }
 
 pub fn load_receipts(room_id: &str) -> std::collections::HashMap<String, Vec<String>> {
-    let path = agora_dir().join("rooms").join(room_id).join("receipts.json");
+    let path = agora_dir()
+        .join("rooms")
+        .join(room_id)
+        .join("receipts.json");
     if let Ok(data) = fs::read_to_string(&path) {
         serde_json::from_str(&data).unwrap_or_default()
     } else {
@@ -645,7 +652,10 @@ pub fn record_receipts(room_id: &str, msg_ids: &[String], reader: &str) {
 // reactions.json: { "msg_id": [["agent", "emoji"], ...] }
 
 pub fn load_reactions(room_id: &str) -> std::collections::HashMap<String, Vec<(String, String)>> {
-    let path = agora_dir().join("rooms").join(room_id).join("reactions.json");
+    let path = agora_dir()
+        .join("rooms")
+        .join(room_id)
+        .join("reactions.json");
     if let Ok(data) = fs::read_to_string(&path) {
         serde_json::from_str(&data).unwrap_or_default()
     } else {
@@ -653,7 +663,10 @@ pub fn load_reactions(room_id: &str) -> std::collections::HashMap<String, Vec<(S
     }
 }
 
-pub fn save_reactions(room_id: &str, reactions: &std::collections::HashMap<String, Vec<(String, String)>>) {
+pub fn save_reactions(
+    room_id: &str,
+    reactions: &std::collections::HashMap<String, Vec<(String, String)>>,
+) {
     let dir = agora_dir().join("rooms").join(room_id);
     ensure_dir(&dir);
     let data = serde_json::to_string(reactions).unwrap();
@@ -712,33 +725,47 @@ pub struct CreditEntry {
 
 pub fn load_ledger(room_id: &str) -> Vec<CreditEntry> {
     let path = agora_dir().join("rooms").join(room_id).join("ledger.json");
-    if let Ok(data) = fs::read_to_string(&path) { serde_json::from_str(&data).unwrap_or_default() }
-    else { Vec::new() }
+    if let Ok(data) = fs::read_to_string(&path) {
+        serde_json::from_str(&data).unwrap_or_default()
+    } else {
+        Vec::new()
+    }
 }
 
 pub fn save_ledger(room_id: &str, ledger: &[CreditEntry]) {
     let dir = agora_dir().join("rooms").join(room_id);
     ensure_dir(&dir);
-    let _ = fs::write(dir.join("ledger.json"), serde_json::to_string_pretty(ledger).unwrap());
+    let _ = fs::write(
+        dir.join("ledger.json"),
+        serde_json::to_string_pretty(ledger).unwrap(),
+    );
 }
 
 pub fn credit_balance(room_id: &str, agent_id: &str) -> i64 {
-    load_ledger(room_id).iter()
+    load_ledger(room_id)
+        .iter()
         .filter(|e| e.agent_id == agent_id && (e.ledger.is_empty() || e.ledger == "credit"))
-        .map(|e| e.amount).sum()
+        .map(|e| e.amount)
+        .sum()
 }
 
 pub fn trust_balance(room_id: &str, agent_id: &str) -> i64 {
-    load_ledger(room_id).iter()
+    load_ledger(room_id)
+        .iter()
         .filter(|e| e.agent_id == agent_id && e.ledger == "trust")
-        .map(|e| e.amount).sum()
+        .map(|e| e.amount)
+        .sum()
 }
 
 pub fn credit_add(room_id: &str, agent_id: &str, amount: i64, reason: &str) {
     let mut ledger = load_ledger(room_id);
     ledger.push(CreditEntry {
-        agent_id: agent_id.to_string(), amount, reason: reason.to_string(),
-        ts: now(), ledger: "credit".to_string(), verified_by: "admin".to_string(),
+        agent_id: agent_id.to_string(),
+        amount,
+        reason: reason.to_string(),
+        ts: now(),
+        ledger: "credit".to_string(),
+        verified_by: "admin".to_string(),
     });
     save_ledger(room_id, &ledger);
 }
@@ -746,8 +773,12 @@ pub fn credit_add(room_id: &str, agent_id: &str, amount: i64, reason: &str) {
 pub fn trust_add(room_id: &str, agent_id: &str, amount: i64, reason: &str, verified_by: &str) {
     let mut ledger = load_ledger(room_id);
     ledger.push(CreditEntry {
-        agent_id: agent_id.to_string(), amount, reason: reason.to_string(),
-        ts: now(), ledger: "trust".to_string(), verified_by: verified_by.to_string(),
+        agent_id: agent_id.to_string(),
+        amount,
+        reason: reason.to_string(),
+        ts: now(),
+        ledger: "trust".to_string(),
+        verified_by: verified_by.to_string(),
     });
     save_ledger(room_id, &ledger);
 }
@@ -767,14 +798,20 @@ pub struct Bet {
 
 pub fn load_bets(room_id: &str) -> Vec<Bet> {
     let path = agora_dir().join("rooms").join(room_id).join("bets.json");
-    if let Ok(data) = fs::read_to_string(&path) { serde_json::from_str(&data).unwrap_or_default() }
-    else { Vec::new() }
+    if let Ok(data) = fs::read_to_string(&path) {
+        serde_json::from_str(&data).unwrap_or_default()
+    } else {
+        Vec::new()
+    }
 }
 
 pub fn save_bets(room_id: &str, bets: &[Bet]) {
     let dir = agora_dir().join("rooms").join(room_id);
     ensure_dir(&dir);
-    let _ = fs::write(dir.join("bets.json"), serde_json::to_string_pretty(bets).unwrap());
+    let _ = fs::write(
+        dir.join("bets.json"),
+        serde_json::to_string_pretty(bets).unwrap(),
+    );
 }
 
 // ── Capability Cards ───────────────────────────────────────────
@@ -797,7 +834,9 @@ pub fn save_card(card: &CapabilityCard) {
 
 pub fn load_card() -> Option<CapabilityCard> {
     let path = agora_dir().join("card.json");
-    fs::read_to_string(&path).ok().and_then(|d| serde_json::from_str(&d).ok())
+    fs::read_to_string(&path)
+        .ok()
+        .and_then(|d| serde_json::from_str(&d).ok())
 }
 
 pub fn save_peer_card(room_id: &str, card: &CapabilityCard) {
@@ -809,7 +848,9 @@ pub fn save_peer_card(room_id: &str, card: &CapabilityCard) {
 
 pub fn load_peer_cards(room_id: &str) -> Vec<CapabilityCard> {
     let dir = agora_dir().join("rooms").join(room_id).join("cards");
-    if !dir.exists() { return Vec::new(); }
+    if !dir.exists() {
+        return Vec::new();
+    }
     let mut cards = Vec::new();
     if let Ok(entries) = fs::read_dir(&dir) {
         for entry in entries.flatten() {
@@ -930,11 +971,16 @@ pub fn load_payments() -> Vec<PaymentRecord> {
 pub fn save_payments(payments: &[PaymentRecord]) {
     let dir = agora_dir();
     ensure_dir(&dir);
-    let _ = fs::write(dir.join("payments.json"), serde_json::to_string_pretty(payments).unwrap());
+    let _ = fs::write(
+        dir.join("payments.json"),
+        serde_json::to_string_pretty(payments).unwrap(),
+    );
 }
 
 pub fn find_payment_by_stripe_id(stripe_id: &str) -> Option<PaymentRecord> {
-    load_payments().into_iter().find(|p| p.stripe_id.as_deref() == Some(stripe_id))
+    load_payments()
+        .into_iter()
+        .find(|p| p.stripe_id.as_deref() == Some(stripe_id))
 }
 
 // ── Calibration Seeds ──────────────────────────────────────────
@@ -956,7 +1002,10 @@ pub struct CalibrationSeed {
 }
 
 pub fn load_seeds(room_id: &str) -> Vec<CalibrationSeed> {
-    let path = agora_dir().join("rooms").join(room_id).join("calibration_seeds.json");
+    let path = agora_dir()
+        .join("rooms")
+        .join(room_id)
+        .join("calibration_seeds.json");
     if let Ok(data) = fs::read_to_string(&path) {
         serde_json::from_str(&data).unwrap_or_default()
     } else {
@@ -1000,7 +1049,10 @@ fn default_receipt_status() -> String {
 }
 
 pub fn load_work_receipts(room_id: &str) -> Vec<WorkReceipt> {
-    let path = agora_dir().join("rooms").join(room_id).join("work_receipts.json");
+    let path = agora_dir()
+        .join("rooms")
+        .join(room_id)
+        .join("work_receipts.json");
     if let Ok(data) = fs::read_to_string(&path) {
         serde_json::from_str(&data).unwrap_or_default()
     } else {
@@ -1055,7 +1107,10 @@ pub struct SandboxLease {
 }
 
 pub fn load_leases(room_id: &str) -> Vec<SandboxLease> {
-    let path = agora_dir().join("rooms").join(room_id).join("sandbox_leases.json");
+    let path = agora_dir()
+        .join("rooms")
+        .join(room_id)
+        .join("sandbox_leases.json");
     if let Ok(data) = fs::read_to_string(&path) {
         serde_json::from_str(&data).unwrap_or_default()
     } else {
@@ -1077,7 +1132,10 @@ pub fn open_lease(room_id: &str, lease: SandboxLease) -> Result<(), String> {
         .iter()
         .any(|l| l.agent_id == lease.agent_id && l.status == LeaseStatus::Active)
     {
-        return Err(format!("Agent {} already has an active lease", lease.agent_id));
+        return Err(format!(
+            "Agent {} already has an active lease",
+            lease.agent_id
+        ));
     }
     leases.push(lease);
     save_leases(room_id, &leases);
@@ -1132,7 +1190,10 @@ pub struct RoleLease {
 }
 
 pub fn load_role_leases(room_id: &str) -> Vec<RoleLease> {
-    let path = agora_dir().join("rooms").join(room_id).join("role_leases.json");
+    let path = agora_dir()
+        .join("rooms")
+        .join(room_id)
+        .join("role_leases.json");
     if let Ok(data) = fs::read_to_string(&path) {
         serde_json::from_str(&data).unwrap_or_default()
     } else {
@@ -1218,7 +1279,10 @@ pub struct Webhook {
 }
 
 pub fn load_webhooks(room_id: &str) -> Vec<Webhook> {
-    let path = agora_dir().join("rooms").join(room_id).join("webhooks.json");
+    let path = agora_dir()
+        .join("rooms")
+        .join(room_id)
+        .join("webhooks.json");
     if let Ok(data) = fs::read_to_string(&path) {
         serde_json::from_str(&data).unwrap_or_default()
     } else {
@@ -1251,7 +1315,9 @@ pub fn remove_webhook(room_id: &str, webhook_id: &str) -> bool {
     let mut hooks = load_webhooks(room_id);
     let before = hooks.len();
     hooks.retain(|h| h.id != webhook_id);
-    if hooks.len() == before { return false; }
+    if hooks.len() == before {
+        return false;
+    }
     save_webhooks(room_id, &hooks);
     true
 }
@@ -1259,7 +1325,10 @@ pub fn remove_webhook(room_id: &str, webhook_id: &str) -> bool {
 // ── Scheduled Messages ─────────────────────────────────────────
 
 pub fn load_scheduled(room_id: &str) -> Vec<serde_json::Value> {
-    let path = agora_dir().join("rooms").join(room_id).join("scheduled.json");
+    let path = agora_dir()
+        .join("rooms")
+        .join(room_id)
+        .join("scheduled.json");
     if let Ok(data) = fs::read_to_string(&path) {
         serde_json::from_str(&data).unwrap_or_default()
     } else {
@@ -1344,7 +1413,9 @@ mod tests {
         fs::write(agora.join("rooms.json"), "{not-json").unwrap();
 
         let old_home = env::var("HOME").ok();
-        unsafe { env::set_var("HOME", &home); }
+        unsafe {
+            env::set_var("HOME", &home);
+        }
 
         update_last_seen("missing-room", "agent-1");
 
@@ -1352,9 +1423,13 @@ mod tests {
         assert_eq!(persisted, "{not-json");
 
         if let Some(old) = old_home {
-            unsafe { env::set_var("HOME", old); }
+            unsafe {
+                env::set_var("HOME", old);
+            }
         } else {
-            unsafe { env::remove_var("HOME"); }
+            unsafe {
+                env::remove_var("HOME");
+            }
         }
         let _ = fs::remove_dir_all(&home);
     }
@@ -1368,7 +1443,9 @@ mod tests {
         fs::create_dir_all(&agora).unwrap();
 
         let old_home = env::var("HOME").ok();
-        unsafe { env::set_var("HOME", &home); }
+        unsafe {
+            env::set_var("HOME", &home);
+        }
 
         let room = RoomEntry {
             room_id: "room-1".to_string(),
@@ -1386,9 +1463,13 @@ mod tests {
         assert_eq!(parsed[0].label, "plaza");
 
         if let Some(old) = old_home {
-            unsafe { env::set_var("HOME", old); }
+            unsafe {
+                env::set_var("HOME", old);
+            }
         } else {
-            unsafe { env::remove_var("HOME"); }
+            unsafe {
+                env::remove_var("HOME");
+            }
         }
         let _ = fs::remove_dir_all(&home);
     }
@@ -1402,7 +1483,9 @@ mod tests {
         fs::create_dir_all(&agora).unwrap();
 
         let old_home = env::var("HOME").ok();
-        unsafe { env::set_var("HOME", &home); }
+        unsafe {
+            env::set_var("HOME", &home);
+        }
 
         let record = PaymentRecord {
             id: "pay-test-001".to_string(),
@@ -1436,9 +1519,13 @@ mod tests {
         assert!(not_found.is_none());
 
         if let Some(old) = old_home {
-            unsafe { env::set_var("HOME", old); }
+            unsafe {
+                env::set_var("HOME", old);
+            }
         } else {
-            unsafe { env::remove_var("HOME"); }
+            unsafe {
+                env::remove_var("HOME");
+            }
         }
         let _ = fs::remove_dir_all(&home);
     }
@@ -1461,7 +1548,9 @@ mod tests {
         let _ = fs::remove_dir_all(&home);
         fs::create_dir_all(&agora).unwrap();
         let old_home = env::var("HOME").ok();
-        unsafe { env::set_var("HOME", &home); }
+        unsafe {
+            env::set_var("HOME", &home);
+        }
 
         let lease = SandboxLease {
             id: "sandbox-1".to_string(),
@@ -1481,8 +1570,15 @@ mod tests {
         assert_eq!(leases[0].status, LeaseStatus::Closed);
         assert_eq!(leases[0].actual_cost, Some(42));
 
-        if let Some(old) = old_home { unsafe { env::set_var("HOME", old); } }
-        else { unsafe { env::remove_var("HOME"); } }
+        if let Some(old) = old_home {
+            unsafe {
+                env::set_var("HOME", old);
+            }
+        } else {
+            unsafe {
+                env::remove_var("HOME");
+            }
+        }
         let _ = fs::remove_dir_all(&home);
     }
 
@@ -1494,7 +1590,9 @@ mod tests {
         let _ = fs::remove_dir_all(&home);
         fs::create_dir_all(&agora).unwrap();
         let old_home = env::var("HOME").ok();
-        unsafe { env::set_var("HOME", &home); }
+        unsafe {
+            env::set_var("HOME", &home);
+        }
 
         let lease = SandboxLease {
             id: "sandbox-1".to_string(),
@@ -1507,11 +1605,21 @@ mod tests {
             closed_at: None,
         };
         open_lease("room-1", lease.clone()).unwrap();
-        let second = SandboxLease { id: "sandbox-2".to_string(), ..lease };
+        let second = SandboxLease {
+            id: "sandbox-2".to_string(),
+            ..lease
+        };
         assert!(open_lease("room-1", second).is_err());
 
-        if let Some(old) = old_home { unsafe { env::set_var("HOME", old); } }
-        else { unsafe { env::remove_var("HOME"); } }
+        if let Some(old) = old_home {
+            unsafe {
+                env::set_var("HOME", old);
+            }
+        } else {
+            unsafe {
+                env::remove_var("HOME");
+            }
+        }
         let _ = fs::remove_dir_all(&home);
     }
 
@@ -1523,7 +1631,9 @@ mod tests {
         let _ = fs::remove_dir_all(&home);
         fs::create_dir_all(&agora).unwrap();
         let old_home = env::var("HOME").ok();
-        unsafe { env::set_var("HOME", &home); }
+        unsafe {
+            env::set_var("HOME", &home);
+        }
 
         // A lease that started well beyond MAX_LEASE_SECS ago
         let stale_lease = SandboxLease {
@@ -1563,8 +1673,15 @@ mod tests {
         assert_eq!(stale.status, LeaseStatus::Closed);
         assert_eq!(fresh.status, LeaseStatus::Active);
 
-        if let Some(old) = old_home { unsafe { env::set_var("HOME", old); } }
-        else { unsafe { env::remove_var("HOME"); } }
+        if let Some(old) = old_home {
+            unsafe {
+                env::set_var("HOME", old);
+            }
+        } else {
+            unsafe {
+                env::remove_var("HOME");
+            }
+        }
         let _ = fs::remove_dir_all(&home);
     }
 }

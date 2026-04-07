@@ -165,9 +165,8 @@ fn auth_warning_id(
     reason: &str,
 ) -> String {
     use ring::digest;
-    let input = format!(
-        "agora-auth-warning-v1\n{room_id}\n{sender}\n{signing_pubkey}\n{sig}\n{reason}"
-    );
+    let input =
+        format!("agora-auth-warning-v1\n{room_id}\n{sender}\n{signing_pubkey}\n{sig}\n{reason}");
     let hash = digest::digest(&digest::SHA256, input.as_bytes());
     format!("auth-{}", hex::encode(&hash.as_ref()[..4]))
 }
@@ -505,11 +504,13 @@ fn parse_envelope(raw: &str) -> Option<serde_json::Value> {
     None
 }
 
-fn signing_message_bytes(room_id: &str, from: &str, signing_pubkey: &str, payload: &str) -> Vec<u8> {
-    format!(
-        "agora-signed-wire-v1\n{room_id}\n{from}\n{signing_pubkey}\n{payload}"
-    )
-    .into_bytes()
+fn signing_message_bytes(
+    room_id: &str,
+    from: &str,
+    signing_pubkey: &str,
+    payload: &str,
+) -> Vec<u8> {
+    format!("agora-signed-wire-v1\n{room_id}\n{from}\n{signing_pubkey}\n{payload}").into_bytes()
 }
 
 // ── Encrypt / Decrypt ───────────────────────────────────────────
@@ -528,9 +529,8 @@ fn encrypt_envelope(env: &serde_json::Value, room_key: &[u8; 32], room_id: &str)
     store::trust_signing_key(from, &signing_pubkey);
 
     let signing_input = signing_message_bytes(room_id, from, &signing_pubkey, &payload);
-    let sig = BASE64.encode(
-        crypto::sign_message(&pkcs8, &signing_input).expect("message signing failed")
-    );
+    let sig = BASE64
+        .encode(crypto::sign_message(&pkcs8, &signing_input).expect("message signing failed"));
 
     serde_json::to_string(&SignedWirePayload {
         v: SIGNED_WIRE_VERSION.to_string(),
@@ -542,7 +542,11 @@ fn encrypt_envelope(env: &serde_json::Value, room_key: &[u8; 32], room_id: &str)
     .unwrap()
 }
 
-fn decrypt_signed_payload(raw: &str, room_key: &[u8; 32], room_id: &str) -> Option<serde_json::Value> {
+fn decrypt_signed_payload(
+    raw: &str,
+    room_key: &[u8; 32],
+    room_id: &str,
+) -> Option<serde_json::Value> {
     let wire = serde_json::from_str::<SignedWirePayload>(raw).ok()?;
     let signing_input =
         signing_message_bytes(room_id, &wire.from, &wire.signing_pubkey, &wire.payload);
@@ -666,7 +670,9 @@ pub fn leave(room_label: Option<&str>) -> Result<serde_json::Value, String> {
 
     if let Ok(pid_str) = std::fs::read_to_string(&pid_path) {
         if let Ok(pid) = pid_str.trim().parse::<i32>() {
-            unsafe { libc::kill(pid, libc::SIGTERM); }
+            unsafe {
+                libc::kill(pid, libc::SIGTERM);
+            }
             daemon_stopped = true;
         }
         let _ = std::fs::remove_file(&pid_path);
@@ -695,7 +701,11 @@ pub fn heartbeat(room_label: Option<&str>) -> Result<(), String> {
     Ok(())
 }
 
-pub fn send(message: &str, reply_to: Option<&str>, room_label: Option<&str>) -> Result<String, String> {
+pub fn send(
+    message: &str,
+    reply_to: Option<&str>,
+    room_label: Option<&str>,
+) -> Result<String, String> {
     let room = resolve_room(room_label)?;
     let sender = store::get_agent_id();
     enforce_outbound_plaza_rate_limit(&room, &sender)?;
@@ -769,7 +779,11 @@ pub fn redeem_invite(
     Ok(())
 }
 
-pub fn read(since: &str, limit: usize, room_label: Option<&str>) -> Result<Vec<serde_json::Value>, String> {
+pub fn read(
+    since: &str,
+    limit: usize,
+    room_label: Option<&str>,
+) -> Result<Vec<serde_json::Value>, String> {
     let room = resolve_room(room_label)?;
     let room_key = crypto::derive_room_key(&room.secret, &room.room_id);
     let since_secs = parse_since(since);
@@ -861,7 +875,8 @@ pub fn check(since: &str, room_label: Option<&str>) -> Result<Vec<serde_json::Va
             if is_receipt(&env) {
                 if let Some(ids) = env["read_ids"].as_array() {
                     let reader = from.to_string();
-                    let msg_ids: Vec<String> = ids.iter()
+                    let msg_ids: Vec<String> = ids
+                        .iter()
                         .filter_map(|v| v.as_str().map(|s| s.to_string()))
                         .collect();
                     store::record_receipts(&room.room_id, &msg_ids, &reader);
@@ -898,7 +913,9 @@ pub fn check(since: &str, room_label: Option<&str>) -> Result<Vec<serde_json::Va
 
             // Process incoming reactions
             if is_reaction(&env) {
-                if let (Some(target), Some(emoji)) = (env["target_id"].as_str(), env["emoji"].as_str()) {
+                if let (Some(target), Some(emoji)) =
+                    (env["target_id"].as_str(), env["emoji"].as_str())
+                {
                     store::add_reaction(&room.room_id, target, from, emoji);
                 }
                 continue;
@@ -968,7 +985,9 @@ pub fn react(target_id: &str, emoji: &str, room_label: Option<&str>) -> Result<(
 }
 
 /// Get reactions for recent messages.
-pub fn reactions(room_label: Option<&str>) -> Result<std::collections::HashMap<String, Vec<(String, String)>>, String> {
+pub fn reactions(
+    room_label: Option<&str>,
+) -> Result<std::collections::HashMap<String, Vec<(String, String)>>, String> {
     let room = resolve_room(room_label)?;
     Ok(store::load_reactions(&room.room_id))
 }
@@ -994,7 +1013,11 @@ pub fn muted(room_label: Option<&str>) -> Result<std::collections::HashSet<Strin
 }
 
 /// Set your agent profile and broadcast it to the room.
-pub fn set_profile(name: Option<&str>, role: Option<&str>, room_label: Option<&str>) -> Result<(), String> {
+pub fn set_profile(
+    name: Option<&str>,
+    role: Option<&str>,
+    room_label: Option<&str>,
+) -> Result<(), String> {
     let room = resolve_room(room_label)?;
     let room_key = crypto::derive_room_key(&room.secret, &room.room_id);
     let agent_id = store::get_agent_id();
@@ -1027,7 +1050,10 @@ pub fn set_profile(name: Option<&str>, role: Option<&str>, room_label: Option<&s
 }
 
 /// Look up an agent's profile.
-pub fn whois(agent_id: &str, room_label: Option<&str>) -> Result<Option<store::AgentProfile>, String> {
+pub fn whois(
+    agent_id: &str,
+    room_label: Option<&str>,
+) -> Result<Option<store::AgentProfile>, String> {
     let room = resolve_room(room_label)?;
     Ok(store::get_profile(&room.room_id, agent_id))
 }
@@ -1152,7 +1178,10 @@ pub fn role_release(role: &str, room_label: Option<&str>) -> Result<(), String> 
         .ok_or_else(|| format!("Role '{}' is not currently claimed.", role))?;
 
     if existing.agent_id != me && existing.lease_expires > now_ts {
-        return Err(format!("Role '{}' is currently held by '{}'.", role, existing.agent_id));
+        return Err(format!(
+            "Role '{}' is currently held by '{}'.",
+            role, existing.agent_id
+        ));
     }
 
     let released = store::RoleLease {
@@ -1178,7 +1207,12 @@ pub fn list_role_leases(room_label: Option<&str>) -> Result<Vec<store::RoleLease
 
 // ── Credits / Agent Economy ────────────────────────────────────
 
-pub fn credit_grant(agent_id: &str, amount: i64, reason: &str, room_label: Option<&str>) -> Result<i64, String> {
+pub fn credit_grant(
+    agent_id: &str,
+    amount: i64,
+    reason: &str,
+    room_label: Option<&str>,
+) -> Result<i64, String> {
     let room = resolve_room(room_label)?;
     let me = store::get_agent_id();
     // Bootstrap: if no admin exists, first granter becomes admin
@@ -1191,24 +1225,37 @@ pub fn credit_grant(agent_id: &str, amount: i64, reason: &str, room_label: Optio
     store::credit_add(&room.room_id, agent_id, amount, reason);
     let balance = store::credit_balance(&room.room_id, agent_id);
     let room_key = crypto::derive_room_key(&room.secret, &room.room_id);
-    let env = make_envelope(&format!("[credit] +{amount} to {agent_id}: {reason} (balance: {balance})"), None);
+    let env = make_envelope(
+        &format!("[credit] +{amount} to {agent_id}: {reason} (balance: {balance})"),
+        None,
+    );
     let encrypted = encrypt_envelope(&env, &room_key, &room.room_id);
     transport::publish(&room.room_id, &encrypted);
     store::save_message(&room.room_id, &env);
     Ok(balance)
 }
 
-pub fn credit_balance_check(agent_id: Option<&str>, room_label: Option<&str>) -> Result<(i64, i64), String> {
+pub fn credit_balance_check(
+    agent_id: Option<&str>,
+    room_label: Option<&str>,
+) -> Result<(i64, i64), String> {
     let room = resolve_room(room_label)?;
     let id = agent_id.unwrap_or(&store::get_agent_id()).to_string();
-    Ok((store::credit_balance(&room.room_id, &id), store::trust_balance(&room.room_id, &id)))
+    Ok((
+        store::credit_balance(&room.room_id, &id),
+        store::trust_balance(&room.room_id, &id),
+    ))
 }
 
 pub fn credit_spend(amount: i64, reason: &str, room_label: Option<&str>) -> Result<i64, String> {
     let room = resolve_room(room_label)?;
     let me = store::get_agent_id();
     let balance = store::credit_balance(&room.room_id, &me);
-    if balance < amount { return Err(format!("Insufficient credits: have {balance}, need {amount}")); }
+    if balance < amount {
+        return Err(format!(
+            "Insufficient credits: have {balance}, need {amount}"
+        ));
+    }
     store::credit_add(&room.room_id, &me, -amount, reason);
     Ok(balance - amount)
 }
@@ -1220,9 +1267,13 @@ pub fn bet_create(question: &str, room_label: Option<&str>) -> Result<String, St
     let me = store::get_agent_id();
     let id = msg_id();
     let bet = store::Bet {
-        id: id.clone(), question: question.to_string(), created_by: me.clone(),
-        created_at: now(), status: "open".to_string(),
-        stakes_yes: Vec::new(), stakes_no: Vec::new(),
+        id: id.clone(),
+        question: question.to_string(),
+        created_by: me.clone(),
+        created_at: now(),
+        status: "open".to_string(),
+        stakes_yes: Vec::new(),
+        stakes_no: Vec::new(),
     };
     let mut bets = store::load_bets(&room.room_id);
     bets.push(bet);
@@ -1236,45 +1287,94 @@ pub fn bet_create(question: &str, room_label: Option<&str>) -> Result<String, St
     Ok(id)
 }
 
-pub fn bet_stake(bet_id: &str, side: bool, amount: i64, room_label: Option<&str>) -> Result<(), String> {
+pub fn bet_stake(
+    bet_id: &str,
+    side: bool,
+    amount: i64,
+    room_label: Option<&str>,
+) -> Result<(), String> {
     let room = resolve_room(room_label)?;
     let me = store::get_agent_id();
     let balance = store::credit_balance(&room.room_id, &me);
-    if balance < amount { return Err(format!("Insufficient credits: have {balance}, need {amount}")); }
+    if balance < amount {
+        return Err(format!(
+            "Insufficient credits: have {balance}, need {amount}"
+        ));
+    }
 
     let mut bets = store::load_bets(&room.room_id);
-    let bet = bets.iter_mut().find(|b| b.id.starts_with(bet_id) && b.status == "open")
+    let bet = bets
+        .iter_mut()
+        .find(|b| b.id.starts_with(bet_id) && b.status == "open")
         .ok_or("Bet not found or already resolved")?;
 
-    if side { bet.stakes_yes.push((me.clone(), amount)); }
-    else { bet.stakes_no.push((me.clone(), amount)); }
+    if side {
+        bet.stakes_yes.push((me.clone(), amount));
+    } else {
+        bet.stakes_no.push((me.clone(), amount));
+    }
     store::save_bets(&room.room_id, &bets);
 
     // Escrow: debit the staker
-    store::credit_add(&room.room_id, &me, -amount, &format!("bet escrow: {} on {}", if side {"YES"} else {"NO"}, &bet_id[..6.min(bet_id.len())]));
+    store::credit_add(
+        &room.room_id,
+        &me,
+        -amount,
+        &format!(
+            "bet escrow: {} on {}",
+            if side { "YES" } else { "NO" },
+            &bet_id[..6.min(bet_id.len())]
+        ),
+    );
 
     let side_str = if side { "YES" } else { "NO" };
     let room_key = crypto::derive_room_key(&room.secret, &room.room_id);
-    let env = make_envelope(&format!("[bet] {me} stakes {amount} on {side_str} (bet {})", &bet_id[..6.min(bet_id.len())]), None);
+    let env = make_envelope(
+        &format!(
+            "[bet] {me} stakes {amount} on {side_str} (bet {})",
+            &bet_id[..6.min(bet_id.len())]
+        ),
+        None,
+    );
     let encrypted = encrypt_envelope(&env, &room_key, &room.room_id);
     transport::publish(&room.room_id, &encrypted);
     store::save_message(&room.room_id, &env);
     Ok(())
 }
 
-pub fn bet_resolve(bet_id: &str, outcome: bool, room_label: Option<&str>) -> Result<String, String> {
+pub fn bet_resolve(
+    bet_id: &str,
+    outcome: bool,
+    room_label: Option<&str>,
+) -> Result<String, String> {
     let room = resolve_room(room_label)?;
     let me = store::get_agent_id();
-    if !store::is_admin(&room.room_id, &me) { return Err("Only admins can resolve bets.".to_string()); }
+    if !store::is_admin(&room.room_id, &me) {
+        return Err("Only admins can resolve bets.".to_string());
+    }
 
     let mut bets = store::load_bets(&room.room_id);
-    let idx = bets.iter().position(|b| b.id.starts_with(bet_id) && b.status == "open")
+    let idx = bets
+        .iter()
+        .position(|b| b.id.starts_with(bet_id) && b.status == "open")
         .ok_or("Bet not found or already resolved")?;
 
-    bets[idx].status = if outcome { "resolved_yes".to_string() } else { "resolved_no".to_string() };
+    bets[idx].status = if outcome {
+        "resolved_yes".to_string()
+    } else {
+        "resolved_no".to_string()
+    };
 
-    let winners = if outcome { bets[idx].stakes_yes.clone() } else { bets[idx].stakes_no.clone() };
-    let losers = if outcome { bets[idx].stakes_no.clone() } else { bets[idx].stakes_yes.clone() };
+    let winners = if outcome {
+        bets[idx].stakes_yes.clone()
+    } else {
+        bets[idx].stakes_no.clone()
+    };
+    let losers = if outcome {
+        bets[idx].stakes_no.clone()
+    } else {
+        bets[idx].stakes_yes.clone()
+    };
 
     let total_pot: i64 = losers.iter().map(|(_, a)| a).sum();
     let winner_total: i64 = winners.iter().map(|(_, a)| a).sum();
@@ -1282,9 +1382,18 @@ pub fn bet_resolve(bet_id: &str, outcome: bool, room_label: Option<&str>) -> Res
 
     let mut payouts = Vec::new();
     for (agent, stake) in &winners {
-        let share = if winner_total > 0 { (*stake as f64 / winner_total as f64 * total_pot as f64) as i64 } else { 0 };
+        let share = if winner_total > 0 {
+            (*stake as f64 / winner_total as f64 * total_pot as f64) as i64
+        } else {
+            0
+        };
         let payout = stake + share;
-        store::credit_add(&room.room_id, agent, payout, &format!("bet won: {}", &bet_id[..6.min(bet_id.len())]));
+        store::credit_add(
+            &room.room_id,
+            agent,
+            payout,
+            &format!("bet won: {}", &bet_id[..6.min(bet_id.len())]),
+        );
         payouts.push(format!("{}: +{}", agent, payout));
     }
 
@@ -1292,11 +1401,24 @@ pub fn bet_resolve(bet_id: &str, outcome: bool, room_label: Option<&str>) -> Res
 
     let outcome_str = if outcome { "YES" } else { "NO" };
     let room_key = crypto::derive_room_key(&room.secret, &room.room_id);
-    let env = make_envelope(&format!("[bet resolved] {} → {} | Pot: {} | {}", question, outcome_str, total_pot, payouts.join(", ")), None);
+    let env = make_envelope(
+        &format!(
+            "[bet resolved] {} → {} | Pot: {} | {}",
+            question,
+            outcome_str,
+            total_pot,
+            payouts.join(", ")
+        ),
+        None,
+    );
     let encrypted = encrypt_envelope(&env, &room_key, &room.room_id);
     transport::publish(&room.room_id, &encrypted);
     store::save_message(&room.room_id, &env);
-    Ok(format!("Resolved: {} → {outcome_str}, pot {total_pot} distributed to {} winners", question, winners.len()))
+    Ok(format!(
+        "Resolved: {} → {outcome_str}, pot {total_pot} distributed to {} winners",
+        question,
+        winners.len()
+    ))
 }
 
 pub fn bet_list(room_label: Option<&str>) -> Result<Vec<store::Bet>, String> {
@@ -1368,7 +1490,11 @@ pub fn gap_list() -> Vec<CapabilityGap> {
         seen.entry(key).or_insert(gap);
     }
     let mut result: Vec<_> = seen.into_values().collect();
-    result.sort_by(|a, b| b.urgency.cmp(&a.urgency).then(b.blocked_tasks.cmp(&a.blocked_tasks)));
+    result.sort_by(|a, b| {
+        b.urgency
+            .cmp(&a.urgency)
+            .then(b.blocked_tasks.cmp(&a.blocked_tasks))
+    });
     result
 }
 
@@ -1387,12 +1513,23 @@ pub fn directory() -> Result<Vec<RoomInfo>, String> {
     let mut infos = Vec::new();
     for room in &rooms {
         let msgs = store::load_messages(&room.room_id, 86400);
-        let online = room.members.iter().filter(|m| m.last_seen > 0 && now_ts - m.last_seen < 300).count();
-        let last_ts = msgs.iter().map(|m| m["ts"].as_u64().unwrap_or(0)).max().unwrap_or(0);
+        let online = room
+            .members
+            .iter()
+            .filter(|m| m.last_seen > 0 && now_ts - m.last_seen < 300)
+            .count();
+        let last_ts = msgs
+            .iter()
+            .map(|m| m["ts"].as_u64().unwrap_or(0))
+            .max()
+            .unwrap_or(0);
         infos.push(RoomInfo {
-            label: room.label.clone(), room_id: room.room_id.clone(),
-            topic: room.topic.clone(), agent_count: online,
-            message_count: msgs.len(), last_activity: last_ts,
+            label: room.label.clone(),
+            room_id: room.room_id.clone(),
+            topic: room.topic.clone(),
+            agent_count: online,
+            message_count: msgs.len(),
+            last_activity: last_ts,
         });
     }
     infos.sort_by(|a, b| b.last_activity.cmp(&a.last_activity));
@@ -1401,12 +1538,19 @@ pub fn directory() -> Result<Vec<RoomInfo>, String> {
 
 // ── Capability Cards ───────────────────────────────────────────
 
-pub fn card_set(capabilities: &[String], description: Option<&str>, room_label: Option<&str>) -> Result<(), String> {
+pub fn card_set(
+    capabilities: &[String],
+    description: Option<&str>,
+    room_label: Option<&str>,
+) -> Result<(), String> {
     let room = resolve_room(room_label)?;
     let me = store::get_agent_id();
     let card = store::CapabilityCard {
-        agent_id: me.clone(), capabilities: capabilities.to_vec(),
-        available: true, description: description.map(|s| s.to_string()), updated_at: now(),
+        agent_id: me.clone(),
+        capabilities: capabilities.to_vec(),
+        available: true,
+        description: description.map(|s| s.to_string()),
+        updated_at: now(),
     };
     store::save_card(&card);
     let room_key = crypto::derive_room_key(&room.secret, &room.room_id);
@@ -1422,8 +1566,13 @@ pub fn card_set(capabilities: &[String], description: Option<&str>, room_label: 
     Ok(())
 }
 
-pub fn card_show(agent_id: Option<&str>, room_label: Option<&str>) -> Result<Option<store::CapabilityCard>, String> {
-    if agent_id.is_none() { return Ok(store::load_card()); }
+pub fn card_show(
+    agent_id: Option<&str>,
+    room_label: Option<&str>,
+) -> Result<Option<store::CapabilityCard>, String> {
+    if agent_id.is_none() {
+        return Ok(store::load_card());
+    }
     let room = resolve_room(room_label)?;
     let cards = store::load_peer_cards(&room.room_id);
     Ok(cards.into_iter().find(|c| c.agent_id == agent_id.unwrap()))
@@ -1468,17 +1617,28 @@ pub fn discover(need: &str, room_label: Option<&str>) -> Result<Vec<DiscoveryRes
         let receipts = store::load_work_receipts(&room.room_id);
         let tasks = task_list(Some(&room.room_id))?;
         for card in store::load_peer_cards(&room.room_id) {
-            let matches = needs.iter().all(|n| card.capabilities.iter().any(|c| c.to_lowercase().contains(n)));
-            if !matches { continue; }
+            let matches = needs.iter().all(|n| {
+                card.capabilities
+                    .iter()
+                    .any(|c| c.to_lowercase().contains(n))
+            });
+            if !matches {
+                continue;
+            }
 
-            let agent_receipts: Vec<_> = receipts.iter().filter(|r| r.agent_id == card.agent_id).collect();
+            let agent_receipts: Vec<_> = receipts
+                .iter()
+                .filter(|r| r.agent_id == card.agent_id)
+                .collect();
             let receipt_count = agent_receipts.len();
             let weighted_receipts = agent_receipts
                 .iter()
-                .map(|receipt| discovery_decay_weight(
-                    now_ts.saturating_sub(receipt.created_at),
-                    DISCOVERY_POSITIVE_HALF_LIFE_SECS,
-                ))
+                .map(|receipt| {
+                    discovery_decay_weight(
+                        now_ts.saturating_sub(receipt.created_at),
+                        DISCOVERY_POSITIVE_HALF_LIFE_SECS,
+                    )
+                })
                 .sum::<f64>();
             let freshest_receipt = agent_receipts
                 .iter()
@@ -1486,7 +1646,10 @@ pub fn discover(need: &str, room_label: Option<&str>) -> Result<Vec<DiscoveryRes
                 .max();
             let stale_claims: Vec<_> = tasks
                 .iter()
-                .filter(|task| task.status != "done" && task.claimed_by.as_deref() == Some(card.agent_id.as_str()))
+                .filter(|task| {
+                    task.status != "done"
+                        && task.claimed_by.as_deref() == Some(card.agent_id.as_str())
+                })
                 .filter_map(|task| {
                     let age = now_ts.saturating_sub(task.updated_at);
                     let weight = stale_claim_weight(age);
@@ -1501,19 +1664,27 @@ pub fn discover(need: &str, room_label: Option<&str>) -> Result<Vec<DiscoveryRes
                 DISCOVERY_POSITIVE_HALF_LIFE_SECS,
             );
             let execution_freshness = freshest_receipt
-                .map(|ts| discovery_decay_weight(now_ts.saturating_sub(ts), DISCOVERY_POSITIVE_HALF_LIFE_SECS))
+                .map(|ts| {
+                    discovery_decay_weight(
+                        now_ts.saturating_sub(ts),
+                        DISCOVERY_POSITIVE_HALF_LIFE_SECS,
+                    )
+                })
                 .unwrap_or(0.0);
             let volatility = (card_freshness - execution_freshness).max(0.0);
 
-            let entry = agent_map.entry(card.agent_id.clone()).or_insert_with(|| DiscoveryAccumulator {
-                card: card.clone(),
-                receipt_count: 0,
-                rooms_active: 0,
-                weighted_receipts: 0.0,
-                stale_claims: 0,
-                stale_claim_weight: 0.0,
-                volatility_sum: 0.0,
-            });
+            let entry =
+                agent_map
+                    .entry(card.agent_id.clone())
+                    .or_insert_with(|| DiscoveryAccumulator {
+                        card: card.clone(),
+                        receipt_count: 0,
+                        rooms_active: 0,
+                        weighted_receipts: 0.0,
+                        stale_claims: 0,
+                        stale_claim_weight: 0.0,
+                        volatility_sum: 0.0,
+                    });
             if card.updated_at > entry.card.updated_at {
                 entry.card = card.clone();
             }
@@ -1541,7 +1712,8 @@ pub fn discover(need: &str, room_label: Option<&str>) -> Result<Vec<DiscoveryRes
                 0.0
             };
             let room_presence = 1.0 + entry.rooms_active as f64 * 0.2;
-            let positive_score = (1.0 + entry.weighted_receipts) * room_presence * (1.0 + vouches * 0.3);
+            let positive_score =
+                (1.0 + entry.weighted_receipts) * room_presence * (1.0 + vouches * 0.3);
             let abandonment_penalty = (1.0 - abandonment_rate * 0.7).clamp(0.2, 1.0);
             let volatility_penalty = (1.0 - volatility_score * 0.4).clamp(0.4, 1.0);
             DiscoveryResult {
@@ -1555,7 +1727,11 @@ pub fn discover(need: &str, room_label: Option<&str>) -> Result<Vec<DiscoveryRes
             }
         })
         .collect();
-    results.sort_by(|a, b| b.trust_score.partial_cmp(&a.trust_score).unwrap_or(std::cmp::Ordering::Equal));
+    results.sort_by(|a, b| {
+        b.trust_score
+            .partial_cmp(&a.trust_score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     Ok(results)
 }
 
@@ -1574,14 +1750,24 @@ fn stale_claim_weight(age_secs: u64) -> f64 {
 }
 
 pub fn process_card_message(room_id: &str, msg: &serde_json::Value) {
-    if msg["type"].as_str() != Some("capability_card") { return; }
+    if msg["type"].as_str() != Some("capability_card") {
+        return;
+    }
     let agent_id = msg["from"].as_str().unwrap_or("").to_string();
-    if agent_id.is_empty() { return; }
-    let caps: Vec<String> = msg["capabilities"].as_array()
-        .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+    if agent_id.is_empty() {
+        return;
+    }
+    let caps: Vec<String> = msg["capabilities"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
         .unwrap_or_default();
     let card = store::CapabilityCard {
-        agent_id, capabilities: caps,
+        agent_id,
+        capabilities: caps,
         available: msg["available"].as_bool().unwrap_or(true),
         description: msg["description"].as_str().map(String::from),
         updated_at: msg["ts"].as_u64().unwrap_or(0),
@@ -1595,7 +1781,9 @@ pub fn process_card_message(room_id: &str, msg: &serde_json::Value) {
 pub fn vouch(agent_id: &str, reason: Option<&str>, room_label: Option<&str>) -> Result<(), String> {
     let room = resolve_room(room_label)?;
     let me = store::get_agent_id();
-    if me == agent_id { return Err("Cannot vouch for yourself.".to_string()); }
+    if me == agent_id {
+        return Err("Cannot vouch for yourself.".to_string());
+    }
 
     let room_key = crypto::derive_room_key(&room.secret, &room.room_id);
     let reason_str = reason.unwrap_or("trusted collaborator");
@@ -1619,7 +1807,9 @@ pub fn vouch_count(agent_id: &str) -> usize {
     for room in &rooms {
         let msgs = store::load_messages(&room.room_id, 604800 * 4); // 4 weeks
         for msg in &msgs {
-            if msg["type"].as_str() == Some("vouch") && msg["vouched_for"].as_str() == Some(agent_id) {
+            if msg["type"].as_str() == Some("vouch")
+                && msg["vouched_for"].as_str() == Some(agent_id)
+            {
                 count += 1;
             }
         }
@@ -1632,7 +1822,12 @@ pub fn vouch_count(agent_id: &str) -> usize {
 /// Post a bounty — a task with a priority weight that boosts discoverer trust.
 ///
 /// `acceptance_oracle`: optional shell command run against submissions to auto-verify (e.g. "cargo test").
-pub fn bounty_post(title: &str, priority: u32, acceptance_oracle: Option<&str>, room_label: Option<&str>) -> Result<String, String> {
+pub fn bounty_post(
+    title: &str,
+    priority: u32,
+    acceptance_oracle: Option<&str>,
+    room_label: Option<&str>,
+) -> Result<String, String> {
     let room = resolve_room(room_label)?;
     let me = store::get_agent_id();
     let id = msg_id();
@@ -1658,7 +1853,11 @@ pub fn bounty_post(title: &str, priority: u32, acceptance_oracle: Option<&str>, 
 }
 
 /// Internal: add a task with an optional acceptance oracle.
-fn task_add_with_oracle(title: &str, acceptance_oracle: Option<&str>, room_label: Option<&str>) -> Result<String, String> {
+fn task_add_with_oracle(
+    title: &str,
+    acceptance_oracle: Option<&str>,
+    room_label: Option<&str>,
+) -> Result<String, String> {
     let room = resolve_room(room_label)?;
     let me = store::get_agent_id();
     let id = msg_id();
@@ -1681,11 +1880,16 @@ fn task_add_with_oracle(title: &str, acceptance_oracle: Option<&str>, room_label
 
 /// Submit a branch as a bounty/task solution.
 /// Records the submission on the task and optionally runs the acceptance oracle.
-pub fn bounty_submit(task_id: &str, branch: &str, room_label: Option<&str>) -> Result<String, String> {
+pub fn bounty_submit(
+    task_id: &str,
+    branch: &str,
+    room_label: Option<&str>,
+) -> Result<String, String> {
     let room = resolve_room(room_label)?;
     let me = store::get_agent_id();
     let mut tasks = store::load_tasks(&room.room_id);
-    let task = tasks.iter_mut()
+    let task = tasks
+        .iter_mut()
         .find(|t| t.id.starts_with(task_id))
         .ok_or_else(|| format!("No task matching '{task_id}'"))?;
 
@@ -1729,7 +1933,9 @@ pub fn bounty_submit(task_id: &str, branch: &str, room_label: Option<&str>) -> R
                 store::save_tasks(&room.room_id, &tasks2);
                 let result = if passed { "PASS" } else { "FAIL" };
                 let env2 = make_envelope(
-                    &format!("[bounty oracle] {result}: '{cmd}' on branch '{branch}' (task {task_id})"),
+                    &format!(
+                        "[bounty oracle] {result}: '{cmd}' on branch '{branch}' (task {task_id})"
+                    ),
                     None,
                 );
                 let encrypted2 = encrypt_envelope(&env2, &room_key, &room.room_id);
@@ -1741,7 +1947,9 @@ pub fn bounty_submit(task_id: &str, branch: &str, room_label: Option<&str>) -> R
         }
     }
 
-    Ok(format!("Submitted branch '{branch}' for task '{title}'. No oracle configured — manual review required."))
+    Ok(format!(
+        "Submitted branch '{branch}' for task '{title}'. No oracle configured — manual review required."
+    ))
 }
 
 /// Run a shell command in the context of a git branch (stashes current state, checks out branch, runs, restores).
@@ -1792,21 +2000,32 @@ fn run_oracle_on_branch(branch: &str, oracle_cmd: &str) -> Result<bool, String> 
     let _ = Command::new("git")
         .args(["checkout", "--quiet", &original_branch])
         .output();
-    let _ = Command::new("git").args(["stash", "pop", "--quiet"]).output();
+    let _ = Command::new("git")
+        .args(["stash", "pop", "--quiet"])
+        .output();
 
     result
 }
 
 /// Verify an existing submission by running the oracle now (useful for deferred verification).
-pub fn bounty_verify(task_id: &str, agent_id: &str, room_label: Option<&str>) -> Result<String, String> {
+pub fn bounty_verify(
+    task_id: &str,
+    agent_id: &str,
+    room_label: Option<&str>,
+) -> Result<String, String> {
     let room = resolve_room(room_label)?;
     let mut tasks = store::load_tasks(&room.room_id);
-    let task = tasks.iter_mut()
+    let task = tasks
+        .iter_mut()
         .find(|t| t.id.starts_with(task_id))
         .ok_or_else(|| format!("No task matching '{task_id}'"))?;
-    let oracle = task.acceptance_oracle.clone()
+    let oracle = task
+        .acceptance_oracle
+        .clone()
         .ok_or_else(|| "Task has no acceptance_oracle configured".to_string())?;
-    let sub = task.submissions.iter_mut()
+    let sub = task
+        .submissions
+        .iter_mut()
         .find(|s| s.agent_id.starts_with(agent_id))
         .ok_or_else(|| format!("No submission from agent '{agent_id}'"))?;
     let branch = sub.branch.clone();
@@ -1819,7 +2038,9 @@ pub fn bounty_verify(task_id: &str, agent_id: &str, room_label: Option<&str>) ->
     let result = if passed { "PASS" } else { "FAIL" };
     let room_key = crypto::derive_room_key(&room.secret, &room.room_id);
     let env = make_envelope(
-        &format!("[bounty verify] {result}: '{oracle}' on branch '{branch}' (agent {agent_id}, task {task_id})"),
+        &format!(
+            "[bounty verify] {result}: '{oracle}' on branch '{branch}' (agent {agent_id}, task {task_id})"
+        ),
         None,
     );
     let encrypted = encrypt_envelope(&env, &room_key, &room.room_id);
@@ -1833,7 +2054,8 @@ pub fn bounty_verify(task_id: &str, agent_id: &str, room_label: Option<&str>) ->
 pub fn bounty_list(room_label: Option<&str>) -> Result<Vec<serde_json::Value>, String> {
     let room = resolve_room(room_label)?;
     let msgs = store::load_messages(&room.room_id, 604800);
-    let bounties: Vec<_> = msgs.into_iter()
+    let bounties: Vec<_> = msgs
+        .into_iter()
         .filter(|m| m["type"].as_str() == Some("bounty") && m["status"].as_str() == Some("open"))
         .collect();
     Ok(bounties)
@@ -1847,18 +2069,16 @@ pub fn bounty_list(room_label: Option<&str>) -> Result<Vec<serde_json::Value>, S
 ///
 /// Requires env: STRIPE_SECRET_KEY
 /// Optional: STRIPE_SUCCESS_URL, STRIPE_CANCEL_URL
-pub fn payment_fund(
-    credits: i64,
-    room_label: Option<&str>,
-) -> Result<String, String> {
+pub fn payment_fund(credits: i64, room_label: Option<&str>) -> Result<String, String> {
     if credits <= 0 {
         return Err("Credits must be positive.".to_string());
     }
     let room = resolve_room(room_label)?;
     let me = store::get_agent_id();
 
-    let stripe_key = std::env::var("STRIPE_SECRET_KEY")
-        .map_err(|_| "STRIPE_SECRET_KEY not set. Configure Stripe to enable payments.".to_string())?;
+    let stripe_key = std::env::var("STRIPE_SECRET_KEY").map_err(|_| {
+        "STRIPE_SECRET_KEY not set. Configure Stripe to enable payments.".to_string()
+    })?;
     if stripe_key.is_empty() {
         return Err("STRIPE_SECRET_KEY is empty.".to_string());
     }
@@ -1871,8 +2091,9 @@ pub fn payment_fund(
         ));
     }
 
-    let success_url = std::env::var("STRIPE_SUCCESS_URL")
-        .unwrap_or_else(|_| "https://theagora.dev/payment/success?session_id={CHECKOUT_SESSION_ID}".to_string());
+    let success_url = std::env::var("STRIPE_SUCCESS_URL").unwrap_or_else(|_| {
+        "https://theagora.dev/payment/success?session_id={CHECKOUT_SESSION_ID}".to_string()
+    });
     let cancel_url = std::env::var("STRIPE_CANCEL_URL")
         .unwrap_or_else(|_| "https://theagora.dev/payment/cancel".to_string());
 
@@ -1913,7 +2134,8 @@ pub fn payment_fund(
         .map_err(|e| format!("Stripe API error: {e}"))?;
 
     let status = resp.status().as_u16();
-    let body: serde_json::Value = resp.json()
+    let body: serde_json::Value = resp
+        .json()
         .map_err(|e| format!("Stripe response parse error: {e}"))?;
 
     if status != 200 {
@@ -1921,10 +2143,12 @@ pub fn payment_fund(
         return Err(format!("Stripe error {status}: {err}"));
     }
 
-    let session_id = body["id"].as_str()
+    let session_id = body["id"]
+        .as_str()
         .ok_or("Stripe response missing session id")?
         .to_string();
-    let checkout_url = body["url"].as_str()
+    let checkout_url = body["url"]
+        .as_str()
         .ok_or("Stripe response missing checkout url")?
         .to_string();
 
@@ -1971,8 +2195,9 @@ fn urlencoded(s: &str) -> String {
     let mut out = String::new();
     for b in s.bytes() {
         match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9'
-            | b'-' | b'_' | b'.' | b'~' => out.push(b as char),
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char)
+            }
             _ => out.push_str(&format!("%{:02X}", b)),
         }
     }
@@ -1982,16 +2207,15 @@ fn urlencoded(s: &str) -> String {
 /// Complete a deposit payment after Stripe webhook confirmation.
 /// Called by the webhook handler in serve.rs on `checkout.session.completed`.
 /// Mints credits to the agent's ledger and marks the payment completed.
-pub fn payment_complete_deposit(
-    stripe_session_id: &str,
-    room_id: &str,
-) -> Result<(), String> {
+pub fn payment_complete_deposit(stripe_session_id: &str, room_id: &str) -> Result<(), String> {
     let mut payments = store::load_payments();
     let record = payments
         .iter_mut()
-        .find(|p| p.stripe_id.as_deref() == Some(stripe_session_id)
-              && p.kind == store::PaymentKind::Deposit
-              && p.status == store::PaymentStatus::Pending)
+        .find(|p| {
+            p.stripe_id.as_deref() == Some(stripe_session_id)
+                && p.kind == store::PaymentKind::Deposit
+                && p.status == store::PaymentStatus::Pending
+        })
         .ok_or_else(|| format!("No pending deposit for session {stripe_session_id}"))?;
 
     record.status = store::PaymentStatus::Completed;
@@ -2004,11 +2228,21 @@ pub fn payment_complete_deposit(
     store::save_payments(&payments);
 
     // Mint net credits to agent (gross minus platform fee)
-    store::credit_add(room_id, &agent_id, net, &format!("stripe deposit {stripe_session_id} (net after 10% fee)"));
+    store::credit_add(
+        room_id,
+        &agent_id,
+        net,
+        &format!("stripe deposit {stripe_session_id} (net after 10% fee)"),
+    );
 
     // Collect platform fee to treasury
     let platform = "9d107f-cc"; // platform treasury agent
-    store::credit_add(room_id, platform, fee, &format!("platform fee 10% on deposit {stripe_session_id}"));
+    store::credit_add(
+        room_id,
+        platform,
+        fee,
+        &format!("platform fee 10% on deposit {stripe_session_id}"),
+    );
 
     Ok(())
 }
@@ -2016,10 +2250,7 @@ pub fn payment_complete_deposit(
 /// Request a credit withdrawal (credits → USD payout).
 /// Creates a pending withdrawal record. Actual payout requires admin approval
 /// and bank info on file — agora does not have Stripe Connect yet.
-pub fn payment_withdraw(
-    credits: i64,
-    room_label: Option<&str>,
-) -> Result<String, String> {
+pub fn payment_withdraw(credits: i64, room_label: Option<&str>) -> Result<String, String> {
     if credits <= 0 {
         return Err("Credits must be positive.".to_string());
     }
@@ -2028,7 +2259,9 @@ pub fn payment_withdraw(
 
     let balance = store::credit_balance(&room.room_id, &me);
     if balance < credits {
-        return Err(format!("Insufficient credits: have {balance}, need {credits}."));
+        return Err(format!(
+            "Insufficient credits: have {balance}, need {credits}."
+        ));
     }
 
     let amount_cents = credits / store::CREDITS_PER_USD_CENT;
@@ -2060,9 +2293,19 @@ pub fn payment_withdraw(
     };
 
     // Escrow the credits immediately (debit from agent)
-    store::credit_add(&room.room_id, &me, -credits, &format!("withdrawal escrow {}", &payment_id[..8]));
+    store::credit_add(
+        &room.room_id,
+        &me,
+        -credits,
+        &format!("withdrawal escrow {}", &payment_id[..8]),
+    );
     // Collect platform fee
-    store::credit_add(&room.room_id, "9d107f-cc", fee_credits, &format!("platform fee 10% on withdrawal {}", &payment_id[..8]));
+    store::credit_add(
+        &room.room_id,
+        "9d107f-cc",
+        fee_credits,
+        &format!("platform fee 10% on withdrawal {}", &payment_id[..8]),
+    );
 
     let mut payments = store::load_payments();
     payments.push(record);
@@ -2118,16 +2361,15 @@ fn infer_soma_subject_path(subject: &str) -> Option<String> {
 }
 
 fn current_git_head() -> Option<String> {
-    let output = Command::new("git").args(["rev-parse", "HEAD"]).output().ok()?;
+    let output = Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .ok()?;
     if !output.status.success() {
         return None;
     }
     let head = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if head.is_empty() {
-        None
-    } else {
-        Some(head)
-    }
+    if head.is_empty() { None } else { Some(head) }
 }
 
 fn git_churn_commits_since(git_ref: &str, path: &str) -> Option<u64> {
@@ -2227,7 +2469,13 @@ fn annotate_soma_message(msg: &mut serde_json::Value) {
     }
 }
 
-pub fn soma_assert(subject: &str, predicate: &str, confidence: Option<f64>, git_ref: Option<&str>, room_label: Option<&str>) -> Result<String, String> {
+pub fn soma_assert(
+    subject: &str,
+    predicate: &str,
+    confidence: Option<f64>,
+    git_ref: Option<&str>,
+    room_label: Option<&str>,
+) -> Result<String, String> {
     let room = resolve_room(room_label)?;
     let room_key = crypto::derive_room_key(&room.secret, &room.room_id);
     let id = msg_id();
@@ -2257,14 +2505,25 @@ pub fn soma_assert(subject: &str, predicate: &str, confidence: Option<f64>, git_
     Ok(id)
 }
 
-pub fn soma_query(subject: &str, room_label: Option<&str>) -> Result<Vec<serde_json::Value>, String> {
+pub fn soma_query(
+    subject: &str,
+    room_label: Option<&str>,
+) -> Result<Vec<serde_json::Value>, String> {
     let room = resolve_room(room_label)?;
     let msgs = store::load_messages(&room.room_id, 604800);
     let q = subject.to_lowercase();
-    let mut beliefs: Vec<serde_json::Value> = msgs.into_iter().filter(|m| {
-        (m["type"].as_str() == Some("soma_belief") || m["type"].as_str() == Some("soma_correction")) &&
-        m["subject"].as_str().unwrap_or("").to_lowercase().contains(&q)
-    }).collect();
+    let mut beliefs: Vec<serde_json::Value> = msgs
+        .into_iter()
+        .filter(|m| {
+            (m["type"].as_str() == Some("soma_belief")
+                || m["type"].as_str() == Some("soma_correction"))
+                && m["subject"]
+                    .as_str()
+                    .unwrap_or("")
+                    .to_lowercase()
+                    .contains(&q)
+        })
+        .collect();
     for belief in &mut beliefs {
         annotate_soma_message(belief);
     }
@@ -2301,7 +2560,12 @@ fn resolve_soma_belief<'a>(
     }
 }
 
-pub fn soma_correct(belief_id: &str, new_predicate: &str, reason: Option<&str>, room_label: Option<&str>) -> Result<String, String> {
+pub fn soma_correct(
+    belief_id: &str,
+    new_predicate: &str,
+    reason: Option<&str>,
+    room_label: Option<&str>,
+) -> Result<String, String> {
     let room = resolve_room(room_label)?;
     let room_key = crypto::derive_room_key(&room.secret, &room.room_id);
     let msgs = store::load_messages(&room.room_id, 604800);
@@ -2466,7 +2730,9 @@ pub fn task_claim(task_id: &str, room_label: Option<&str>) -> Result<String, Str
     let room = resolve_room(room_label)?;
     let me = store::get_agent_id();
     let mut tasks = store::load_tasks(&room.room_id);
-    let task = tasks.iter_mut().find(|t| t.id.starts_with(task_id) && t.status == "open")
+    let task = tasks
+        .iter_mut()
+        .find(|t| t.id.starts_with(task_id) && t.status == "open")
         .ok_or_else(|| format!("No open task matching '{task_id}'"))?;
     task.status = "claimed".to_string();
     task.claimed_by = Some(me.clone());
@@ -2484,15 +2750,23 @@ pub fn task_claim(task_id: &str, room_label: Option<&str>) -> Result<String, Str
 }
 
 /// Mark a task as done.
-pub fn task_done(task_id: &str, notes: Option<&str>, room_label: Option<&str>) -> Result<String, String> {
+pub fn task_done(
+    task_id: &str,
+    notes: Option<&str>,
+    room_label: Option<&str>,
+) -> Result<String, String> {
     let room = resolve_room(room_label)?;
     let me = store::get_agent_id();
     let mut tasks = store::load_tasks(&room.room_id);
-    let task = tasks.iter_mut().find(|t| t.id.starts_with(task_id))
+    let task = tasks
+        .iter_mut()
+        .find(|t| t.id.starts_with(task_id))
         .ok_or_else(|| format!("No task matching '{task_id}'"))?;
     task.status = "done".to_string();
     task.updated_at = now();
-    if let Some(n) = notes { task.notes = Some(n.to_string()); }
+    if let Some(n) = notes {
+        task.notes = Some(n.to_string());
+    }
     let task_snapshot = task.clone();
     let title = task_snapshot.title.clone();
     let tid = task_snapshot.id.clone();
@@ -2517,7 +2791,11 @@ pub fn task_done(task_id: &str, notes: Option<&str>, room_label: Option<&str>) -
 }
 
 /// Record partial progress on a task without marking it done.
-pub fn task_checkpoint(task_id: &str, notes: Option<&str>, room_label: Option<&str>) -> Result<String, String> {
+pub fn task_checkpoint(
+    task_id: &str,
+    notes: Option<&str>,
+    room_label: Option<&str>,
+) -> Result<String, String> {
     let room = resolve_room(room_label)?;
     let me = store::get_agent_id();
     let mut tasks = store::load_tasks(&room.room_id);
@@ -2528,7 +2806,10 @@ pub fn task_checkpoint(task_id: &str, notes: Option<&str>, room_label: Option<&s
 
     if let Some(claimed_by) = task.claimed_by.as_deref() {
         if claimed_by != me {
-            return Err(format!("Task '{}' is currently claimed by '{}'.", task.id, claimed_by));
+            return Err(format!(
+                "Task '{}' is currently claimed by '{}'.",
+                task.id, claimed_by
+            ));
         }
     } else {
         task.status = "claimed".to_string();
@@ -2539,7 +2820,9 @@ pub fn task_checkpoint(task_id: &str, notes: Option<&str>, room_label: Option<&s
     if let Some(note) = notes {
         task.notes = Some(note.to_string());
     }
-    let checkpoint_notes = notes.map(|note| note.to_string()).or_else(|| task.notes.clone());
+    let checkpoint_notes = notes
+        .map(|note| note.to_string())
+        .or_else(|| task.notes.clone());
     let task_snapshot = task.clone();
     let title = task_snapshot.title.clone();
     let tid = task_snapshot.id.clone();
@@ -2550,7 +2833,10 @@ pub fn task_checkpoint(task_id: &str, notes: Option<&str>, room_label: Option<&s
         .map(|note| format!(" — {note}"))
         .unwrap_or_default();
     let room_key = crypto::derive_room_key(&room.secret, &room.room_id);
-    let env = make_envelope(&format!("[task] Checkpoint by {me}: {title}{note_str}"), None);
+    let env = make_envelope(
+        &format!("[task] Checkpoint by {me}: {title}{note_str}"),
+        None,
+    );
     let encrypted = encrypt_envelope(&env, &room_key, &room.room_id);
     transport::publish(&room.room_id, &encrypted);
     store::save_message(&room.room_id, &env);
@@ -2706,7 +2992,14 @@ pub fn seed_verify(seed_id: &str, answer: &str, room_label: Option<&str>) -> Res
         submissions: vec![],
     };
 
-    publish_task_receipt(&room, &task, &me, "done", task.notes.as_deref(), task.updated_at);
+    publish_task_receipt(
+        &room,
+        &task,
+        &me,
+        "done",
+        task.notes.as_deref(),
+        task.updated_at,
+    );
 
     let room_key = crypto::derive_room_key(&room.secret, &room.room_id);
     let msg = format!(
@@ -2763,7 +3056,10 @@ pub fn task_list(room_label: Option<&str>) -> Result<Vec<store::Task>, String> {
             if let Some(colon) = rest.find(": ") {
                 let claimer = &rest[..colon];
                 let title = &rest[colon + 2..];
-                if let Some(t) = tasks.iter_mut().find(|t| t.title == title && t.status == "open") {
+                if let Some(t) = tasks
+                    .iter_mut()
+                    .find(|t| t.title == title && t.status == "open")
+                {
                     t.status = "claimed".to_string();
                     t.claimed_by = Some(claimer.to_string());
                 }
@@ -2772,7 +3068,10 @@ pub fn task_list(room_label: Option<&str>) -> Result<Vec<store::Task>, String> {
             let rest = &text["[task] Done by ".len()..];
             if let Some(colon) = rest.find(": ") {
                 let title_and_notes = &rest[colon + 2..];
-                let title = title_and_notes.split(" — ").next().unwrap_or(title_and_notes);
+                let title = title_and_notes
+                    .split(" — ")
+                    .next()
+                    .unwrap_or(title_and_notes);
                 if let Some(t) = tasks.iter_mut().find(|t| t.title == title) {
                     t.status = "done".to_string();
                 }
@@ -2837,7 +3136,11 @@ pub fn timeline(since: &str, room_label: Option<&str>) -> Result<Vec<serde_json:
             "admin"
         } else if evt["text"].as_str().unwrap_or("").starts_with("Kicked ") {
             "kick"
-        } else if evt["text"].as_str().unwrap_or("").starts_with("[scheduled]") {
+        } else if evt["text"]
+            .as_str()
+            .unwrap_or("")
+            .starts_with("[scheduled]")
+        {
             "scheduled"
         } else {
             "message"
@@ -2857,7 +3160,10 @@ pub fn digest(since: &str, room_label: Option<&str>) -> Result<String, String> {
     let reactions = store::load_reactions(&room.room_id);
 
     if msgs.is_empty() {
-        return Ok(format!("# {} — Digest (last {})\n\nNo activity.", room.label, since));
+        return Ok(format!(
+            "# {} — Digest (last {})\n\nNo activity.",
+            room.label, since
+        ));
     }
 
     let mut agents: HashMap<String, u64> = HashMap::new();
@@ -2870,7 +3176,9 @@ pub fn digest(since: &str, room_label: Option<&str>) -> Result<String, String> {
         *agents.entry(from).or_insert(0) += 1;
         if let Some(text) = msg["text"].as_str() {
             for word in text.split_whitespace() {
-                let w = word.trim_matches(|c: char| !c.is_alphanumeric()).to_lowercase();
+                let w = word
+                    .trim_matches(|c: char| !c.is_alphanumeric())
+                    .to_lowercase();
                 if w.len() >= 5 && !is_stopword(&w) {
                     *topics.entry(w).or_insert(0) += 1;
                 }
@@ -2887,13 +3195,20 @@ pub fn digest(since: &str, room_label: Option<&str>) -> Result<String, String> {
     let total_reactions: usize = reactions.values().map(|v| v.len()).sum();
 
     let first_dt = chrono::DateTime::from_timestamp(first_ts as i64, 0)
-        .map(|d| d.format("%H:%M").to_string()).unwrap_or_default();
+        .map(|d| d.format("%H:%M").to_string())
+        .unwrap_or_default();
     let last_dt = chrono::DateTime::from_timestamp(last_ts as i64, 0)
-        .map(|d| d.format("%H:%M").to_string()).unwrap_or_default();
+        .map(|d| d.format("%H:%M").to_string())
+        .unwrap_or_default();
 
     let mut report = format!("# {} — Digest (last {})\n\n", room.label, since);
     report.push_str(&format!("**Period:** {} → {}\n", first_dt, last_dt));
-    report.push_str(&format!("**Messages:** {}  |  **Agents:** {}  |  **Reactions:** {}\n\n", msgs.len(), sorted_agents.len(), total_reactions));
+    report.push_str(&format!(
+        "**Messages:** {}  |  **Agents:** {}  |  **Reactions:** {}\n\n",
+        msgs.len(),
+        sorted_agents.len(),
+        total_reactions
+    ));
 
     report.push_str("## Participants\n");
     for (agent, count) in &sorted_agents {
@@ -2901,7 +3216,13 @@ pub fn digest(since: &str, room_label: Option<&str>) -> Result<String, String> {
     }
 
     report.push_str("\n## Key Topics\n");
-    report.push_str(&sorted_topics.iter().map(|(w, _)| w.as_str()).collect::<Vec<_>>().join(", "));
+    report.push_str(
+        &sorted_topics
+            .iter()
+            .map(|(w, _)| w.as_str())
+            .collect::<Vec<_>>()
+            .join(", "),
+    );
 
     report.push_str("\n\n## Highlights\n");
     // Pick messages with most text (likely substantive)
@@ -2956,7 +3277,8 @@ fn fire_webhooks(room_id: &str, msgs: &[serde_json::Value]) {
             "messages": msgs,
             "count": msgs.len(),
         });
-        let _ = client.post(&hook.url)
+        let _ = client
+            .post(&hook.url)
             .header("Content-Type", "application/json")
             .body(serde_json::to_string(&payload).unwrap())
             .send();
@@ -2964,14 +3286,19 @@ fn fire_webhooks(room_id: &str, msgs: &[serde_json::Value]) {
 }
 
 /// Find messages where an agent was @mentioned.
-pub fn mentions(agent_id: Option<&str>, since: &str, room_label: Option<&str>) -> Result<Vec<serde_json::Value>, String> {
+pub fn mentions(
+    agent_id: Option<&str>,
+    since: &str,
+    room_label: Option<&str>,
+) -> Result<Vec<serde_json::Value>, String> {
     let room = resolve_room(room_label)?;
     let target = agent_id.unwrap_or(&store::get_agent_id()).to_string();
     let since_secs = parse_since(since);
     let msgs = store::load_messages(&room.room_id, since_secs);
     let pattern = format!("@{target}");
 
-    let results: Vec<serde_json::Value> = msgs.into_iter()
+    let results: Vec<serde_json::Value> = msgs
+        .into_iter()
         .filter(|m| {
             let text = m["text"].as_str().unwrap_or("");
             let from = m["from"].as_str().unwrap_or("");
@@ -3016,7 +3343,9 @@ pub fn encrypt_data(data: &[u8], room_label: Option<&str>) -> Result<String, Str
 pub fn decrypt_data(b64: &str, room_label: Option<&str>) -> Result<Vec<u8>, String> {
     let room = resolve_room(room_label)?;
     let room_key = crypto::derive_room_key(&room.secret, &room.room_id);
-    let blob = BASE64.decode(b64).map_err(|e| format!("Decode failed: {e}"))?;
+    let blob = BASE64
+        .decode(b64)
+        .map_err(|e| format!("Decode failed: {e}"))?;
     crypto::decrypt(&blob, &room_key, room.room_id.as_bytes())
         .map_err(|e| format!("Decrypt failed: {e}"))
 }
@@ -3028,10 +3357,13 @@ pub fn changelog(since: &str, room_label: Option<&str>) -> Result<Vec<serde_json
     let since_secs = parse_since(since);
     let msgs = store::load_messages(&room.room_id, since_secs);
 
-    let keywords = ["shipped", "merged", "built", "added", "fixed", "PR #", "pr #",
-        "feature", "released", "deployed", "launched", "done", "complete"];
+    let keywords = [
+        "shipped", "merged", "built", "added", "fixed", "PR #", "pr #", "feature", "released",
+        "deployed", "launched", "done", "complete",
+    ];
 
-    let results: Vec<serde_json::Value> = msgs.into_iter()
+    let results: Vec<serde_json::Value> = msgs
+        .into_iter()
         .filter(|m| {
             let text = m["text"].as_str().unwrap_or("").to_lowercase();
             keywords.iter().any(|kw| text.contains(&kw.to_lowercase()))
@@ -3051,7 +3383,11 @@ pub fn healthcheck(room_label: Option<&str>) -> Result<Vec<(String, bool, String
 
     // Check rooms
     let rooms = store::load_registry();
-    checks.push(("Rooms joined".into(), !rooms.is_empty(), format!("{}", rooms.len())));
+    checks.push((
+        "Rooms joined".into(),
+        !rooms.is_empty(),
+        format!("{}", rooms.len()),
+    ));
 
     // Check active room
     let active = if let Some(r) = room_label {
@@ -3067,13 +3403,19 @@ pub fn healthcheck(room_label: Option<&str>) -> Result<Vec<(String, bool, String
             let room_key = crypto::derive_room_key(&r.secret, &r.room_id);
             let test_data = b"healthcheck";
             match crypto::encrypt(test_data, &room_key, b"test") {
-                Ok(blob) => {
-                    match crypto::decrypt(&blob, &room_key, b"test") {
-                        Ok(pt) => checks.push(("AES-256-GCM".into(), pt == test_data, "encrypt/decrypt OK".into())),
-                        Err(e) => checks.push(("AES-256-GCM".into(), false, format!("decrypt failed: {e}"))),
+                Ok(blob) => match crypto::decrypt(&blob, &room_key, b"test") {
+                    Ok(pt) => checks.push((
+                        "AES-256-GCM".into(),
+                        pt == test_data,
+                        "encrypt/decrypt OK".into(),
+                    )),
+                    Err(e) => {
+                        checks.push(("AES-256-GCM".into(), false, format!("decrypt failed: {e}")))
                     }
+                },
+                Err(e) => {
+                    checks.push(("AES-256-GCM".into(), false, format!("encrypt failed: {e}")))
                 }
-                Err(e) => checks.push(("AES-256-GCM".into(), false, format!("encrypt failed: {e}"))),
             }
 
             // Check relay connectivity
@@ -3086,10 +3428,18 @@ pub fn healthcheck(room_label: Option<&str>) -> Result<Vec<(String, bool, String
 
             // Check messages
             let msgs = store::load_messages(&r.room_id, 3600);
-            checks.push(("Local messages".into(), true, format!("{} in last 1h", msgs.len())));
+            checks.push((
+                "Local messages".into(),
+                true,
+                format!("{} in last 1h", msgs.len()),
+            ));
 
             // Check members
-            checks.push(("Members tracked".into(), !r.members.is_empty(), format!("{}", r.members.len())));
+            checks.push((
+                "Members tracked".into(),
+                !r.members.is_empty(),
+                format!("{}", r.members.len()),
+            ));
         }
         None => {
             checks.push(("Active room".into(), false, "none".into()));
@@ -3101,7 +3451,11 @@ pub fn healthcheck(room_label: Option<&str>) -> Result<Vec<(String, bool, String
 
 /// Schedule a message for future delivery.
 /// Stores in a queue file; `check` or `send-scheduled` delivers when time is up.
-pub fn schedule_message(text: &str, deliver_at: u64, room_label: Option<&str>) -> Result<String, String> {
+pub fn schedule_message(
+    text: &str,
+    deliver_at: u64,
+    room_label: Option<&str>,
+) -> Result<String, String> {
     let room = resolve_room(room_label)?;
     let id = msg_id();
     let entry = json!({
@@ -3199,10 +3553,12 @@ pub fn compact(keep_hours: u64, room_label: Option<&str>) -> Result<(usize, usiz
 pub fn grep(query: &str, use_regex: bool) -> Result<Vec<(String, serde_json::Value)>, String> {
     let rooms = store::load_registry();
     let re = if use_regex {
-        Some(regex::RegexBuilder::new(query)
-            .case_insensitive(true)
-            .build()
-            .map_err(|e| format!("Invalid regex: {e}"))?)
+        Some(
+            regex::RegexBuilder::new(query)
+                .case_insensitive(true)
+                .build()
+                .map_err(|e| format!("Invalid regex: {e}"))?,
+        )
     } else {
         None
     };
@@ -3297,7 +3653,11 @@ pub fn stats(room_label: Option<&str>) -> Result<serde_json::Value, String> {
 }
 
 /// Export room history as JSON.
-pub fn export(since: &str, out_path: Option<&str>, room_label: Option<&str>) -> Result<(String, usize), String> {
+pub fn export(
+    since: &str,
+    out_path: Option<&str>,
+    room_label: Option<&str>,
+) -> Result<(String, usize), String> {
     let room = resolve_room(room_label)?;
     let since_secs = parse_since(since);
     let msgs = store::load_messages(&room.room_id, since_secs);
@@ -3345,13 +3705,17 @@ pub fn info(room_label: Option<&str>) -> Result<serde_json::Value, String> {
     let room = resolve_room(room_label)?;
     let room_key = crypto::derive_room_key(&room.secret, &room.room_id);
     let msgs = store::load_messages(&room.room_id, 7200);
-    let members: Vec<_> = room.members.iter().map(|m| {
-        json!({
-            "agent_id": m.agent_id,
-            "role": format!("{:?}", m.role),
-            "nickname": m.nickname,
+    let members: Vec<_> = room
+        .members
+        .iter()
+        .map(|m| {
+            json!({
+                "agent_id": m.agent_id,
+                "role": format!("{:?}", m.role),
+                "nickname": m.nickname,
+            })
         })
-    }).collect();
+        .collect();
     Ok(json!({
         "room_id": room.room_id,
         "label": room.label,
@@ -3369,7 +3733,11 @@ pub fn who(room_label: Option<&str>, online_only: bool) -> Result<Vec<store::Roo
     let room = resolve_room(room_label)?;
     if online_only {
         let cutoff = now() - 300; // 5 minutes
-        Ok(room.members.into_iter().filter(|m| m.last_seen >= cutoff).collect())
+        Ok(room
+            .members
+            .into_iter()
+            .filter(|m| m.last_seen >= cutoff)
+            .collect())
     } else {
         Ok(room.members)
     }
@@ -3451,7 +3819,11 @@ fn send_watch_heartbeat(room_id: &str) -> Result<(), String> {
 /// Watch a room in real-time. Calls `on_message` for each new message.
 /// Sends a heartbeat every `heartbeat_secs` seconds.
 /// Blocks forever.
-pub fn watch<F>(room_label: Option<&str>, heartbeat_secs: u64, mut on_message: F) -> Result<(), String>
+pub fn watch<F>(
+    room_label: Option<&str>,
+    heartbeat_secs: u64,
+    mut on_message: F,
+) -> Result<(), String>
 where
     F: FnMut(&serde_json::Value),
 {
@@ -3525,7 +3897,9 @@ pub fn recap(since: &str, room_label: Option<&str>) -> Result<serde_json::Value,
         // Extract keywords (words 4+ chars, skip common ones)
         if let Some(text) = msg["text"].as_str() {
             for word in text.split_whitespace() {
-                let w = word.trim_matches(|c: char| !c.is_alphanumeric()).to_lowercase();
+                let w = word
+                    .trim_matches(|c: char| !c.is_alphanumeric())
+                    .to_lowercase();
                 if w.len() >= 4 && !is_stopword(&w) {
                     *words.entry(w).or_insert(0) += 1;
                 }
@@ -3556,22 +3930,79 @@ pub fn recap(since: &str, room_label: Option<&str>) -> Result<serde_json::Value,
 }
 
 fn is_stopword(w: &str) -> bool {
-    matches!(w, "that" | "this" | "with" | "from" | "have" | "been"
-        | "will" | "your" | "they" | "what" | "when" | "were" | "them"
-        | "then" | "than" | "each" | "just" | "also" | "into" | "some"
-        | "more" | "here" | "agora" | "room" | "send" | "read" | "check"
-        | "should" | "would" | "could" | "about" | "there" | "which"
-        | "their" | "after" | "before" | "still" | "already" | "need"
-        | "want" | "like" | "make" | "does" | "done" | "good" | "work"
-        | "working" | "works" | "built" | "build" | "main" | "branch"
-        | "push" | "pull" | "merge" | "merged")
+    matches!(
+        w,
+        "that"
+            | "this"
+            | "with"
+            | "from"
+            | "have"
+            | "been"
+            | "will"
+            | "your"
+            | "they"
+            | "what"
+            | "when"
+            | "were"
+            | "them"
+            | "then"
+            | "than"
+            | "each"
+            | "just"
+            | "also"
+            | "into"
+            | "some"
+            | "more"
+            | "here"
+            | "agora"
+            | "room"
+            | "send"
+            | "read"
+            | "check"
+            | "should"
+            | "would"
+            | "could"
+            | "about"
+            | "there"
+            | "which"
+            | "their"
+            | "after"
+            | "before"
+            | "still"
+            | "already"
+            | "need"
+            | "want"
+            | "like"
+            | "make"
+            | "does"
+            | "done"
+            | "good"
+            | "work"
+            | "working"
+            | "works"
+            | "built"
+            | "build"
+            | "main"
+            | "branch"
+            | "push"
+            | "pull"
+            | "merge"
+            | "merged"
+    )
 }
 
 // ── File Sharing ───────────────────────────────────────────────
 
 const MAX_INLINE_FILE_SIZE: usize = 32 * 1024; // 32KB
 
-fn make_file_envelope(filename: &str, file_id: &str, data: &str, size: u64, chunk_n: u64, total_chunks: u64) -> serde_json::Value {
+fn make_file_envelope(
+    filename: &str,
+    file_id: &str,
+    data: &str,
+    size: u64,
+    chunk_n: u64,
+    total_chunks: u64,
+) -> serde_json::Value {
     json!({
         "v": VERSION,
         "id": msg_id(),
@@ -3651,7 +4082,11 @@ pub fn list_files(room_label: Option<&str>) -> Result<Vec<serde_json::Value>, St
 }
 
 /// Download a file from the room by file_id.
-pub fn download_file(file_id: &str, out_path: Option<&str>, room_label: Option<&str>) -> Result<String, String> {
+pub fn download_file(
+    file_id: &str,
+    out_path: Option<&str>,
+    room_label: Option<&str>,
+) -> Result<String, String> {
     let room = resolve_room(room_label)?;
     let msgs = store::load_messages(&room.room_id, 604800);
 
@@ -3679,14 +4114,20 @@ pub fn download_file(file_id: &str, out_path: Option<&str>, room_label: Option<&
         return Err(format!("File '{file_id}' not found."));
     }
     if chunks.len() as u64 != total_chunks {
-        return Err(format!("Incomplete file: got {}/{} chunks.", chunks.len(), total_chunks));
+        return Err(format!(
+            "Incomplete file: got {}/{} chunks.",
+            chunks.len(),
+            total_chunks
+        ));
     }
 
     // Sort by chunk number and reassemble
     chunks.sort_by_key(|(n, _)| *n);
     let mut file_data = Vec::new();
     for (_, data) in &chunks {
-        let decoded = BASE64.decode(data).map_err(|e| format!("Decode error: {e}"))?;
+        let decoded = BASE64
+            .decode(data)
+            .map_err(|e| format!("Decode error: {e}"))?;
         file_data.extend_from_slice(&decoded);
     }
 
@@ -3698,21 +4139,20 @@ pub fn download_file(file_id: &str, out_path: Option<&str>, room_label: Option<&
 
 #[cfg(test)]
 mod tests {
-    use base64::Engine;
     use super::{
-        allow_incoming_message, annotate_soma_message, count_invite_redemptions_in_envs,
-        decrypt_payload, discover, discovery_decay_weight, enforce_outbound_plaza_rate_limit,
-        encrypt_envelope,
-        infer_soma_subject_path, ingest_auxiliary_event, list_role_leases, list_work_receipts,
-        make_envelope, make_invite_redemption, pin, pins, resolve_room, role_claim,
-        role_heartbeat, role_release, seed_plaza_rate_limit_state, send_watch_heartbeat,
-        should_display_message, signing_message_bytes, soma_churn_decay, soma_correct,
-        stale_claim_weight, task_add, task_checkpoint, task_done, unpin,
-        SignedWirePayload, SIGNED_WIRE_VERSION, BASE64, DISCOVERY_POSITIVE_HALF_LIFE_SECS,
-        PLAZA_RATE_LIMIT_WINDOW_SECS,
+        BASE64, DISCOVERY_POSITIVE_HALF_LIFE_SECS, PLAZA_RATE_LIMIT_WINDOW_SECS,
+        SIGNED_WIRE_VERSION, SignedWirePayload, allow_incoming_message, annotate_soma_message,
+        count_invite_redemptions_in_envs, decrypt_payload, discover, discovery_decay_weight,
+        encrypt_envelope, enforce_outbound_plaza_rate_limit, infer_soma_subject_path,
+        ingest_auxiliary_event, list_role_leases, list_work_receipts, make_envelope,
+        make_invite_redemption, pin, pins, resolve_room, role_claim, role_heartbeat, role_release,
+        seed_plaza_rate_limit_state, send_watch_heartbeat, should_display_message,
+        signing_message_bytes, soma_churn_decay, soma_correct, stale_claim_weight, task_add,
+        task_checkpoint, task_done, unpin,
     };
     use crate::crypto;
     use crate::store::{self, Role};
+    use base64::Engine;
     use serde_json::json;
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -3754,20 +4194,26 @@ mod tests {
         let first = "aaaabbbb".to_string();
         let second = "ccccdddd".to_string();
 
-        store::save_message(&room.room_id, &json!({
-            "id": first,
-            "from": "pin-test",
-            "ts": 100,
-            "text": "first",
-            "v": "3.0",
-        }));
-        store::save_message(&room.room_id, &json!({
-            "id": second,
-            "from": "pin-test",
-            "ts": 101,
-            "text": "second",
-            "v": "3.0",
-        }));
+        store::save_message(
+            &room.room_id,
+            &json!({
+                "id": first,
+                "from": "pin-test",
+                "ts": 100,
+                "text": "first",
+                "v": "3.0",
+            }),
+        );
+        store::save_message(
+            &room.room_id,
+            &json!({
+                "id": second,
+                "from": "pin-test",
+                "ts": 101,
+                "text": "second",
+                "v": "3.0",
+            }),
+        );
 
         (home, first, second)
     }
@@ -3874,13 +4320,16 @@ mod tests {
         let now_ts = current_ts();
 
         for i in 0..10 {
-            store::save_message(&room.room_id, &json!({
-                "id": format!("spam{i}"),
-                "from": "spammer",
-                "ts": now_ts - 30 + i,
-                "text": format!("msg {i}"),
-                "v": "3.0",
-            }));
+            store::save_message(
+                &room.room_id,
+                &json!({
+                    "id": format!("spam{i}"),
+                    "from": "spammer",
+                    "ts": now_ts - 30 + i,
+                    "text": format!("msg {i}"),
+                    "v": "3.0",
+                }),
+            );
         }
 
         let recent = store::load_messages(&room.room_id, PLAZA_RATE_LIMIT_WINDOW_SECS);
@@ -3893,7 +4342,9 @@ mod tests {
             "v": "3.0",
         });
 
-        assert!(!allow_incoming_message(&room, &overflow, now_ts, &mut state));
+        assert!(!allow_incoming_message(
+            &room, &overflow, now_ts, &mut state
+        ));
         assert!(store::load_muted(&room.room_id).contains("spammer"));
     }
 
@@ -3904,13 +4355,16 @@ mod tests {
         let now_ts = current_ts();
 
         for i in 0..10 {
-            store::save_message(&room.room_id, &json!({
-                "id": format!("mine{i}"),
-                "from": "speaker",
-                "ts": now_ts - 30 + i,
-                "text": format!("own {i}"),
-                "v": "3.0",
-            }));
+            store::save_message(
+                &room.room_id,
+                &json!({
+                    "id": format!("mine{i}"),
+                    "from": "speaker",
+                    "ts": now_ts - 30 + i,
+                    "text": format!("own {i}"),
+                    "v": "3.0",
+                }),
+            );
         }
 
         let err = enforce_outbound_plaza_rate_limit(&room, "speaker").unwrap_err();
@@ -4057,7 +4511,10 @@ mod tests {
             role_heartbeat("backend", Some("Owns transport too"), 1200, Some("plaza")).unwrap();
         assert!(heartbeat.lease_expires >= claimed.lease_expires);
         let stored = store::get_role_lease(&room.room_id, "backend").unwrap();
-        assert_eq!(stored.context_summary.as_deref(), Some("Owns transport too"));
+        assert_eq!(
+            stored.context_summary.as_deref(),
+            Some("Owns transport too")
+        );
 
         role_release("backend", Some("plaza")).unwrap();
         assert!(store::get_role_lease(&room.room_id, "backend").is_none());
@@ -4176,21 +4633,28 @@ mod tests {
         let _guard = store::test_env_lock().lock().unwrap();
         let (_home, room) = setup_soma_room();
         let belief_id = "abcd1234".to_string();
-        store::save_message(&room.room_id, &json!({
-            "id": belief_id,
-            "from": "soma-test",
-            "ts": current_ts(),
-            "type": "soma_belief",
-            "subject": "src/chat.rs:soma_correct",
-            "predicate": "returns success for unknown belief ids",
-            "confidence": 0.7,
-            "v": "3.0",
-            "text": "[soma] src/chat.rs:soma_correct: returns success for unknown belief ids",
-        }));
+        store::save_message(
+            &room.room_id,
+            &json!({
+                "id": belief_id,
+                "from": "soma-test",
+                "ts": current_ts(),
+                "type": "soma_belief",
+                "subject": "src/chat.rs:soma_correct",
+                "predicate": "returns success for unknown belief ids",
+                "confidence": 0.7,
+                "v": "3.0",
+                "text": "[soma] src/chat.rs:soma_correct: returns success for unknown belief ids",
+            }),
+        );
 
-        let correction_id =
-            soma_correct("abcd", "rejects unknown belief ids", Some("regression fix"), None)
-                .unwrap();
+        let correction_id = soma_correct(
+            "abcd",
+            "rejects unknown belief ids",
+            Some("regression fix"),
+            None,
+        )
+        .unwrap();
         let msgs = store::load_messages(&room.room_id, u64::MAX);
         let correction = msgs
             .iter()
@@ -4220,17 +4684,20 @@ mod tests {
         let (_home, room) = setup_soma_room();
         let base_ts = current_ts();
         for (id, ts) in [("abcd1111", base_ts), ("abcd2222", base_ts + 1)] {
-            store::save_message(&room.room_id, &json!({
-                "id": id,
-                "from": "soma-test",
-                "ts": ts,
-                "type": "soma_belief",
-                "subject": "src/main.rs",
-                "predicate": "placeholder",
-                "confidence": 0.6,
-                "v": "3.0",
-                "text": "[soma] src/main.rs: placeholder",
-            }));
+            store::save_message(
+                &room.room_id,
+                &json!({
+                    "id": id,
+                    "from": "soma-test",
+                    "ts": ts,
+                    "type": "soma_belief",
+                    "subject": "src/main.rs",
+                    "predicate": "placeholder",
+                    "confidence": 0.6,
+                    "v": "3.0",
+                    "text": "[soma] src/main.rs: placeholder",
+                }),
+            );
         }
 
         let err = soma_correct("abcd", "new predicate", Some("ambiguous"), None).unwrap_err();
@@ -4269,21 +4736,41 @@ mod tests {
         std::fs::create_dir_all(&repo).unwrap();
 
         assert!(run_git(&repo, &["init"]).status.success());
-        assert!(run_git(&repo, &["config", "user.email", "soma@test.local"]).status.success());
-        assert!(run_git(&repo, &["config", "user.name", "Soma Test"]).status.success());
-        assert!(run_git(&repo, &["config", "commit.gpgsign", "false"]).status.success());
+        assert!(
+            run_git(&repo, &["config", "user.email", "soma@test.local"])
+                .status
+                .success()
+        );
+        assert!(
+            run_git(&repo, &["config", "user.name", "Soma Test"])
+                .status
+                .success()
+        );
+        assert!(
+            run_git(&repo, &["config", "commit.gpgsign", "false"])
+                .status
+                .success()
+        );
 
         let tracked = repo.join("tracked.txt");
         std::fs::write(&tracked, "v1\n").unwrap();
         assert!(run_git(&repo, &["add", "tracked.txt"]).status.success());
-        assert!(run_git(&repo, &["commit", "-m", "initial"]).status.success());
+        assert!(
+            run_git(&repo, &["commit", "-m", "initial"])
+                .status
+                .success()
+        );
 
         let base_ref = String::from_utf8_lossy(&run_git(&repo, &["rev-parse", "HEAD"]).stdout)
             .trim()
             .to_string();
 
         std::fs::write(&tracked, "v2\n").unwrap();
-        assert!(run_git(&repo, &["commit", "-am", "second"]).status.success());
+        assert!(
+            run_git(&repo, &["commit", "-am", "second"])
+                .status
+                .success()
+        );
         std::fs::write(&tracked, "v3\n").unwrap();
         assert!(run_git(&repo, &["commit", "-am", "third"]).status.success());
 
@@ -4360,7 +4847,12 @@ mod tests {
             std::env::set_var("AGORA_AGENT_ID", "alice");
         }
 
-        let room = store::add_room("ag-sign-mismatch", "secret-sign-mismatch", "sign-mismatch", Role::Admin);
+        let room = store::add_room(
+            "ag-sign-mismatch",
+            "secret-sign-mismatch",
+            "sign-mismatch",
+            Role::Admin,
+        );
         let room_key = crypto::derive_room_key(&room.secret, &room.room_id);
 
         let trusted_env = make_envelope("trusted", None);
@@ -4376,7 +4868,8 @@ mod tests {
         });
         let plaintext = serde_json::to_string(&forged_env).unwrap();
         let (enc_key, _) = crypto::derive_message_keys(&room_key);
-        let blob = crypto::encrypt(plaintext.as_bytes(), &enc_key, room.room_id.as_bytes()).unwrap();
+        let blob =
+            crypto::encrypt(plaintext.as_bytes(), &enc_key, room.room_id.as_bytes()).unwrap();
         let payload = BASE64.encode(&blob);
 
         let alt_pkcs8 = crypto::generate_signing_keypair_pkcs8().unwrap();
@@ -4389,17 +4882,23 @@ mod tests {
             payload,
             signing_pubkey: alt_pubkey,
             sig,
-        }).unwrap();
+        })
+        .unwrap();
 
         let warning = decrypt_payload(&forged_wire, &room_key, &room.room_id).unwrap();
         assert_eq!(warning["type"].as_str(), Some("auth_warning"));
         assert_eq!(warning["from"].as_str(), Some("[auth]"));
         assert_eq!(warning["sender"].as_str(), Some("alice"));
-        assert_eq!(warning["auth_reason"].as_str(), Some("signing_key_mismatch"));
-        assert!(warning["text"]
-            .as_str()
-            .unwrap_or("")
-            .contains("signing key"));
+        assert_eq!(
+            warning["auth_reason"].as_str(),
+            Some("signing_key_mismatch")
+        );
+        assert!(
+            warning["text"]
+                .as_str()
+                .unwrap_or("")
+                .contains("signing key")
+        );
     }
 
     #[test]
@@ -4429,10 +4928,12 @@ pub fn search(
     let msgs = store::load_messages(&room.room_id, 604800);
 
     let re = if use_regex {
-        Some(regex::RegexBuilder::new(query)
-            .case_insensitive(true)
-            .build()
-            .map_err(|e| format!("Invalid regex: {e}"))?)
+        Some(
+            regex::RegexBuilder::new(query)
+                .case_insensitive(true)
+                .build()
+                .map_err(|e| format!("Invalid regex: {e}"))?,
+        )
     } else {
         None
     };
@@ -4487,11 +4988,7 @@ fn resolve_message_id(msgs: &[serde_json::Value], needle: &str) -> Result<String
         1 => Ok(matches[0].clone()),
         _ => Err(format!(
             "Message ID '{needle}' is ambiguous: {}",
-            matches
-                .into_iter()
-                .take(5)
-                .collect::<Vec<_>>()
-                .join(", ")
+            matches.into_iter().take(5).collect::<Vec<_>>().join(", ")
         )),
     }
 }
@@ -4640,7 +5137,9 @@ pub fn daemon(room_label: Option<&str>) -> Result<u32, String> {
     // Kill existing daemon if running
     if let Ok(pid_str) = std::fs::read_to_string(&pid_path) {
         if let Ok(pid) = pid_str.trim().parse::<i32>() {
-            unsafe { libc::kill(pid, libc::SIGTERM); }
+            unsafe {
+                libc::kill(pid, libc::SIGTERM);
+            }
         }
         let _ = std::fs::remove_file(&pid_path);
     }
@@ -4661,7 +5160,9 @@ pub fn daemon(room_label: Option<&str>) -> Result<u32, String> {
     }
 
     // Child — daemon process
-    unsafe { libc::setsid(); }
+    unsafe {
+        libc::setsid();
+    }
 
     let room_key = crypto::derive_room_key(&secret, &room_id);
     let me = store::get_agent_id();
@@ -4726,7 +5227,9 @@ pub fn stop_daemon(room_label: Option<&str>) -> Result<(), String> {
     let pid_path = store::daemon_pid_path(&room.room_id);
     if let Ok(pid_str) = std::fs::read_to_string(&pid_path) {
         if let Ok(pid) = pid_str.trim().parse::<i32>() {
-            unsafe { libc::kill(pid, libc::SIGTERM); }
+            unsafe {
+                libc::kill(pid, libc::SIGTERM);
+            }
             let _ = std::fs::remove_file(pid_path);
             return Ok(());
         }
@@ -4737,8 +5240,8 @@ pub fn stop_daemon(room_label: Option<&str>) -> Result<(), String> {
 pub fn verify(room_label: Option<&str>) -> Result<serde_json::Value, String> {
     let room = resolve_room(room_label)?;
     let room_key = crypto::derive_room_key(&room.secret, &room.room_id);
-    let (nonce, commitment) = crypto::zkp_create_commitment(&room_key)
-        .map_err(|e| e.to_string())?;
+    let (nonce, commitment) =
+        crypto::zkp_create_commitment(&room_key).map_err(|e| e.to_string())?;
     let challenge = crypto::zkp_create_challenge().map_err(|e| e.to_string())?;
     let response = crypto::zkp_respond(&room_key, &nonce, &challenge);
     let valid = crypto::zkp_verify(&room_key, &nonce, &challenge, &response);
@@ -4766,20 +5269,44 @@ fn parse_since(since: &str) -> u64 {
 }
 
 /// Transfer credits between agents.
-pub fn credit_transfer(to_agent: &str, amount: i64, reason: Option<&str>, room_label: Option<&str>) -> Result<(i64, i64), String> {
+pub fn credit_transfer(
+    to_agent: &str,
+    amount: i64,
+    reason: Option<&str>,
+    room_label: Option<&str>,
+) -> Result<(i64, i64), String> {
     let room = resolve_room(room_label)?;
     let me = store::get_agent_id();
-    if me == to_agent { return Err("Cannot transfer to yourself.".to_string()); }
+    if me == to_agent {
+        return Err("Cannot transfer to yourself.".to_string());
+    }
     let balance = store::credit_balance(&room.room_id, &me);
-    if balance < amount { return Err(format!("Insufficient credits: have {balance}, need {amount}")); }
+    if balance < amount {
+        return Err(format!(
+            "Insufficient credits: have {balance}, need {amount}"
+        ));
+    }
     let reason_str = reason.unwrap_or("transfer");
-    store::credit_add(&room.room_id, &me, -amount, &format!("sent to {to_agent}: {reason_str}"));
-    store::credit_add(&room.room_id, to_agent, amount, &format!("received from {me}: {reason_str}"));
+    store::credit_add(
+        &room.room_id,
+        &me,
+        -amount,
+        &format!("sent to {to_agent}: {reason_str}"),
+    );
+    store::credit_add(
+        &room.room_id,
+        to_agent,
+        amount,
+        &format!("received from {me}: {reason_str}"),
+    );
     let my_balance = store::credit_balance(&room.room_id, &me);
     let their_balance = store::credit_balance(&room.room_id, to_agent);
 
     let room_key = crypto::derive_room_key(&room.secret, &room.room_id);
-    let env = make_envelope(&format!("[transfer] {me} → {to_agent}: {amount} credits ({reason_str})"), None);
+    let env = make_envelope(
+        &format!("[transfer] {me} → {to_agent}: {amount} credits ({reason_str})"),
+        None,
+    );
     let encrypted = encrypt_envelope(&env, &room_key, &room.room_id);
     transport::publish(&room.room_id, &encrypted);
     store::save_message(&room.room_id, &env);
