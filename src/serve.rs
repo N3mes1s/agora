@@ -10,6 +10,7 @@
 use std::io::{Read as IoRead, Write as IoWrite};
 use std::net::{TcpListener, TcpStream};
 use std::thread;
+use crate::sandbox;
 use std::time::Duration;
 
 use crate::{chat, store};
@@ -724,6 +725,11 @@ fn render_404(label: &str) -> String {
 
 // ── HTTP primitives ──────────────────────────────────────────────
 
+fn send_json(stream: TcpStream, code: u16, body: &str) {
+    let status = match code { 200 => "200 OK", 400 => "400 Bad Request", _ => "500 Internal Server Error" };
+    send_response(stream, status, "application/json", body);
+}
+
 fn send_response(mut stream: TcpStream, status: &str, content_type: &str, body: &str) {
     let resp = format!(
         "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
@@ -913,6 +919,55 @@ fn handle_connection(stream: TcpStream) {
             let resp = "HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
             let mut s = stream;
             let _ = s.write_all(resp.as_bytes());
+        }
+
+        // POST /api/sandbox/create — create a sandbox (proxy to Daytona/E2B)
+        ("POST", ["api", "sandbox", "create"]) => {
+            let agent_id = form_field(body, "agent_id").unwrap_or_default();
+            if agent_id.is_empty() {
+                send_json(stream, 400, r#"{"error":"agent_id required"}"#);
+                return;
+            }
+            match sandbox::create(&agent_id) {
+                Ok(session) => {
+                    let resp = serde_json::json!({
+                        "id": session.id,
+                        "provider": session.provider,
+                        "status": session.status,
+                    });
+                    send_json(stream, 200, &resp.to_string());
+                }
+                Err(e) => send_json(stream, 500, &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'"))),
+            }
+        }
+
+        // POST /api/sandbox/exec — execute command in sandbox
+        ("POST", ["api", "sandbox", "exec"]) => {
+            let session_id = form_field(body, "session_id").unwrap_or_default();
+            let command = form_field(body, "command").unwrap_or_default();
+            let provider = form_field(body, "provider").unwrap_or_else(|| "daytona".to_string());
+            if session_id.is_empty() || command.is_empty() {
+                send_json(stream, 400, r#"{"error":"session_id and command required"}"#);
+                return;
+            }
+            match sandbox::exec(&session_id, &command, &provider) {
+                Ok(output) => send_json(stream, 200, &serde_json::json!({"output": output}).to_string()),
+                Err(e) => send_json(stream, 500, &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'"))),
+            }
+        }
+
+        // DELETE /api/sandbox/:id — destroy sandbox
+        ("POST", ["api", "sandbox", "destroy"]) => {
+            let session_id = form_field(body, "session_id").unwrap_or_default();
+            let provider = form_field(body, "provider").unwrap_or_else(|| "daytona".to_string());
+            if session_id.is_empty() {
+                send_json(stream, 400, r#"{"error":"session_id required"}"#);
+                return;
+            }
+            match sandbox::destroy(&session_id, &provider) {
+                Ok(()) => send_json(stream, 200, r#"{"status":"destroyed"}"#),
+                Err(e) => send_json(stream, 500, &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'"))),
+            }
         }
 
         _ => {
