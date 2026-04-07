@@ -1754,6 +1754,72 @@ pub fn bounty_submit(task_id: &str, branch: &str, room_label: Option<&str>) -> R
     let room = resolve_room(room_label)?;
     let me = store::get_agent_id();
     let mut tasks = store::load_tasks(&room.room_id);
+
+    // If task not found locally, reconstruct from bounty messages (cross-session support)
+    if !tasks.iter().any(|t| t.id.starts_with(task_id)) {
+        let msgs = store::load_messages(&room.room_id, 604800);
+        for msg in &msgs {
+            let text = msg["text"].as_str().unwrap_or("");
+            if msg["type"].as_str() == Some("bounty") {
+                // Bounty message id matches task_id prefix
+                let msg_id = msg["id"].as_str().unwrap_or("");
+                if msg_id.starts_with(task_id) || msg_id[..6.min(msg_id.len())] == task_id[..6.min(task_id.len())] {
+                    if !tasks.iter().any(|t| t.id.starts_with(task_id)) {
+                        let title = msg["title"].as_str().unwrap_or(text).to_string();
+                        let oracle = msg["acceptance_oracle"].as_str().map(|s| s.to_string());
+                        let reward_credits = msg["reward_credits"].as_i64();
+                        let reward_trust = msg["reward_trust"].as_i64();
+                        tasks.push(store::Task {
+                            id: msg_id.to_string(),
+                            title,
+                            status: "open".to_string(),
+                            created_by: msg["from"].as_str().unwrap_or("?").to_string(),
+                            claimed_by: None,
+                            created_at: msg["ts"].as_u64().unwrap_or(0),
+                            updated_at: msg["ts"].as_u64().unwrap_or(0),
+                            notes: None,
+                            acceptance_oracle: oracle,
+                            reward_credits,
+                            reward_trust,
+                            submissions: vec![],
+                        });
+                        store::save_tasks(&room.room_id, &tasks);
+                        break;
+                    }
+                }
+            } else if text.starts_with("[bounty P") {
+                // Fallback: parse text format "[bounty P3] title [reward: N credits] (id: XXXXXX)"
+                if let Some(id_start) = text.rfind("(id: ") {
+                    let id_in_msg = &text[id_start + 5..text.len() - 1];
+                    if id_in_msg.starts_with(task_id) || task_id.starts_with(id_in_msg) {
+                        if !tasks.iter().any(|t| t.id.starts_with(task_id)) {
+                            // Extract title (between "] " and " [reward:" or " (id:")
+                            let after_bracket = text.find("] ").map(|i| &text[i + 2..]).unwrap_or(text);
+                            let title_end = after_bracket.find(" [reward:").or_else(|| after_bracket.find(" (id:")).unwrap_or(after_bracket.len());
+                            let title = after_bracket[..title_end].to_string();
+                            tasks.push(store::Task {
+                                id: id_in_msg.to_string(),
+                                title,
+                                status: "open".to_string(),
+                                created_by: msg["from"].as_str().unwrap_or("?").to_string(),
+                                claimed_by: None,
+                                created_at: msg["ts"].as_u64().unwrap_or(0),
+                                updated_at: msg["ts"].as_u64().unwrap_or(0),
+                                notes: None,
+                                acceptance_oracle: None,
+                                reward_credits: None,
+                                reward_trust: None,
+                                submissions: vec![],
+                            });
+                            store::save_tasks(&room.room_id, &tasks);
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     let task = tasks.iter_mut()
         .find(|t| t.id.starts_with(task_id))
         .ok_or_else(|| format!("No task matching '{task_id}'"))?;
@@ -3022,12 +3088,26 @@ pub fn seed_verify(seed_id: &str, answer: &str, room_label: Option<&str>) -> Res
 
     publish_task_receipt(&room, &task, &me, "done", task.notes.as_deref(), task.updated_at);
 
+    // Award credits based on difficulty
+    let credit_reward: i64 = match seed_snapshot.difficulty.as_str() {
+        "medium" => 5,
+        "hard" => 25,
+        _ => 1, // easy
+    };
+    store::credit_add(
+        &room.room_id,
+        &me,
+        credit_reward,
+        &format!("seed solved: {} ({})", seed_snapshot.title, seed_snapshot.difficulty),
+    );
+
     let room_key = crypto::derive_room_key(&room.secret, &room.room_id);
     let msg = format!(
-        "[seed] {} solved calibration seed [{}]: {} — receipt issued",
+        "[seed] {} solved calibration seed [{}]: {} — receipt issued (+{} credits)",
         me,
         &seed_snapshot.id[..8],
-        seed_snapshot.title
+        seed_snapshot.title,
+        credit_reward,
     );
     let env = make_envelope(&msg, None);
     let encrypted = encrypt_envelope(&env, &room_key, &room.room_id);
