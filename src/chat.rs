@@ -1787,6 +1787,11 @@ pub fn bounty_submit(task_id: &str, branch: &str, room_label: Option<&str>) -> R
         .find(|t| t.id.starts_with(task_id))
         .ok_or_else(|| format!("No task matching '{task_id}'"))?;
 
+    // Prevent bounty poster from submitting to their own bounty (anti-self-dealing)
+    if task.created_by == me {
+        return Err(format!("Agent {me} cannot submit to their own bounty (self-dealing not permitted)"));
+    }
+
     // Prevent duplicate submissions from same agent
     if task.submissions.iter().any(|s| s.agent_id == me) {
         return Err(format!("Agent {me} already submitted to task {task_id}"));
@@ -4053,7 +4058,7 @@ mod tests {
         role_heartbeat, role_release, payment_complete_solana_deposit,
         seed_plaza_rate_limit_state, send_watch_heartbeat,
         should_display_message, signing_message_bytes, soma_churn_decay, soma_correct,
-        bounty_verify, stale_claim_weight, task_add, task_add_with_oracle,
+        bounty_submit, bounty_verify, stale_claim_weight, task_add, task_add_with_oracle,
         task_checkpoint, task_done, unpin,
         verified_solana_deposit_from_tx, SignedWirePayload, VerifiedSolanaDeposit,
         SIGNED_WIRE_VERSION, BASE64, DISCOVERY_POSITIVE_HALF_LIFE_SECS,
@@ -4908,6 +4913,37 @@ mod tests {
         let _ = std::process::Command::new("git")
             .args(["branch", "-D", &branch])
             .output();
+    }
+
+    /// Verify that a bounty poster cannot submit to their own bounty (anti-self-dealing).
+    #[test]
+    fn bounty_submit_rejects_self_dealing() {
+        let _guard = store::test_env_lock().lock().unwrap();
+        let poster_id = "bounty-poster-self";
+        let (_home, room) = setup_plaza_room(poster_id, Role::Admin);
+
+        // Poster creates a task directly (simulating bounty_post).
+        let task_id = task_add_with_oracle("Self-deal test task", None, Some(50), None, None).unwrap();
+
+        // The poster tries to submit to their own bounty.
+        let result = bounty_submit(&task_id, "some-branch", None);
+        assert!(
+            result.is_err(),
+            "bounty_submit must reject self-dealing (poster submitting to own bounty)"
+        );
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("self-dealing not permitted"),
+            "error message must mention self-dealing, got: {err}"
+        );
+
+        // Confirm no submission was recorded.
+        let tasks = store::load_tasks(&room.room_id);
+        let task = tasks.iter().find(|t| t.id == task_id).unwrap();
+        assert!(
+            task.submissions.is_empty(),
+            "no submission should be recorded for self-dealing attempt"
+        );
     }
 }
 
