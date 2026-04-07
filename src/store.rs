@@ -869,6 +869,93 @@ pub fn save_tasks(room_id: &str, tasks: &[Task]) {
     let _ = fs::write(dir.join("tasks.json"), data);
 }
 
+// ── Role Leases ────────────────────────────────────────────────
+
+/// A persistent specialist role lease. Agents claim a role for a TTL; the role is
+/// released on shutdown or expires automatically so another agent can claim it.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct RoleLease {
+    pub role: String,
+    pub agent_id: String,
+    pub expires_at: u64,
+    pub last_heartbeat: u64,
+    pub context_summary: String,
+}
+
+fn role_leases_path() -> std::path::PathBuf {
+    agora_dir().join("role_leases.json")
+}
+
+pub fn load_role_leases() -> Vec<RoleLease> {
+    let path = role_leases_path();
+    if let Ok(data) = fs::read_to_string(&path) {
+        serde_json::from_str(&data).unwrap_or_default()
+    } else {
+        Vec::new()
+    }
+}
+
+pub fn save_role_leases(leases: &[RoleLease]) {
+    let data = serde_json::to_string_pretty(leases).unwrap();
+    let _ = fs::write(role_leases_path(), data);
+}
+
+/// Claim a role for `ttl_secs`. Returns Err if a non-expired lease already exists.
+pub fn role_claim(role: &str, agent_id: &str, ttl_secs: u64, now_ts: u64) -> Result<(), String> {
+    let mut leases = load_role_leases();
+    // Remove expired leases for this role
+    leases.retain(|l| l.role != role || l.expires_at > now_ts);
+    if leases.iter().any(|l| l.role == role) {
+        let holder = leases.iter().find(|l| l.role == role).unwrap();
+        return Err(format!("Role '{}' held by {} until {}", role, holder.agent_id, holder.expires_at));
+    }
+    leases.push(RoleLease {
+        role: role.to_string(),
+        agent_id: agent_id.to_string(),
+        expires_at: now_ts + ttl_secs,
+        last_heartbeat: now_ts,
+        context_summary: String::new(),
+    });
+    save_role_leases(&leases);
+    Ok(())
+}
+
+/// Extend a role lease and update context summary.
+pub fn role_heartbeat(role: &str, agent_id: &str, ttl_secs: u64, context: &str, now_ts: u64) -> Result<(), String> {
+    let mut leases = load_role_leases();
+    let lease = leases.iter_mut()
+        .find(|l| l.role == role && l.agent_id == agent_id)
+        .ok_or_else(|| format!("No active lease for role '{}' by agent '{}'", role, agent_id))?;
+    lease.expires_at = now_ts + ttl_secs;
+    lease.last_heartbeat = now_ts;
+    lease.context_summary = context.to_string();
+    save_role_leases(&leases);
+    Ok(())
+}
+
+/// Release a role lease and store final context summary.
+pub fn role_release(role: &str, agent_id: &str, context: &str) -> Result<(), String> {
+    let mut leases = load_role_leases();
+    let pos = leases.iter().position(|l| l.role == role && l.agent_id == agent_id)
+        .ok_or_else(|| format!("No active lease for role '{}' by agent '{}'", role, agent_id))?;
+    let mut lease = leases.remove(pos);
+    // Keep as expired tombstone so next agent can read context_summary
+    lease.expires_at = 0;
+    lease.context_summary = context.to_string();
+    leases.push(lease);
+    save_role_leases(&leases);
+    Ok(())
+}
+
+/// Get context summary from the last agent who held a role (even if expired).
+pub fn role_last_context(role: &str) -> Option<String> {
+    let leases = load_role_leases();
+    leases.iter()
+        .filter(|l| l.role == role)
+        .max_by_key(|l| l.last_heartbeat)
+        .map(|l| l.context_summary.clone())
+}
+
 // ── Calibration Seeds ──────────────────────────────────────────
 
 /// A calibration seed: a self-verifiable puzzle for trust bootstrapping.
