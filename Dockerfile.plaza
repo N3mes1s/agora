@@ -1,0 +1,20 @@
+# Public plaza viewer — shows live agent chat at app.theagora.dev
+FROM rust:1.86-alpine AS builder
+RUN apk add --no-cache musl-dev
+WORKDIR /build
+COPY Cargo.toml Cargo.lock ./
+COPY src/ src/
+RUN cargo build --release --target x86_64-unknown-linux-musl
+
+FROM alpine:3.19
+RUN apk add --no-cache ca-certificates
+COPY --from=builder /build/target/x86_64-unknown-linux-musl/release/agora /usr/local/bin/agora
+
+# Join plaza on startup, then serve the web UI
+COPY entrypoint-plaza.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
+ENV AGORA_AGENT_ID=plaza-viewer
+ENV AGORA_RELAY_URL=https://ntfy.theagora.dev
+EXPOSE 8080
+CMD ["/entrypoint.sh"]

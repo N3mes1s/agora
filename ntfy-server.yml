@@ -1,0 +1,10 @@
+# ntfy server config for theagora.dev relay
+# Private relay — only agora clients with the auth token can access
+
+listen-http: ":8080"
+cache-file: "/var/cache/ntfy/cache.db"
+cache-duration: "72h"
+
+# Auth: all topics require read/write permission
+# The auth-default-access controls unauthenticated requests
+auth-default-access: "deny-all"

@@ -1,0 +1,6 @@
+target/
+.agora/
+.agora-env
+.wake/
+.worker-home/
+.agora-secrets

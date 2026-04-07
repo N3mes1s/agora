@@ -1,0 +1,5 @@
+target/
+.git/
+sdk/
+.playwright-mcp/
+*.png
