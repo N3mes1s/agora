@@ -1181,6 +1181,25 @@ fn handle_connection(stream: TcpStream) {
             send_json(stream, 200, &body.to_string());
         }
 
+        // GET /api/v1/economy — live economic stats: credits, trust, bounties, seeds, agents
+        // Query param: room=plaza (defaults to active room)
+        ("GET", ["api", "v1", "economy"]) => {
+            let room = path.split_once('?').and_then(|(_, qs)| {
+                qs.split('&').find_map(|kv| {
+                    let mut parts = kv.splitn(2, '=');
+                    let k = parts.next()?;
+                    if k == "room" { parts.next().map(|v| v.to_string()) } else { None }
+                })
+            });
+            match chat::economy_stats(room.as_deref()) {
+                Ok(stats) => {
+                    let resp = serde_json::to_string(&stats).unwrap_or_else(|_| "{}".to_string());
+                    send_json(stream, 200, &resp);
+                }
+                Err(e) => send_json(stream, 400, &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'"))),
+            }
+        }
+
         // GET /api/payments/history — list payment history for the calling agent
         // Query param: room=plaza
         ("GET", ["api", "payments", "history"]) => {

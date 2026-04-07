@@ -3072,6 +3072,62 @@ pub fn seed_list(room_label: Option<&str>) -> Result<Vec<store::CalibrationSeed>
     Ok(store::load_seeds(&room.room_id))
 }
 
+/// Aggregate live economic statistics across all known rooms.
+pub fn economy_stats(room_label: Option<&str>) -> Result<serde_json::Value, String> {
+    let room = resolve_room(room_label)?;
+    let ledger = store::load_ledger(&room.room_id);
+
+    // Total credits and trust in circulation (positive entries only)
+    let total_credits: i64 = ledger.iter()
+        .filter(|e| e.ledger.is_empty() || e.ledger == "credit")
+        .filter(|e| e.amount > 0)
+        .map(|e| e.amount)
+        .sum();
+    let total_trust: i64 = ledger.iter()
+        .filter(|e| e.ledger == "trust")
+        .filter(|e| e.amount > 0)
+        .map(|e| e.amount)
+        .sum();
+
+    // Unique agents with any ledger activity
+    let mut agents_with_balance: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    for e in &ledger {
+        agents_with_balance.insert(&e.agent_id);
+    }
+    let agents_active = agents_with_balance.len();
+
+    // Scan messages for bounties and seeds
+    let msgs = store::load_messages(&room.room_id, 604800);
+    let mut bounties_posted: u64 = 0;
+    let mut bounties_paid: u64 = 0;
+    let mut seeds_solved: u64 = 0;
+
+    for msg in &msgs {
+        let text = msg["text"].as_str().unwrap_or("");
+        if msg["type"].as_str() == Some("bounty") {
+            bounties_posted += 1;
+        }
+        if text.contains("[bounty reward]") || text.contains("[bounty verify] PASS") {
+            if text.contains("[bounty reward]") {
+                bounties_paid += 1;
+            }
+        }
+        if text.contains("solved calibration seed") && text.contains("receipt issued") {
+            seeds_solved += 1;
+        }
+    }
+
+    Ok(serde_json::json!({
+        "total_credits_in_circulation": total_credits,
+        "total_trust_ledger": total_trust,
+        "bounties_posted": bounties_posted,
+        "bounties_paid": bounties_paid,
+        "agents_active": agents_active,
+        "seeds_solved": seeds_solved,
+        "room": room.label,
+    }))
+}
+
 /// List tasks — merges local state with room messages for cloud agents.
 pub fn task_list(room_label: Option<&str>) -> Result<Vec<store::Task>, String> {
     let room = resolve_room(room_label)?;
@@ -4053,7 +4109,7 @@ mod tests {
         role_heartbeat, role_release, payment_complete_solana_deposit,
         seed_plaza_rate_limit_state, send_watch_heartbeat,
         should_display_message, signing_message_bytes, soma_churn_decay, soma_correct,
-        bounty_verify, stale_claim_weight, task_add, task_add_with_oracle,
+        bounty_verify, economy_stats, stale_claim_weight, task_add, task_add_with_oracle,
         task_checkpoint, task_done, unpin,
         verified_solana_deposit_from_tx, SignedWirePayload, VerifiedSolanaDeposit,
         SIGNED_WIRE_VERSION, BASE64, DISCOVERY_POSITIVE_HALF_LIFE_SECS,
@@ -4908,6 +4964,44 @@ mod tests {
         let _ = std::process::Command::new("git")
             .args(["branch", "-D", &branch])
             .output();
+    }
+
+    /// economy_stats returns correct aggregate counts over ledger + messages.
+    #[test]
+    fn economy_stats_returns_correct_aggregates() {
+        let _guard = store::test_env_lock().lock().unwrap();
+        let agent_id = "econ-stats-agent";
+        let (_home, room) = setup_plaza_room(agent_id, Role::Admin);
+
+        // Seed the ledger with credits and trust.
+        store::credit_add(&room.room_id, agent_id, 50, "bounty reward: task abc");
+        store::credit_add(&room.room_id, "other-agent", 25, "bounty reward: task xyz");
+        store::trust_add(&room.room_id, agent_id, 3, "seed solved", "calibration");
+
+        let stats = economy_stats(None).expect("economy_stats should succeed");
+
+        // Total credits = 50 + 25 = 75
+        assert_eq!(
+            stats["total_credits_in_circulation"],
+            75,
+            "total credits should sum all positive credit entries"
+        );
+        // Total trust = 3
+        assert_eq!(
+            stats["total_trust_ledger"],
+            3,
+            "total trust should sum all positive trust entries"
+        );
+        // 2 distinct agents have ledger entries
+        assert_eq!(
+            stats["agents_active"],
+            2,
+            "agents_active should count distinct agents in ledger"
+        );
+        // No messages yet — bounties and seeds are 0
+        assert_eq!(stats["bounties_posted"], 0);
+        assert_eq!(stats["bounties_paid"], 0);
+        assert_eq!(stats["seeds_solved"], 0);
     }
 }
 
