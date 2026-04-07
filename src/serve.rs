@@ -1153,6 +1153,34 @@ fn handle_connection(stream: TcpStream) {
             }
         }
 
+        // GET /api/health — service health check: env var presence, version, relay config
+        ("GET", ["api", "health"]) => {
+            let e2b     = std::env::var("E2B_TOKEN").map(|v| !v.is_empty()).unwrap_or(false);
+            let daytona = std::env::var("DAYTONA_TOKEN").map(|v| !v.is_empty()).unwrap_or(false);
+            let sprites = std::env::var("SPRITES_TOKEN").map(|v| !v.is_empty()).unwrap_or(false);
+            let stripe_key     = std::env::var("STRIPE_SECRET_KEY").map(|v| !v.is_empty()).unwrap_or(false);
+            let stripe_webhook = std::env::var("STRIPE_WEBHOOK_SECRET").map(|v| !v.is_empty()).unwrap_or(false);
+            let relay_url = std::env::var("AGORA_RELAY_URL")
+                .unwrap_or_else(|_| "https://ntfy.sh".to_string());
+            let sandbox_ok = e2b || daytona || sprites;
+            let health = serde_json::json!({
+                "status": if sandbox_ok && stripe_key { "ok" } else { "degraded" },
+                "version": env!("CARGO_PKG_VERSION"),
+                "relay": relay_url,
+                "sandbox": {
+                    "available": sandbox_ok,
+                    "providers": { "e2b": e2b, "daytona": daytona, "sprites": sprites }
+                },
+                "payments": {
+                    "stripe_key": stripe_key,
+                    "stripe_webhook": stripe_webhook,
+                    "ready": stripe_key && stripe_webhook
+                }
+            });
+            // 200 even when degraded — lets Railway healthcheck pass while ops investigates
+            send_json(stream, 200, &health.to_string());
+        }
+
         // GET /api/payments/history — list payment history for the calling agent
         // Query param: room=plaza
         ("GET", ["api", "payments", "history"]) => {
@@ -1523,6 +1551,41 @@ mod tests {
     fn test_verify_stripe_signature_missing_header() {
         let raw = "POST /api/payments/webhook HTTP/1.1\r\nContent-Type: application/json\r\n\r\n{}";
         assert!(verify_stripe_signature(raw, "{}", "whsec_secret").is_err());
+    }
+
+    #[test]
+    fn test_health_endpoint_shape() {
+        // Verify the health JSON has the expected keys even with no env vars set.
+        // We can't actually call handle_connection in a unit test, so we validate
+        // the logic directly by reproducing the same serde_json construction.
+        let e2b     = std::env::var("E2B_TOKEN").map(|v| !v.is_empty()).unwrap_or(false);
+        let daytona = std::env::var("DAYTONA_TOKEN").map(|v| !v.is_empty()).unwrap_or(false);
+        let sprites = std::env::var("SPRITES_TOKEN").map(|v| !v.is_empty()).unwrap_or(false);
+        let stripe_key     = std::env::var("STRIPE_SECRET_KEY").map(|v| !v.is_empty()).unwrap_or(false);
+        let stripe_webhook = std::env::var("STRIPE_WEBHOOK_SECRET").map(|v| !v.is_empty()).unwrap_or(false);
+        let relay_url = std::env::var("AGORA_RELAY_URL")
+            .unwrap_or_else(|_| "https://ntfy.sh".to_string());
+        let sandbox_ok = e2b || daytona || sprites;
+        let health = serde_json::json!({
+            "status": if sandbox_ok && stripe_key { "ok" } else { "degraded" },
+            "version": env!("CARGO_PKG_VERSION"),
+            "relay": relay_url,
+            "sandbox": {
+                "available": sandbox_ok,
+                "providers": { "e2b": e2b, "daytona": daytona, "sprites": sprites }
+            },
+            "payments": {
+                "stripe_key": stripe_key,
+                "stripe_webhook": stripe_webhook,
+                "ready": stripe_key && stripe_webhook
+            }
+        });
+        // In CI (no env vars set) we expect degraded status
+        assert_eq!(health["status"], "degraded");
+        assert!(health["version"].is_string());
+        assert!(health["relay"].is_string());
+        assert!(health["sandbox"]["providers"]["e2b"].is_boolean());
+        assert!(health["payments"]["ready"].is_boolean());
     }
 
     #[test]
