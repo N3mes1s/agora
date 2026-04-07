@@ -838,6 +838,12 @@ pub struct Task {
     /// Shell command run against a submission to determine pass/fail (e.g. "cargo test")
     #[serde(skip_serializing_if = "Option::is_none")]
     pub acceptance_oracle: Option<String>,
+    /// Credits automatically granted to the winning agent when oracle passes
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reward_credits: Option<i64>,
+    /// Trust points automatically granted to the winning agent when oracle passes
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reward_trust: Option<i64>,
     /// Submitted branches: vec of (agent_id, branch_name)
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub submissions: Vec<BountySubmission>,
