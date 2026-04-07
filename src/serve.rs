@@ -6,6 +6,8 @@
 //!   GET  /:room/thread/:id — thread view rooted at one cached message
 //!   GET  /:room/events — SSE stream (new messages as HTML fragments)
 //!   POST /:room/send   — send a message, redirect back
+//!   GET  /api/v1/seeds — list calibration seeds (JSON, no answer hashes)
+//!   POST /api/v1/seeds/solve — submit an answer {seed_id, answer, room?}
 
 use std::io::{Read as IoRead, Write as IoWrite};
 use std::net::{TcpListener, TcpStream};
@@ -1200,6 +1202,59 @@ fn handle_connection(stream: TcpStream) {
             }
         }
 
+        // GET /api/v1/seeds — list calibration seeds across all joined rooms.
+        // Optional query param: room=<label> to filter to one room.
+        // Returns JSON array sorted newest-first. Does NOT reveal answer hashes.
+        ("GET", ["api", "v1", "seeds"]) => {
+            let seeds = chat::seeds_for_api();
+            // Optional room filter.
+            let filter_room: Option<String> = path.split_once('?').and_then(|(_, qs)| {
+                qs.split('&').find_map(|kv| {
+                    let mut parts = kv.splitn(2, '=');
+                    let k = parts.next()?;
+                    if k == "room" { parts.next().map(|v| url_decode(v)) } else { None }
+                })
+            });
+            let filtered: Vec<_> = if let Some(ref label) = filter_room {
+                seeds.into_iter().filter(|s| s["room"].as_str() == Some(label.as_str())).collect()
+            } else {
+                seeds
+            };
+            let resp = serde_json::to_string(&filtered).unwrap_or_else(|_| "[]".to_string());
+            send_json(stream, 200, &resp);
+        }
+
+        // POST /api/v1/seeds/solve — submit an answer to a calibration seed.
+        // JSON body: {"seed_id": "b16707a0", "answer": "aroga", "room": "plaza"}
+        // "room" is optional; uses the active room if omitted.
+        // Returns: {"solved": true, "credits_earned": 0, "message": "..."}
+        ("POST", ["api", "v1", "seeds", "solve"]) => {
+            let parsed: serde_json::Value = match serde_json::from_str(body) {
+                Ok(v) => v,
+                Err(_) => { send_json(stream, 400, r#"{"error":"invalid JSON body"}"#); return; }
+            };
+            let seed_id = match parsed["seed_id"].as_str() {
+                Some(s) if !s.is_empty() => s.to_string(),
+                _ => { send_json(stream, 400, r#"{"error":"seed_id required"}"#); return; }
+            };
+            let answer = match parsed["answer"].as_str() {
+                Some(s) if !s.is_empty() => s.to_string(),
+                _ => { send_json(stream, 400, r#"{"error":"answer required"}"#); return; }
+            };
+            let room = parsed["room"].as_str().map(|s| s.to_string());
+            match chat::seed_solve_api(&seed_id, &answer, room.as_deref()) {
+                Ok((solved, credits, msg)) => {
+                    let resp = serde_json::json!({
+                        "solved": solved,
+                        "credits_earned": credits,
+                        "message": msg,
+                    });
+                    send_json(stream, 200, &resp.to_string());
+                }
+                Err(e) => send_json(stream, 400, &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'"))),
+            }
+        }
+
         _ => {
             send_response(
                 stream,
@@ -1608,5 +1663,66 @@ mod tests {
         assert_eq!(body["payments"]["ready"], false);
         // Version field must be present and non-empty
         assert!(!body["version"].as_str().unwrap_or("").is_empty());
+    }
+
+    #[test]
+    fn seeds_api_returns_valid_json_array() {
+        // seeds_for_api() always returns a JSON array; no rooms joined = empty array.
+        let seeds = chat::seeds_for_api();
+        // Must be an array (even if empty).
+        let json_str = serde_json::to_string(&seeds).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json_str).unwrap();
+        assert!(parsed.is_array());
+    }
+
+    #[test]
+    fn seed_solve_api_rejects_unknown_seed() {
+        // Trying to solve a non-existent seed should return an Err.
+        let result = chat::seed_solve_api("deadbeef", "anything", None);
+        assert!(result.is_err());
+        let msg = result.unwrap_err();
+        assert!(msg.contains("deadbeef") || msg.contains("No calibration seed") || msg.contains("active room"));
+    }
+
+    #[test]
+    fn seeds_api_fields_present_when_seeds_exist() {
+        use store::*;
+        let _lock = test_env_lock().lock().unwrap();
+        let dir = temp_home_dir();
+        unsafe { std::env::set_var("HOME", &dir); }
+
+        // Create a room and plant a seed directly.
+        let room_id = "testseedapi00000000000000000000000000000000000000000000000000000000";
+        let room = add_room(room_id, "testsecret", "testseedroom", Role::Member);
+        let seed = CalibrationSeed {
+            id: "abcdef1234567890".to_string(),
+            title: "Test Puzzle".to_string(),
+            puzzle: "What is 1+1?".to_string(),
+            answer_hash: "correct_hash".to_string(),
+            difficulty: "medium".to_string(),
+            created_by: "tester".to_string(),
+            created_at: 1_700_000_000,
+            solved_by: vec![],
+        };
+        save_seeds(&room.room_id, &[seed]);
+
+        let seeds = chat::seeds_for_api();
+        assert!(!seeds.is_empty(), "should have at least one seed");
+        let s = &seeds[0];
+        assert!(s["id"].is_string());
+        assert!(s["puzzle"].is_string());
+        assert!(s["difficulty"].is_string());
+        assert!(s["credit_reward"].is_number());
+        assert!(s["solved_count"].is_number());
+        assert!(s["already_solved"].is_boolean());
+        assert!(s["room"].is_string());
+        // answer_hash must NOT be exposed.
+        assert!(s.get("answer_hash").is_none());
+    }
+
+    fn temp_home_dir() -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("agora_test_{}", std::process::id()));
+        std::fs::create_dir_all(&d).ok();
+        d
     }
 }
