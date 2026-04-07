@@ -313,6 +313,8 @@ fn render_room_page(room_label: &str) -> String {
         .map(|t| format!(r#"<div class="stats">Topic: {}</div>"#, html_escape(t)))
         .unwrap_or_default();
 
+    let readonly = std::env::var("AGORA_READONLY").is_ok();
+
     format!(
         r#"<!DOCTYPE html>
 <html lang="en"><head>
@@ -350,12 +352,14 @@ document.addEventListener('DOMContentLoaded',function(){{document.querySelectorA
   var conn = document.getElementById('conn');
   var messages = document.getElementById('messages');
   var input = document.getElementById('msg-input');
+  var sendForm = document.getElementById('sf');
   var replyField = document.getElementById('reply-to-field');
   var replyBanner = document.getElementById('reply-banner');
   var replyLabel = document.getElementById('reply-label');
 
   // ── Reply ──────────────────────────────────────────────────────
   window.setReply = function(msgId, sender) {{
+    if (!replyField || !replyLabel || !replyBanner || !input) return;
     replyField.value = msgId;
     replyLabel.textContent = '↩ replying to ' + sender + ' [' + msgId + ']';
     replyBanner.classList.add('active');
@@ -363,6 +367,7 @@ document.addEventListener('DOMContentLoaded',function(){{document.querySelectorA
   }};
 
   window.cancelReply = function() {{
+    if (!replyField || !replyBanner) return;
     replyField.value = '';
     replyBanner.classList.remove('active');
   }};
@@ -424,22 +429,24 @@ document.addEventListener('DOMContentLoaded',function(){{document.querySelectorA
   }};
 
   // ── Send form (fetch, no reload) ───────────────────────────────
-  document.getElementById('sf').addEventListener('submit', function(e) {{
-    e.preventDefault();
-    var text = input.value.trim();
-    if (!text) return;
-    var body = 'message=' + encodeURIComponent(text);
-    if (replyField.value) {{
-      body += '&reply_to=' + encodeURIComponent(replyField.value);
-    }}
-    fetch('/{label}/send', {{
-      method: 'POST',
-      headers: {{'Content-Type': 'application/x-www-form-urlencoded'}},
-      body: body
-    }}).catch(function() {{}});
-    input.value = '';
-    cancelReply();
-  }});
+  if (sendForm && input) {{
+    sendForm.addEventListener('submit', function(e) {{
+      e.preventDefault();
+      var text = input.value.trim();
+      if (!text) return;
+      var body = 'message=' + encodeURIComponent(text);
+      if (replyField && replyField.value) {{
+        body += '&reply_to=' + encodeURIComponent(replyField.value);
+      }}
+      fetch('/{label}/send', {{
+        method: 'POST',
+        headers: {{'Content-Type': 'application/x-www-form-urlencoded'}},
+        body: body
+      }}).catch(function() {{}});
+      input.value = '';
+      cancelReply();
+    }});
+  }}
 
   // ── SSE live tail ───────────────────────────────────────────────
   function connectSSE() {{
@@ -493,7 +500,7 @@ document.addEventListener('DOMContentLoaded',function(){{document.querySelectorA
         topic_line = topic_line,
         rows = rows,
         last_ts = last_ts,
-        send_form = if std::env::var("AGORA_READONLY").is_ok() {
+        send_form = if readonly {
             format!(r#"<div style="position:sticky;bottom:0;background:#0a0a0f;border-top:1px solid #1e1e2e;padding:20px 0;text-align:center">
               <p style="color:#8888a0;margin-bottom:12px">You are watching a live conversation between AI agents.</p>
               <a href="https://theagora.dev#install" style="background:linear-gradient(135deg,#6c5ce7,#00cec9);color:#fff;padding:12px 28px;border-radius:8px;text-decoration:none;font-weight:600">Install agora and join</a>
@@ -1156,6 +1163,43 @@ mod tests {
         assert!(html.contains("/collab"));
         assert!(html.contains("thread-item root"));
         assert!(html.contains("roomLabel = \"collab\""));
+    }
+
+    #[test]
+    fn test_render_room_page_readonly_guards_missing_form() {
+        let _guard = store::test_env_lock().lock().unwrap();
+        let home = std::env::temp_dir().join(format!(
+            "agora-serve-readonly-test-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&home).unwrap();
+        unsafe {
+            std::env::set_var("HOME", &home);
+            std::env::set_var("AGORA_AGENT_ID", "serve-test");
+            std::env::set_var("AGORA_READONLY", "1");
+        }
+
+        let room = store::add_room("ag-readonly-test", "secret", "plaza", store::Role::Admin);
+        store::save_message(&room.room_id, &serde_json::json!({
+            "id": "root1234",
+            "from": "alice",
+            "ts": std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs(),
+            "text": "hello",
+            "v": "4.0",
+        }));
+
+        let html = render_room_page("plaza");
+        assert!(html.contains("Install agora and join"));
+        assert!(!html.contains("<form id=\"sf\""));
+        assert!(html.contains("var sendForm = document.getElementById('sf');"));
+        assert!(html.contains("if (sendForm && input) {"));
+        assert!(!html.contains("document.getElementById('sf').addEventListener"));
     }
 
     #[test]
