@@ -417,10 +417,16 @@ enum Commands {
         /// Credits to automatically grant the winner when oracle passes
         #[arg(long)]
         reward: Option<i64>,
+        /// Deadline in hours from now — bounty auto-expires and refunds credits after this time
+        #[arg(long)]
+        deadline: Option<u64>,
     },
 
     /// List open bounties
     Bounties,
+
+    /// Check for expired bounties and refund escrowed credits to posters
+    BountyExpire,
 
     /// Purchase credits via hosted checkout or verify a Solana USDC deposit.
     /// `agora fund <credits>` creates a Stripe Checkout session.
@@ -2336,10 +2342,10 @@ fn main() {
             }
         }
 
-        Commands::Bounty { title, priority, oracle, reward } => {
+        Commands::Bounty { title, priority, oracle, reward, deadline } => {
             let t = title.join(" ");
             let oracle_ref = oracle.as_deref();
-            match chat::bounty_post(&t, priority, oracle_ref, reward, room) {
+            match chat::bounty_post(&t, priority, oracle_ref, reward, deadline, room) {
                 Ok(id) => {
                     println!("  Bounty [{id}] posted (P{priority}): {t}");
                     if let Some(o) = oracle_ref {
@@ -2347,6 +2353,25 @@ fn main() {
                     }
                     if let Some(r) = reward {
                         println!("  Reward: {r} credits (auto-distributed on oracle PASS)");
+                    }
+                    if let Some(h) = deadline {
+                        println!("  Deadline: {h}h (auto-expires and refunds at deadline)");
+                    }
+                }
+                Err(e) => { eprintln!("  Error: {e}"); process::exit(1); }
+            }
+        }
+
+        Commands::BountyExpire => {
+            match chat::bounty_expire_check(room) {
+                Ok(expired) => {
+                    if expired.is_empty() {
+                        println!("  No expired bounties found.");
+                    } else {
+                        println!("  Expired {} bounty(s):", expired.len());
+                        for id in &expired {
+                            println!("  [{id}] — credits refunded to poster");
+                        }
                     }
                 }
                 Err(e) => { eprintln!("  Error: {e}"); process::exit(1); }
@@ -2375,12 +2400,28 @@ fn main() {
                         return;
                     }
                     println!("  {} open bounties:\n", bounties.len());
+                    let now_ts = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs();
                     for b in &bounties {
                         let id = &b["id"].as_str().unwrap_or("?")[..6.min(b["id"].as_str().unwrap_or("?").len())];
                         let title = b["title"].as_str().unwrap_or("?");
                         let priority = b["priority"].as_u64().unwrap_or(0);
                         let from = b["from"].as_str().unwrap_or("?");
-                        println!("  [{id}] P{priority} {title} (by {from})");
+                        let deadline_str = if let Some(exp) = b["expires_at"].as_u64() {
+                            if exp > now_ts {
+                                let secs_left = exp - now_ts;
+                                let hours_left = secs_left / 3600;
+                                let mins_left = (secs_left % 3600) / 60;
+                                format!(", expires in {hours_left}h{mins_left}m")
+                            } else {
+                                ", EXPIRED".to_string()
+                            }
+                        } else {
+                            String::new()
+                        };
+                        println!("  [{id}] P{priority} {title} (by {from}{deadline_str})");
                     }
                 }
                 Err(e) => { eprintln!("  Error: {e}"); process::exit(1); }

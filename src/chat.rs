@@ -1704,6 +1704,7 @@ pub fn bounty_post(
     priority: u32,
     acceptance_oracle: Option<&str>,
     reward_credits: Option<i64>,
+    deadline_hours: Option<u64>,
     room_label: Option<&str>,
 ) -> Result<String, String> {
     let room = resolve_room(room_label)?;
@@ -1723,6 +1724,10 @@ pub fn bounty_post(
     let reward_trust = reward_credits.map(|c| (c / 10).max(1));
     let reward_label = reward_credits
         .map(|c| format!(", reward: {c} credits"))
+        .unwrap_or_default();
+    let expires_at = deadline_hours.map(|h| now() + h * 3600);
+    let deadline_label = deadline_hours
+        .map(|h| format!(", deadline: {h}h"))
         .unwrap_or_default();
 
     if let Some(reward) = reward_credits {
@@ -1746,7 +1751,7 @@ pub fn bounty_post(
         "title": title,
         "priority": priority,
         "status": "open",
-        "text": format!("[bounty P{}] {title}{reward_label} (id: {})", priority, &id[..6]),
+        "text": format!("[bounty P{}] {title}{reward_label}{deadline_label} (id: {})", priority, &id[..6]),
     });
     if let Some(oracle) = acceptance_oracle {
         env["acceptance_oracle"] = json!(oracle);
@@ -1755,21 +1760,25 @@ pub fn bounty_post(
         env["reward_credits"] = json!(r);
         env["reward_trust"] = json!(reward_trust.unwrap_or(1));
     }
+    if let Some(exp) = expires_at {
+        env["expires_at"] = json!(exp);
+    }
     let encrypted = encrypt_envelope(&env, &room_key, &room.room_id);
     transport::publish(&room.room_id, &encrypted);
     store::save_message(&room.room_id, &env);
 
-    // Also create as a task (with oracle and reward)
-    let _ = task_add_with_oracle(title, acceptance_oracle, reward_credits, reward_trust, room_label);
+    // Also create as a task (with oracle, reward, and deadline)
+    let _ = task_add_with_oracle(title, acceptance_oracle, reward_credits, reward_trust, expires_at, room_label);
     Ok(id)
 }
 
-/// Internal: add a task with an optional acceptance oracle and reward.
+/// Internal: add a task with an optional acceptance oracle, reward, and deadline.
 fn task_add_with_oracle(
     title: &str,
     acceptance_oracle: Option<&str>,
     reward_credits: Option<i64>,
     reward_trust: Option<i64>,
+    expires_at: Option<u64>,
     room_label: Option<&str>,
 ) -> Result<String, String> {
     let room = resolve_room(room_label)?;
@@ -1789,6 +1798,7 @@ fn task_add_with_oracle(
         reward_credits,
         reward_trust,
         submissions: vec![],
+        expires_at,
     });
     store::save_tasks(&room.room_id, &tasks);
     Ok(id)
@@ -1823,6 +1833,7 @@ pub fn bounty_submit(task_id: &str, branch: &str, room_label: Option<&str>) -> R
                         .or_else(|| msg["reward"].as_i64()),
                     reward_trust: msg["reward_trust"].as_i64(),
                     submissions: vec![],
+                    expires_at: msg["expires_at"].as_u64(),
                 });
                 break;
             }
@@ -1991,6 +2002,7 @@ pub fn bounty_verify(task_id: &str, agent_id: &str, room_label: Option<&str>) ->
             reward_credits,
             reward_trust,
             submissions: vec![],
+            expires_at: None,
         };
         publish_task_receipt(
             &room,
@@ -2051,14 +2063,81 @@ pub fn bounty_verify(task_id: &str, agent_id: &str, room_label: Option<&str>) ->
     Ok(format!("{result}: oracle '{oracle}' on branch '{branch}'"))
 }
 
-/// List open bounties in a room.
+/// List open bounties in a room (excludes expired bounties).
 pub fn bounty_list(room_label: Option<&str>) -> Result<Vec<serde_json::Value>, String> {
     let room = resolve_room(room_label)?;
+    let ts = now();
     let msgs = store::load_messages(&room.room_id, 604800);
     let bounties: Vec<_> = msgs.into_iter()
-        .filter(|m| m["type"].as_str() == Some("bounty") && m["status"].as_str() == Some("open"))
+        .filter(|m| {
+            if m["type"].as_str() != Some("bounty") || m["status"].as_str() != Some("open") {
+                return false;
+            }
+            // Exclude bounties that have passed their deadline
+            if let Some(exp) = m["expires_at"].as_u64() {
+                if ts >= exp {
+                    return false;
+                }
+            }
+            true
+        })
         .collect();
     Ok(bounties)
+}
+
+/// Check for expired bounties and refund escrowed credits to posters.
+/// Returns a list of bounty IDs that were expired and refunded.
+pub fn bounty_expire_check(room_label: Option<&str>) -> Result<Vec<String>, String> {
+    let room = resolve_room(room_label)?;
+    let room_key = crypto::derive_room_key(&room.secret, &room.room_id);
+    let ts = now();
+    let mut tasks = store::load_tasks(&room.room_id);
+    let mut expired_ids: Vec<String> = Vec::new();
+
+    for task in tasks.iter_mut() {
+        if task.status != "open" {
+            continue;
+        }
+        let Some(exp) = task.expires_at else { continue };
+        if ts < exp {
+            continue;
+        }
+
+        // Expire and refund
+        let task_id_short = &task.id[..6.min(task.id.len())];
+        task.status = "expired".to_string();
+        task.updated_at = ts;
+
+        // Refund escrowed credits to the original poster
+        if let Some(credits) = task.reward_credits {
+            store::credit_add(
+                &room.room_id,
+                &task.created_by,
+                credits,
+                &format!("bounty expired refund: {} ({})", task.title, task_id_short),
+            );
+        }
+
+        let msg = format!(
+            "[bounty expired] '{}' ({}) — deadline reached, {} credits refunded to {}",
+            task.title,
+            task_id_short,
+            task.reward_credits.unwrap_or(0),
+            &task.created_by[..8.min(task.created_by.len())],
+        );
+        let env = make_envelope(&msg, None);
+        let enc = encrypt_envelope(&env, &room_key, &room.room_id);
+        transport::publish(&room.room_id, &enc);
+        store::save_message(&room.room_id, &env);
+
+        expired_ids.push(task.id.clone());
+    }
+
+    if !expired_ids.is_empty() {
+        store::save_tasks(&room.room_id, &tasks);
+    }
+
+    Ok(expired_ids)
 }
 
 // ── Payments ────────────────────────────────────────────────────
@@ -2871,6 +2950,7 @@ pub fn task_add_as(agent_id: &str, title: &str, room_label: Option<&str>) -> Res
         reward_credits: None,
         reward_trust: None,
         submissions: vec![],
+        expires_at: None,
     };
     let mut tasks = store::load_tasks(&room.room_id);
     tasks.push(task);
@@ -3191,6 +3271,7 @@ pub fn seed_verify(seed_id: &str, answer: &str, room_label: Option<&str>) -> Res
         reward_credits: if credit_reward > 0 { Some(credit_reward) } else { None },
         reward_trust: None,
         submissions: vec![],
+        expires_at: None,
     };
 
     publish_task_receipt(&room, &task, &me, "done", task.notes.as_deref(), task.updated_at);
@@ -3254,6 +3335,7 @@ pub fn task_list(room_label: Option<&str>) -> Result<Vec<store::Task>, String> {
                         reward_credits: None,
                         reward_trust: None,
                         submissions: vec![],
+                        expires_at: None,
                     });
                 }
             }
@@ -4207,8 +4289,8 @@ mod tests {
         role_heartbeat, role_release, payment_complete_solana_deposit,
         seed_plaza_rate_limit_state, send_watch_heartbeat,
         should_display_message, signing_message_bytes, soma_churn_decay, soma_correct,
-        bounty_post, bounty_submit, bounty_verify, stale_claim_weight, task_add, task_add_as,
-        task_add_with_oracle,
+        bounty_expire_check, bounty_post, bounty_submit, bounty_verify, stale_claim_weight,
+        task_add, task_add_as, task_add_with_oracle,
         task_checkpoint, task_done, unpin,
         verified_solana_deposit_from_tx, SignedWirePayload, VerifiedSolanaDeposit,
         SIGNED_WIRE_VERSION, BASE64, DISCOVERY_POSITIVE_HALF_LIFE_SECS,
@@ -4736,6 +4818,7 @@ mod tests {
                 reward_credits: None,
                 reward_trust: None,
                 submissions: vec![],
+                expires_at: None,
             }],
         );
 
@@ -5049,6 +5132,7 @@ mod tests {
             Some(50),
             None,
             None,
+            None,
         )
         .unwrap();
 
@@ -5111,7 +5195,7 @@ mod tests {
         assert_eq!(store::credit_balance(&room.room_id, poster_id), 100);
         seed_agent_trust(&room.room_id, poster_id);
 
-        bounty_post("Escrow test task", 1, Some("true"), Some(60), None)
+        bounty_post("Escrow test task", 1, Some("true"), Some(60), None, None)
             .expect("bounty_post should succeed with sufficient credits");
 
         assert_eq!(
@@ -5166,7 +5250,7 @@ mod tests {
         // Seed trust so the trust gate passes — credit check must fire next.
         seed_agent_trust(&room.room_id, poster_id);
 
-        let result = bounty_post("No-funds bounty", 1, Some("true"), Some(50), None);
+        let result = bounty_post("No-funds bounty", 1, Some("true"), Some(50), None, None);
         assert!(result.is_err(), "bounty_post must reject insufficient credits");
         let err = result.unwrap_err();
         assert!(
@@ -5185,7 +5269,7 @@ mod tests {
 
         store::credit_add(&room.room_id, poster_id, 80, "test setup");
         seed_agent_trust(&room.room_id, poster_id);
-        bounty_post("Refund test task", 1, Some("false"), Some(50), None)
+        bounty_post("Refund test task", 1, Some("false"), Some(50), None, None)
             .expect("bounty_post should succeed");
         assert_eq!(
             store::credit_balance(&room.room_id, poster_id),
@@ -5240,7 +5324,7 @@ mod tests {
         let (_home, room) = setup_plaza_room(poster_id, Role::Admin);
 
         // Poster creates a task directly (simulating bounty_post).
-        let task_id = task_add_with_oracle("Self-deal test task", None, Some(50), None, None).unwrap();
+        let task_id = task_add_with_oracle("Self-deal test task", None, Some(50), None, None, None).unwrap();
 
         // The poster tries to submit to their own bounty.
         let result = bounty_submit(&task_id, "some-branch", None);
@@ -5323,6 +5407,54 @@ mod tests {
         assert_eq!(super::seed_credit_reward("easy"), 0);
     }
 
+    /// Bounties with a deadline auto-expire: credits are refunded to the poster.
+    #[test]
+    fn bounty_expire_check_refunds_credits() {
+        let _guard = store::test_env_lock().lock().unwrap();
+        let poster_id = "bounty-expire-test-poster";
+        let (home, room) = setup_plaza_room(poster_id, Role::Admin);
+        let _ = home; // keep alive
+
+        // Give poster credits and seed trust so they can post a bounty.
+        store::credit_add(&room.room_id, poster_id, 100, "test setup");
+        seed_agent_trust(&room.room_id, poster_id);
+
+        // Post a bounty with a deadline 1 second in the future.
+        let id = bounty_post("Deadline test bounty", 3, None, Some(40), Some(0 /* 0h = already expired */), None)
+            .expect("bounty_post should succeed");
+        let _ = id;
+
+        // Verify credits were escrowed.
+        assert_eq!(
+            store::credit_balance(&room.room_id, poster_id),
+            60,
+            "40 credits escrowed"
+        );
+
+        // Manually set expires_at in the past on the task store.
+        let mut tasks = store::load_tasks(&room.room_id);
+        for t in tasks.iter_mut() {
+            if t.title == "Deadline test bounty" {
+                t.expires_at = Some(1); // Unix epoch — always in the past
+            }
+        }
+        store::save_tasks(&room.room_id, &tasks);
+
+        // Run expire check — should refund the 40 credits.
+        let expired = bounty_expire_check(None).expect("expire check should succeed");
+        assert_eq!(expired.len(), 1, "one bounty should be expired");
+
+        assert_eq!(
+            store::credit_balance(&room.room_id, poster_id),
+            100,
+            "poster should be refunded to 100 credits after expiry"
+        );
+
+        // Running again should find nothing new.
+        let expired2 = bounty_expire_check(None).expect("second expire check should succeed");
+        assert!(expired2.is_empty(), "no more expired bounties on second run");
+    }
+
     /// A fresh agent (trust ≈ 1.0) cannot post a bounty — trust threshold is 2.0.
     #[test]
     fn bounty_post_requires_minimum_trust() {
@@ -5331,7 +5463,7 @@ mod tests {
         let (_home, _room) = setup_plaza_room(agent_id, Role::Member);
 
         // Fresh agent has no work receipts → trust score ≈ 1.0, below threshold 2.0.
-        let result = super::bounty_post("Low-trust bounty", 1, None, Some(10), None);
+        let result = super::bounty_post("Low-trust bounty", 1, None, Some(10), None, None);
         assert!(
             result.is_err(),
             "bounty_post must reject a fresh agent with trust < 2.0"
