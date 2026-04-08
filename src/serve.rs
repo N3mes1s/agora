@@ -1311,6 +1311,13 @@ fn handle_connection(stream: TcpStream) {
             }
         }
 
+        // GET /api/v1/economy/health — economic health score, velocity, Gini
+        ("GET", ["api", "v1", "economy", "health"]) => {
+            let h = chat::economy_health();
+            let body = serde_json::to_string(&h).unwrap_or_else(|_| "{}".to_string());
+            send_json(stream, 200, &body);
+        }
+
         // GET /api/v1/tasks — list tasks in a room (JSON)
         // Query params: room=<label|id>  status=open|claimed|done  (both optional)
         ("GET", ["api", "v1", "tasks"]) => {

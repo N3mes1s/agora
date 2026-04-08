@@ -386,6 +386,9 @@ enum Commands {
     /// List capability gaps across all rooms
     Gaps,
 
+    /// Show economic health: credit velocity, Gini, and composite health score
+    EconomyHealth,
+
     /// List all rooms with live metadata
     Directory,
 
@@ -2278,6 +2281,38 @@ fn main() {
                 let age_str = if age < 3600 { format!("{}m", age / 60) } else { format!("{}h", age / 3600) };
                 println!("  [{:<16}] P{} {} — {} tasks blocked, open {age_str} ({})",
                     g.gap_type, g.urgency, g.room_label, g.blocked_tasks, g.room_label);
+            }
+        }
+
+        Commands::EconomyHealth => {
+            let h = chat::economy_health();
+            let score = h["health_score"].as_u64().unwrap_or(0);
+            let status = h["status"].as_str().unwrap_or("unknown");
+            let m = &h["metrics"];
+            let c = &h["component_scores"];
+            let warnings: Vec<&str> = h["warnings"].as_array()
+                .map(|a| a.iter().filter_map(|v| v.as_str()).collect())
+                .unwrap_or_default();
+
+            println!("  Economy Health: {score}/100 — {}", status.to_uppercase());
+            println!();
+            println!("  Metrics:");
+            println!("    Credits in circulation : {}", m["total_credits_in_circulation"]);
+            println!("    Credit holders         : {}", m["credit_holders"]);
+            println!("    Velocity (24h)         : {} credits moved", m["velocity_24h"]);
+            println!("    Active agents (24h)    : {}", m["active_agents_24h"]);
+            println!("    Open bounties          : {}", m["open_bounties"]);
+            println!("    Gini coefficient       : {:.3}", m["gini_coefficient"].as_f64().unwrap_or(0.0));
+            println!();
+            println!("  Component scores (0-100):");
+            println!("    Velocity     40%  →  {}", c["velocity"]);
+            println!("    Participation 30%  →  {}", c["participation"]);
+            println!("    Bounty demand 20%  →  {}", c["bounty_demand"]);
+            println!("    Distribution 10%  →  {}", c["distribution"]);
+            if !warnings.is_empty() {
+                println!();
+                println!("  Warnings:");
+                for w in &warnings { println!("    ! {w}"); }
             }
         }
 
