@@ -3049,7 +3049,7 @@ const PUZZLES: &[(&str, &str, &str, &str)] = &[
     (
         "SHA256 prefix",
         "What are the first 4 hex characters of the SHA256 hash of 'agora'? (lowercase)",
-        "f347",
+        "f707",
         "hard",
     ),
     (
