@@ -847,6 +847,19 @@ fn get_header<'a>(raw: &'a str, name: &str) -> Option<&'a str> {
     None
 }
 
+fn bearer_token(raw: &str) -> Option<&str> {
+    get_header(raw, "Authorization")
+        .and_then(|h| h.strip_prefix("Bearer ").or_else(|| h.strip_prefix("bearer ")))
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+}
+
+fn verify_bearer_agent_token(raw: &str) -> Result<String, String> {
+    let token = bearer_token(raw).ok_or_else(|| "missing bearer token".to_string())?;
+    let (agent_id, _expiry) = sandbox::verify_agent_token(token)?;
+    Ok(agent_id)
+}
+
 /// Verify a Stripe webhook signature.
 ///
 /// Stripe-Signature header format: `t=<timestamp>,v1=<hmac_hex>`
@@ -1278,6 +1291,13 @@ fn handle_connection(stream: TcpStream) {
         // JSON body: {"title": "...", "room": "..."}
         // Returns: {"id": "<task-id>", "title": "..."}
         ("POST", ["api", "v1", "tasks"]) => {
+            let agent_id = match verify_bearer_agent_token(&raw) {
+                Ok(agent_id) => agent_id,
+                Err(e) => {
+                    send_json(stream, 401, &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'")));
+                    return;
+                }
+            };
             let parsed: serde_json::Value = match serde_json::from_str(body) {
                 Ok(v) => v,
                 Err(_) => {
@@ -1293,9 +1313,9 @@ fn handle_connection(stream: TcpStream) {
                 }
             };
             let room_label = parsed["room"].as_str().map(|s| s.to_string());
-            match chat::task_add(&title, room_label.as_deref()) {
+            match chat::task_add_as(&agent_id, &title, room_label.as_deref()) {
                 Ok(id) => {
-                    let resp = serde_json::json!({"id": id, "title": title, "status": "open"});
+                    let resp = serde_json::json!({"id": id, "title": title, "status": "open", "created_by": agent_id});
                     send_json(stream, 201, &resp.to_string());
                 }
                 Err(e) => send_json(stream, 400, &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'"))),
@@ -1691,6 +1711,24 @@ mod tests {
         assert_eq!(get_header(raw, "stripe-signature"), Some("t=123,v1=abc"));
         assert_eq!(get_header(raw, "content-type"), Some("application/json"));
         assert_eq!(get_header(raw, "X-Missing"), None);
+    }
+
+    #[test]
+    fn test_bearer_token_extracts_authorization_header() {
+        let raw = "POST /api/v1/tasks HTTP/1.1\r\nAuthorization: Bearer abc.def\r\n\r\n{}";
+        assert_eq!(bearer_token(raw), Some("abc.def"));
+    }
+
+    #[test]
+    fn test_verify_bearer_agent_token_accepts_valid_token() {
+        let _guard = crate::store::test_env_lock().lock().unwrap();
+        unsafe {
+            std::env::set_var("AGORA_SANDBOX_SECRET", "serve-test-secret");
+        }
+        let token = crate::sandbox::generate_agent_token("api-agent", 1);
+        let raw = format!("POST /api/v1/tasks HTTP/1.1\r\nAuthorization: Bearer {token}\r\n\r\n{{}}");
+        let verified = verify_bearer_agent_token(&raw).expect("token should verify");
+        assert_eq!(verified, "api-agent");
     }
 
     #[test]
