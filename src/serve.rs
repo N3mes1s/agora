@@ -1252,6 +1252,56 @@ fn handle_connection(stream: TcpStream) {
             send_json(stream, 200, &body);
         }
 
+        // GET /api/v1/tasks — list tasks in a room (JSON)
+        // Query params: room=<label|id>  status=open|claimed|done  (both optional)
+        ("GET", ["api", "v1", "tasks"]) => {
+            let qs = path.split_once('?').map(|(_, q)| q).unwrap_or("");
+            let room_param = qs.split('&').find_map(|kv| {
+                kv.strip_prefix("room=").map(|v| url_decode(v))
+            });
+            let status_filter = qs.split('&').find_map(|kv| {
+                kv.strip_prefix("status=").map(|v| url_decode(v))
+            });
+            match chat::task_list(room_param.as_deref()) {
+                Ok(tasks) => {
+                    let filtered: Vec<_> = tasks.iter().filter(|t| {
+                        status_filter.as_deref().map_or(true, |s| t.status == s)
+                    }).collect();
+                    let body = serde_json::to_string(&filtered).unwrap_or_else(|_| "[]".to_string());
+                    send_json(stream, 200, &body);
+                }
+                Err(e) => send_json(stream, 400, &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'"))),
+            }
+        }
+
+        // POST /api/v1/tasks — add a new task to a room
+        // JSON body: {"title": "...", "room": "..."}
+        // Returns: {"id": "<task-id>", "title": "..."}
+        ("POST", ["api", "v1", "tasks"]) => {
+            let parsed: serde_json::Value = match serde_json::from_str(body) {
+                Ok(v) => v,
+                Err(_) => {
+                    send_json(stream, 400, r#"{"error":"invalid JSON body"}"#);
+                    return;
+                }
+            };
+            let title = match parsed["title"].as_str().filter(|s| !s.is_empty()) {
+                Some(t) => t.to_string(),
+                None => {
+                    send_json(stream, 400, r#"{"error":"title is required"}"#);
+                    return;
+                }
+            };
+            let room_label = parsed["room"].as_str().map(|s| s.to_string());
+            match chat::task_add(&title, room_label.as_deref()) {
+                Ok(id) => {
+                    let resp = serde_json::json!({"id": id, "title": title, "status": "open"});
+                    send_json(stream, 201, &resp.to_string());
+                }
+                Err(e) => send_json(stream, 400, &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'"))),
+            }
+        }
+
         // GET /api/payments/history — list payment history for the calling agent
         // Query param: room=plaza
         ("GET", ["api", "payments", "history"]) => {
@@ -1679,6 +1729,62 @@ mod tests {
         assert_eq!(body["payments"]["ready"], false);
         // Version field must be present and non-empty
         assert!(!body["version"].as_str().unwrap_or("").is_empty());
+    }
+
+    #[test]
+    fn tasks_api_query_param_parsing() {
+        // Simulate the same query-string extraction used in GET /api/v1/tasks
+        let path = "/api/v1/tasks?room=plaza&status=open";
+        let qs = path.split_once('?').map(|(_, q)| q).unwrap_or("");
+        let room_param = qs.split('&').find_map(|kv| {
+            kv.strip_prefix("room=").map(|v| url_decode(v))
+        });
+        let status_filter = qs.split('&').find_map(|kv| {
+            kv.strip_prefix("status=").map(|v| url_decode(v))
+        });
+        assert_eq!(room_param.as_deref(), Some("plaza"));
+        assert_eq!(status_filter.as_deref(), Some("open"));
+    }
+
+    #[test]
+    fn tasks_api_query_param_optional() {
+        let path = "/api/v1/tasks";
+        let qs = path.split_once('?').map(|(_, q)| q).unwrap_or("");
+        let room_param: Option<String> = qs.split('&').find_map(|kv| {
+            kv.strip_prefix("room=").map(|v| url_decode(v))
+        });
+        let status_filter: Option<String> = qs.split('&').find_map(|kv| {
+            kv.strip_prefix("status=").map(|v| url_decode(v))
+        });
+        assert!(room_param.is_none());
+        assert!(status_filter.is_none());
+    }
+
+    #[test]
+    fn tasks_api_post_body_parsing() {
+        // Validate the JSON body parsing for POST /api/v1/tasks
+        let body = r#"{"title":"fix the bug","room":"collab"}"#;
+        let parsed: serde_json::Value = serde_json::from_str(body).unwrap();
+        let title = parsed["title"].as_str().filter(|s| !s.is_empty());
+        let room_label = parsed["room"].as_str();
+        assert_eq!(title, Some("fix the bug"));
+        assert_eq!(room_label, Some("collab"));
+    }
+
+    #[test]
+    fn tasks_api_post_body_missing_title() {
+        let body = r#"{"room":"collab"}"#;
+        let parsed: serde_json::Value = serde_json::from_str(body).unwrap();
+        let title = parsed["title"].as_str().filter(|s| !s.is_empty());
+        assert!(title.is_none(), "missing title should not parse");
+    }
+
+    #[test]
+    fn tasks_api_post_body_empty_title() {
+        let body = r#"{"title":"","room":"collab"}"#;
+        let parsed: serde_json::Value = serde_json::from_str(body).unwrap();
+        let title = parsed["title"].as_str().filter(|s| !s.is_empty());
+        assert!(title.is_none(), "empty title should be rejected");
     }
 
     #[test]
