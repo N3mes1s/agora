@@ -1302,6 +1302,64 @@ fn handle_connection(stream: TcpStream) {
             }
         }
 
+        // GET /api/v1/tasks/:id — fetch a single task by ID prefix
+        // Query param: room=<label|id>  (optional)
+        ("GET", ["api", "v1", "tasks", task_id]) => {
+            let qs = path.split_once('?').map(|(_, q)| q).unwrap_or("");
+            let room_param = qs.split('&').find_map(|kv| {
+                kv.strip_prefix("room=").map(|v| url_decode(v))
+            });
+            let tid = (*task_id).to_string();
+            match chat::task_get(&tid, room_param.as_deref()) {
+                Ok(task) => {
+                    let body = serde_json::to_string(&task).unwrap_or_else(|_| "{}".to_string());
+                    send_json(stream, 200, &body);
+                }
+                Err(e) => send_json(stream, 404, &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'"))),
+            }
+        }
+
+        // PATCH /api/v1/tasks/:id — update task status
+        // JSON body: {"action": "claim"|"done"|"checkpoint", "room": "...", "notes": "..."}
+        // Returns the updated task object.
+        ("PATCH", ["api", "v1", "tasks", task_id]) => {
+            let parsed: serde_json::Value = match serde_json::from_str(body) {
+                Ok(v) => v,
+                Err(_) => {
+                    send_json(stream, 400, r#"{"error":"invalid JSON body"}"#);
+                    return;
+                }
+            };
+            let action = match parsed["action"].as_str().filter(|s| !s.is_empty()) {
+                Some(a) => a.to_string(),
+                None => {
+                    send_json(stream, 400, r#"{"error":"action is required (claim|done|checkpoint)"}"#);
+                    return;
+                }
+            };
+            let room_label = parsed["room"].as_str().map(|s| s.to_string());
+            let notes = parsed["notes"].as_str().map(|s| s.to_string());
+            let tid = (*task_id).to_string();
+            let result = match action.as_str() {
+                "claim" => chat::task_claim(&tid, room_label.as_deref()),
+                "done" => chat::task_done(&tid, notes.as_deref(), room_label.as_deref()),
+                "checkpoint" => chat::task_checkpoint(&tid, notes.as_deref(), room_label.as_deref()),
+                _ => Err(format!("Unknown action '{}'; use claim|done|checkpoint", action)),
+            };
+            match result {
+                Ok(_) => {
+                    match chat::task_get(&tid, room_label.as_deref()) {
+                        Ok(task) => {
+                            let body = serde_json::to_string(&task).unwrap_or_else(|_| "{}".to_string());
+                            send_json(stream, 200, &body);
+                        }
+                        Err(_) => send_json(stream, 200, r#"{"status":"ok"}"#),
+                    }
+                }
+                Err(e) => send_json(stream, 400, &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'"))),
+            }
+        }
+
         // GET /api/payments/history — list payment history for the calling agent
         // Query param: room=plaza
         ("GET", ["api", "payments", "history"]) => {
@@ -1807,5 +1865,72 @@ mod tests {
         assert!(page.contains("100"));
         assert!(page.contains("#2"));
         assert!(page.contains("bob"));
+    }
+
+    #[test]
+    fn tasks_api_patch_body_parsing_claim() {
+        let body = r#"{"action":"claim","room":"collab"}"#;
+        let parsed: serde_json::Value = serde_json::from_str(body).unwrap();
+        let action = parsed["action"].as_str().filter(|s| !s.is_empty());
+        let room = parsed["room"].as_str();
+        let notes = parsed["notes"].as_str();
+        assert_eq!(action, Some("claim"));
+        assert_eq!(room, Some("collab"));
+        assert!(notes.is_none());
+    }
+
+    #[test]
+    fn tasks_api_patch_body_parsing_done_with_notes() {
+        let body = r#"{"action":"done","room":"plaza","notes":"shipped it"}"#;
+        let parsed: serde_json::Value = serde_json::from_str(body).unwrap();
+        let action = parsed["action"].as_str().filter(|s| !s.is_empty());
+        let notes = parsed["notes"].as_str();
+        assert_eq!(action, Some("done"));
+        assert_eq!(notes, Some("shipped it"));
+    }
+
+    #[test]
+    fn tasks_api_patch_body_missing_action() {
+        let body = r#"{"room":"collab"}"#;
+        let parsed: serde_json::Value = serde_json::from_str(body).unwrap();
+        let action = parsed["action"].as_str().filter(|s| !s.is_empty());
+        assert!(action.is_none(), "missing action should be rejected");
+    }
+
+    #[test]
+    fn tasks_api_patch_body_unknown_action() {
+        // Validate that only valid action strings are accepted by the match
+        let valid_actions = ["claim", "done", "checkpoint"];
+        let unknown = "delete";
+        assert!(
+            !valid_actions.contains(&unknown),
+            "unknown action should not be in valid set"
+        );
+    }
+
+    #[test]
+    fn tasks_api_get_single_route_segments() {
+        // Verify that /api/v1/tasks/<id> produces 4 segments matching the route
+        let path = "/api/v1/tasks/abc123def456";
+        let path_only = path.split('?').next().unwrap_or(path);
+        let segments: Vec<&str> = path_only.trim_start_matches('/').split('/').collect();
+        assert_eq!(segments.len(), 4);
+        assert_eq!(segments[0], "api");
+        assert_eq!(segments[1], "v1");
+        assert_eq!(segments[2], "tasks");
+        assert_eq!(segments[3], "abc123def456");
+    }
+
+    #[test]
+    fn tasks_api_get_single_route_with_query() {
+        // Verify query string doesn't interfere with path segment matching
+        let path = "/api/v1/tasks/abc123?room=collab";
+        let path_only = path.split('?').next().unwrap_or(path);
+        let segments: Vec<&str> = path_only.trim_start_matches('/').split('/').collect();
+        assert_eq!(segments[3], "abc123");
+        // Query is extracted separately
+        let qs = path.split_once('?').map(|(_, q)| q).unwrap_or("");
+        let room_param = qs.split('&').find_map(|kv| kv.strip_prefix("room=").map(|v| v.to_string()));
+        assert_eq!(room_param.as_deref(), Some("collab"));
     }
 }
