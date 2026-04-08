@@ -101,6 +101,20 @@ fn make_envelope(text: &str, reply_to: Option<&str>) -> serde_json::Value {
     env
 }
 
+fn make_envelope_from(sender: &str, text: &str, reply_to: Option<&str>) -> serde_json::Value {
+    let mut env = json!({
+        "v": VERSION,
+        "id": msg_id(),
+        "from": sender,
+        "ts": now(),
+        "text": text,
+    });
+    if let Some(rt) = reply_to {
+        env["reply_to"] = json!(rt);
+    }
+    env
+}
+
 fn make_heartbeat() -> serde_json::Value {
     json!({
         "v": VERSION,
@@ -2778,14 +2792,19 @@ fn publish_task_receipt(
 
 /// Add a task to the room queue.
 pub fn task_add(title: &str, room_label: Option<&str>) -> Result<String, String> {
+    let me = store::get_agent_id();
+    task_add_as(&me, title, room_label)
+}
+
+/// Add a task to the room queue on behalf of a verified agent.
+pub fn task_add_as(agent_id: &str, title: &str, room_label: Option<&str>) -> Result<String, String> {
     let room = resolve_room(room_label)?;
     let id = msg_id();
-    let me = store::get_agent_id();
     let task = store::Task {
         id: id.clone(),
         title: title.to_string(),
         status: "open".to_string(),
-        created_by: me.clone(),
+        created_by: agent_id.to_string(),
         claimed_by: None,
         created_at: now(),
         updated_at: now(),
@@ -2800,7 +2819,7 @@ pub fn task_add(title: &str, room_label: Option<&str>) -> Result<String, String>
     store::save_tasks(&room.room_id, &tasks);
 
     let room_key = crypto::derive_room_key(&room.secret, &room.room_id);
-    let env = make_envelope(&format!("[task] New: {title} (id: {})", &id[..6]), None);
+    let env = make_envelope_from(agent_id, &format!("[task] New: {title} (id: {})", &id[..6]), None);
     let encrypted = encrypt_envelope(&env, &room_key, &room.room_id);
     transport::publish(&room.room_id, &encrypted);
     store::save_message(&room.room_id, &env);
@@ -4117,7 +4136,7 @@ mod tests {
         role_heartbeat, role_release, payment_complete_solana_deposit,
         seed_plaza_rate_limit_state, send_watch_heartbeat,
         should_display_message, signing_message_bytes, soma_churn_decay, soma_correct,
-        bounty_submit, bounty_verify, stale_claim_weight, task_add, task_add_with_oracle,
+        bounty_submit, bounty_verify, stale_claim_weight, task_add, task_add_as, task_add_with_oracle,
         task_checkpoint, task_done, unpin,
         verified_solana_deposit_from_tx, SignedWirePayload, VerifiedSolanaDeposit,
         SIGNED_WIRE_VERSION, BASE64, DISCOVERY_POSITIVE_HALF_LIFE_SECS,
@@ -5025,6 +5044,26 @@ mod tests {
             let b = window[1]["credits"].as_i64().unwrap_or(0);
             assert!(a >= b, "leaderboard must be sorted by credits descending");
         }
+    }
+
+    #[test]
+    fn task_add_as_records_verified_creator() {
+        let _guard = store::test_env_lock().lock().unwrap();
+        let (_home, room) = setup_plaza_room("server-host", Role::Admin);
+
+        let task_id = task_add_as("api-agent", "Ship API auth", Some("plaza")).unwrap();
+
+        let tasks = store::load_tasks(&room.room_id);
+        let task = tasks.iter().find(|t| t.id == task_id).expect("task saved");
+        assert_eq!(task.created_by, "api-agent");
+
+        let messages = store::load_messages(&room.room_id, 3600);
+        let msg = messages
+            .iter()
+            .find(|m| m["id"].as_str() == Some(task_id.as_str()))
+            .or_else(|| messages.iter().find(|m| m["text"].as_str().unwrap_or("").contains("Ship API auth")))
+            .expect("task message saved");
+        assert_eq!(msg["from"].as_str(), Some("api-agent"));
     }
 }
 
