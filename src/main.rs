@@ -447,6 +447,15 @@ enum Commands {
     /// Show payment history (deposits and withdrawals).
     Payments,
 
+    /// Contribute credits to an existing open bounty's reward pool (crowdfunding)
+    #[command(name = "bounty-fund")]
+    BountyFund {
+        /// Task/bounty ID (prefix ok)
+        task_id: String,
+        /// Number of credits to contribute to the pool
+        credits: i64,
+    },
+
     /// Submit a branch as a bounty solution (runs oracle if configured)
     BountySubmit {
         /// Task/bounty ID (prefix ok)
@@ -2384,6 +2393,13 @@ fn main() {
                         println!("  Reward: {r} credits (auto-distributed on oracle PASS)");
                     }
                 }
+                Err(e) => { eprintln!("  Error: {e}"); process::exit(1); }
+            }
+        }
+
+        Commands::BountyFund { task_id, credits } => {
+            match chat::bounty_fund(&task_id, credits, room) {
+                Ok(msg) => println!("  {msg}"),
                 Err(e) => { eprintln!("  Error: {e}"); process::exit(1); }
             }
         }

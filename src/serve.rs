@@ -1311,6 +1311,47 @@ fn handle_connection(stream: TcpStream) {
             }
         }
 
+        // POST /api/v1/bounty/:id/fund — add credits to a bounty's reward pool
+        // Requires: Bearer token auth.  Body: { "credits": N, "room": "<label>" (optional) }
+        // Returns: { "bounty_id", "new_total", "message" }
+        ("POST", ["api", "v1", "bounty", task_id, "fund"]) => {
+            let agent_id = match verify_bearer_agent_token(&raw) {
+                Ok(id) => id,
+                Err(e) => {
+                    send_json(stream, 401, &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'")));
+                    return;
+                }
+            };
+            let parsed: serde_json::Value = match serde_json::from_str(body) {
+                Ok(v) => v,
+                Err(_) => {
+                    send_json(stream, 400, r#"{"error":"invalid JSON body"}"#);
+                    return;
+                }
+            };
+            let credits = match parsed["credits"].as_i64().filter(|&n| n > 0) {
+                Some(n) => n,
+                None => {
+                    send_json(stream, 400, r#"{"error":"credits must be a positive integer"}"#);
+                    return;
+                }
+            };
+            let room_label = parsed["room"].as_str().map(|s| s.to_string());
+            let tid = (*task_id).to_string();
+            let result = chat::bounty_fund_as(&agent_id, &tid, credits, room_label.as_deref());
+            match result {
+                Ok(msg) => {
+                    let resp = serde_json::json!({
+                        "bounty_id": tid,
+                        "credits_added": credits,
+                        "message": msg,
+                    });
+                    send_json(stream, 200, &resp.to_string());
+                }
+                Err(e) => send_json(stream, 400, &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'"))),
+            }
+        }
+
         // GET /api/v1/economy/health — economic health score, velocity, Gini
         ("GET", ["api", "v1", "economy", "health"]) => {
             let h = chat::economy_health();

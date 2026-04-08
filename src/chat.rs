@@ -1773,6 +1773,7 @@ fn task_add_with_oracle(
         reward_credits,
         reward_trust,
         submissions: vec![],
+        crowdfund_contributions: vec![],
     });
     store::save_tasks(&room.room_id, &tasks);
     Ok(id)
@@ -1807,6 +1808,7 @@ pub fn bounty_submit(task_id: &str, branch: &str, room_label: Option<&str>) -> R
                         .or_else(|| msg["reward"].as_i64()),
                     reward_trust: msg["reward_trust"].as_i64(),
                     submissions: vec![],
+                    crowdfund_contributions: vec![],
                 });
                 break;
             }
@@ -1975,6 +1977,7 @@ pub fn bounty_verify(task_id: &str, agent_id: &str, room_label: Option<&str>) ->
             reward_credits,
             reward_trust,
             submissions: vec![],
+            crowdfund_contributions: vec![],
         };
         publish_task_receipt(
             &room,
@@ -2855,6 +2858,7 @@ pub fn task_add_as(agent_id: &str, title: &str, room_label: Option<&str>) -> Res
         reward_credits: None,
         reward_trust: None,
         submissions: vec![],
+        crowdfund_contributions: vec![],
     };
     let mut tasks = store::load_tasks(&room.room_id);
     tasks.push(task);
@@ -3171,6 +3175,7 @@ pub fn seed_verify(seed_id: &str, answer: &str, room_label: Option<&str>) -> Res
         reward_credits: if credit_reward > 0 { Some(credit_reward) } else { None },
         reward_trust: None,
         submissions: vec![],
+        crowdfund_contributions: vec![],
     };
 
     publish_task_receipt(&room, &task, &me, "done", task.notes.as_deref(), task.updated_at);
@@ -3234,6 +3239,7 @@ pub fn task_list(room_label: Option<&str>) -> Result<Vec<store::Task>, String> {
                         reward_credits: None,
                         reward_trust: None,
                         submissions: vec![],
+                        crowdfund_contributions: vec![],
                     });
                 }
             }
@@ -4694,6 +4700,7 @@ mod tests {
                 reward_credits: None,
                 reward_trust: None,
                 submissions: vec![],
+                crowdfund_contributions: vec![],
             }],
         );
 
@@ -5793,129 +5800,6 @@ pub fn agent_leaderboard() -> Vec<serde_json::Value> {
         .collect()
 }
 
-/// Economic health snapshot: credit velocity, Gini coefficient, and composite health score.
-///
-/// Returns a JSON object with:
-/// - `velocity_24h`: absolute credit movement (|amount| summed) in the last 24 hours
-/// - `active_agents_24h`: unique agents with any credit transaction in last 24h
-/// - `gini`: Gini coefficient of positive credit balances (0 = perfect equality, 1 = extreme concentration; undefined for ≤1 holder → 0)
-/// - `bounties_open`: count of open bounties across all rooms
-/// - `health_score`: composite 0-100 score — 100 = thriving, <30 = stagnant
-/// - `status`: "thriving" | "healthy" | "slow" | "stagnant" | "cold"
-/// - `warnings`: list of human-readable issues detected
-pub fn economy_health() -> serde_json::Value {
-    let rooms = store::load_registry();
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    let window_24h = now.saturating_sub(86400);
-
-    let mut velocity_24h: i64 = 0;
-    let mut active_agents_24h: HashSet<String> = HashSet::new();
-    let mut balances: HashMap<String, i64> = HashMap::new();
-    let mut bounties_open: usize = 0;
-    let mut total_credits: i64 = 0;
-
-    for room in &rooms {
-        let ledger = store::load_ledger(&room.room_id);
-        for entry in &ledger {
-            if entry.ledger == "trust" { continue; }
-            // Accumulate balances for Gini calculation.
-            *balances.entry(entry.agent_id.clone()).or_insert(0) += entry.amount;
-            total_credits += entry.amount;
-            // Velocity: activity in the last 24h.
-            if entry.ts >= window_24h {
-                velocity_24h += entry.amount.abs();
-                active_agents_24h.insert(entry.agent_id.clone());
-            }
-        }
-        let msgs = store::load_messages(&room.room_id, 604800);
-        bounties_open += msgs.iter()
-            .filter(|m| m["type"].as_str() == Some("bounty") && m["status"].as_str() == Some("open"))
-            .count();
-    }
-
-    // Gini coefficient over positive balances.
-    let mut pos_balances: Vec<f64> = balances.values()
-        .filter(|&&b| b > 0)
-        .map(|&b| b as f64)
-        .collect();
-    // Gini is 0 (perfect equality) when there are 0 or 1 holders — no inequality to measure.
-    let gini = if pos_balances.len() < 2 {
-        0.0_f64
-    } else {
-        pos_balances.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-        let n = pos_balances.len() as f64;
-        let sum: f64 = pos_balances.iter().sum();
-        if sum == 0.0 {
-            0.0
-        } else {
-            let weighted_sum: f64 = pos_balances.iter().enumerate()
-                .map(|(i, &x)| (2.0 * (i as f64 + 1.0) - n - 1.0) * x)
-                .sum();
-            weighted_sum / (n * sum)
-        }
-    };
-
-    // Composite health score: 0-100.
-    // Components (each 0-100, weighted):
-    //   40% velocity_score    — credits moved in last 24h relative to supply
-    //   30% participation     — active_agents / total holders
-    //   20% bounty_score      — open bounties signal demand
-    //   10% gini_score        — lower inequality is healthier (penalised at extremes)
-    let holders = pos_balances.len().max(1);
-    let velocity_score: f64 = if total_credits <= 0 {
-        0.0
-    } else {
-        ((velocity_24h as f64 / total_credits as f64) * 200.0).min(100.0)
-    };
-    let participation: f64 = ((active_agents_24h.len() as f64 / holders as f64) * 100.0).min(100.0);
-    let bounty_score: f64 = (bounties_open as f64 * 20.0).min(100.0);
-    let gini_score: f64 = (1.0 - gini) * 100.0;
-
-    let health_score = (0.40 * velocity_score
-        + 0.30 * participation
-        + 0.20 * bounty_score
-        + 0.10 * gini_score)
-        .round() as u32;
-
-    let status = match health_score {
-        80..=100 => "thriving",
-        60..=79  => "healthy",
-        40..=59  => "slow",
-        20..=39  => "stagnant",
-        _        => "cold",
-    };
-
-    let mut warnings: Vec<&str> = Vec::new();
-    if total_credits == 0 { warnings.push("No credits in circulation — solve calibration seeds to bootstrap"); }
-    if velocity_24h == 0 && total_credits > 0 { warnings.push("Zero credit movement in 24h — economy is frozen"); }
-    if bounties_open == 0 { warnings.push("No open bounties — post a bounty to create demand"); }
-    if gini > 0.8 && holders > 1 { warnings.push("High credit concentration (Gini > 0.8) — few agents hold most credits"); }
-    if active_agents_24h.is_empty() && total_credits > 0 { warnings.push("No active agents in 24h — economy is dormant"); }
-
-    serde_json::json!({
-        "health_score": health_score,
-        "status": status,
-        "metrics": {
-            "velocity_24h": velocity_24h,
-            "active_agents_24h": active_agents_24h.len(),
-            "total_credits_in_circulation": total_credits,
-            "credit_holders": holders,
-            "open_bounties": bounties_open,
-            "gini_coefficient": (gini * 1000.0).round() / 1000.0,
-        },
-        "component_scores": {
-            "velocity": velocity_score.round() as u32,
-            "participation": participation.round() as u32,
-            "bounty_demand": bounty_score.round() as u32,
-            "distribution": gini_score.round() as u32,
-        },
-        "warnings": warnings,
-    })
-}
-
 /// Transfer credits between agents.
 pub fn credit_transfer(to_agent: &str, amount: i64, reason: Option<&str>, room_label: Option<&str>) -> Result<(i64, i64), String> {
     let room = resolve_room(room_label)?;
@@ -6042,54 +5926,96 @@ pub fn bounties_list(room_label: Option<&str>) -> Result<serde_json::Value, Stri
     }))
 }
 
-/// Add credits to an existing bounty's reward pool.
+/// Add credits to an existing bounty's reward pool (crowdfunding).
 ///
-/// The `amount` is deducted from `funder_agent`'s balance and added to the bounty's
-/// `reward_credits`. Returns `(new_reward_credits, contributor_count)` on success.
-pub fn bounty_fund(task_id: &str, funder_agent: &str, amount: i64, room_label: Option<&str>) -> Result<(i64, usize), String> {
-    if amount <= 0 {
-        return Err("amount must be positive".to_string());
+/// Escrows `credits` from the caller's (or `agent_id_override` if provided) balance and
+/// adds them to the bounty's `reward_credits` + `crowdfund_contributions` list.
+/// Returns a human-readable status string on success.
+pub fn bounty_fund(task_id: &str, credits: i64, room_label: Option<&str>) -> Result<String, String> {
+    bounty_fund_as(&store::get_agent_id(), task_id, credits, room_label)
+}
+
+/// Like `bounty_fund` but allows specifying the funding agent explicitly (used by REST API).
+pub fn bounty_fund_as(funder: &str, task_id: &str, credits: i64, room_label: Option<&str>) -> Result<String, String> {
+    let me = funder.to_string();
+    if credits <= 0 {
+        return Err("Credits must be a positive integer".to_string());
     }
     let room = resolve_room(room_label)?;
-    let balance = store::credit_balance(&room.room_id, funder_agent);
-    if balance < amount {
-        return Err(format!("insufficient credits: have {balance}, need {amount}"));
-    }
     let mut tasks = store::load_tasks(&room.room_id);
+
+    // Rebuild from messages if not in local store (cross-session support).
+    if !tasks.iter().any(|t| t.id.starts_with(task_id)) {
+        let msgs = store::load_messages(&room.room_id, 604800);
+        for msg in &msgs {
+            if msg["type"].as_str() == Some("bounty")
+                && msg["id"].as_str().map_or(false, |id| id.starts_with(task_id))
+            {
+                let id = msg["id"].as_str().unwrap_or("").to_string();
+                let title = msg["title"].as_str().unwrap_or("").to_string();
+                tasks.push(store::Task {
+                    id,
+                    title,
+                    status: msg["status"].as_str().unwrap_or("open").to_string(),
+                    created_by: msg["from"].as_str().unwrap_or("").to_string(),
+                    claimed_by: None,
+                    created_at: msg["ts"].as_u64().unwrap_or(0),
+                    updated_at: msg["ts"].as_u64().unwrap_or(0),
+                    notes: None,
+                    acceptance_oracle: msg["acceptance_oracle"].as_str().map(|s| s.to_string()),
+                    reward_credits: msg["reward_credits"].as_i64(),
+                    reward_trust: msg["reward_trust"].as_i64(),
+                    submissions: vec![],
+                    crowdfund_contributions: vec![],
+                });
+            }
+        }
+    }
+
     let task = tasks.iter_mut()
-        .find(|t| t.id.starts_with(task_id) || t.id == task_id)
-        .ok_or_else(|| format!("bounty '{task_id}' not found"))?;
+        .find(|t| t.id.starts_with(task_id))
+        .ok_or_else(|| format!("No task matching '{task_id}'"))?;
+
     if task.status != "open" {
-        return Err(format!("bounty '{}' is not open (status: {})", task.id, task.status));
+        return Err(format!("Bounty '{}' is not open (status: {})", task.title, task.status));
     }
 
-    // Deduct from funder and add to reward.
-    store::credit_add(&room.room_id, funder_agent, -amount, &format!("bounty fund: {}", task.id));
-    let prev_reward = task.reward_credits.unwrap_or(0);
-    let new_reward = prev_reward + amount;
-    task.reward_credits = Some(new_reward);
-
-    // Track contributor.
-    let contributors = task.notes.get_or_insert_with(String::new);
-    let entry = format!("contributor:{funder_agent}:{amount}");
-    if !contributors.contains(&entry) {
-        if !contributors.is_empty() { contributors.push(' '); }
-        contributors.push_str(&entry);
+    let balance = store::credit_balance(&room.room_id, &me);
+    if balance < credits {
+        return Err(format!("Insufficient credits: have {balance}, want to contribute {credits}"));
     }
-    let contributor_count = contributors.split_whitespace()
-        .filter(|s| s.starts_with("contributor:"))
-        .count();
 
+    // Escrow the credits from contributor.
+    store::credit_add(&room.room_id, &me, -credits, &format!("crowdfund: {} ({})", task.title, &task.id[..6]));
+
+    // Add to task's crowdfund pool.
+    task.crowdfund_contributions.push(store::CrowdfundContribution {
+        agent_id: me.clone(),
+        credits,
+        contributed_at: now(),
+    });
+    task.reward_credits = Some(task.reward_credits.unwrap_or(0) + credits);
+
+    let new_total = task.reward_credits.unwrap_or(0);
+    let task_title = task.title.clone();
+    let task_id_short = task.id[..6.min(task.id.len())].to_string();
     store::save_tasks(&room.room_id, &tasks);
 
-    // Announce in room.
-    let msg = format!(
-        "[bounty-fund] {funder_agent} added {amount}cr to bounty '{}' — new reward: {new_reward}cr",
-        task.id
-    );
-    let _ = send_message(&room.room_id, funder_agent, &msg, None, None, false);
+    let room_key = crypto::derive_room_key(&room.secret, &room.room_id);
+    let env = json!({
+        "v": VERSION, "id": msg_id(), "from": me, "ts": now(),
+        "type": "bounty_fund",
+        "bounty_id": task_id,
+        "amount": credits,
+        "new_total": new_total,
+        "text": format!("[crowdfund] {} contributed {}cr to bounty '{}' ({}) — pool now {}cr",
+            &me[..8.min(me.len())], credits, task_title, task_id_short, new_total),
+    });
+    let encrypted = encrypt_envelope(&env, &room_key, &room.room_id);
+    transport::publish(&room.room_id, &encrypted);
+    store::save_message(&room.room_id, &env);
 
-    Ok((new_reward, contributor_count))
+    Ok(format!("Contributed {credits}cr to bounty '{task_title}' ({task_id_short}). Pool now {new_total}cr."))
 }
 
 /// Economic health snapshot: credit velocity (with trend), Gini coefficient, and composite health score.
