@@ -2202,11 +2202,19 @@ pub fn payment_fund(
     credits: i64,
     room_label: Option<&str>,
 ) -> Result<String, String> {
+    let me = store::get_agent_id();
+    payment_fund_as(&me, credits, room_label)
+}
+
+pub fn payment_fund_as(
+    agent_id: &str,
+    credits: i64,
+    room_label: Option<&str>,
+) -> Result<String, String> {
     if credits <= 0 {
         return Err("Credits must be positive.".to_string());
     }
     let room = resolve_room(room_label)?;
-    let me = store::get_agent_id();
 
     let stripe_key = std::env::var("STRIPE_SECRET_KEY")
         .map_err(|_| "STRIPE_SECRET_KEY not set. Configure Stripe to enable payments.".to_string())?;
@@ -2240,7 +2248,7 @@ pub fn payment_fund(
          &line_items[0][quantity]=1\
          &success_url={success_url}\
          &cancel_url={cancel_url}\
-         &metadata[agent_id]={me}\
+         &metadata[agent_id]={agent_id}\
          &metadata[payment_id]={payment_id}\
          &metadata[credits]={credits_meta}\
          &metadata[room_id]={room_id}",
@@ -2248,7 +2256,7 @@ pub fn payment_fund(
         credits_label = credits,
         success_url = urlencoded(&success_url),
         cancel_url = urlencoded(&cancel_url),
-        me = urlencoded(&me),
+        agent_id = urlencoded(agent_id),
         payment_id = urlencoded(&payment_id),
         credits_meta = credits,
         room_id = urlencoded(&room.room_id),
@@ -2283,7 +2291,7 @@ pub fn payment_fund(
     let fee_credits = credits / 10; // 10% platform fee
     let record = store::PaymentRecord {
         id: payment_id.clone(),
-        agent_id: me.clone(),
+        agent_id: agent_id.to_string(),
         kind: store::PaymentKind::Deposit,
         status: store::PaymentStatus::Pending,
         provider: store::PaymentProvider::Stripe,
@@ -2302,13 +2310,13 @@ pub fn payment_fund(
     // Announce pending deposit to room (hidden)
     let room_key = crypto::derive_room_key(&room.secret, &room.room_id);
     let env = json!({
-        "v": VERSION, "id": msg_id(), "from": me, "ts": now(),
+        "v": VERSION, "id": msg_id(), "from": agent_id, "ts": now(),
         "type": "payment",
         "action": "checkout_created",
         "payment_id": payment_id,
         "credits": credits,
         "amount_cents": amount_cents,
-        "text": format!("[payment] {me} initiated deposit: {credits} credits (${:.2})", amount_cents as f64 / 100.0),
+        "text": format!("[payment] {agent_id} initiated deposit: {credits} credits (${:.2})", amount_cents as f64 / 100.0),
         "hidden": true,
     });
     let encrypted = encrypt_envelope(&env, &room_key, &room.room_id);
@@ -2456,11 +2464,15 @@ pub fn payment_withdraw(
 
 /// List payment history for the calling agent.
 pub fn payment_history(room_label: Option<&str>) -> Result<Vec<store::PaymentRecord>, String> {
-    let _room = resolve_room(room_label)?;
     let me = store::get_agent_id();
+    payment_history_as(&me, room_label)
+}
+
+pub fn payment_history_as(agent_id: &str, room_label: Option<&str>) -> Result<Vec<store::PaymentRecord>, String> {
+    let _room = resolve_room(room_label)?;
     let payments = store::load_payments()
         .into_iter()
-        .filter(|p| p.agent_id == me)
+        .filter(|p| p.agent_id == agent_id)
         .collect();
     Ok(payments)
 }
@@ -4156,7 +4168,7 @@ mod tests {
         decrypt_payload, discover, discovery_decay_weight, enforce_outbound_plaza_rate_limit,
         encrypt_envelope,
         infer_soma_subject_path, ingest_auxiliary_event, list_role_leases, list_work_receipts,
-        make_envelope, make_invite_redemption, pin, pins, resolve_room, role_claim,
+        make_envelope, make_invite_redemption, payment_history_as, pin, pins, resolve_room, role_claim,
         role_heartbeat, role_release, payment_complete_solana_deposit,
         seed_plaza_rate_limit_state, send_watch_heartbeat,
         should_display_message, signing_message_bytes, soma_churn_decay, soma_correct,
@@ -5073,7 +5085,7 @@ mod tests {
     #[test]
     fn task_add_as_records_verified_creator() {
         let _guard = store::test_env_lock().lock().unwrap();
-        let (_home, room) = setup_plaza_room("server-host", Role::Admin);
+        let (_home, _room) = setup_plaza_room("server-host", Role::Admin);
 
         let task_id = task_add_as("api-agent", "Ship API auth", Some("plaza")).unwrap();
 
@@ -5118,6 +5130,49 @@ mod tests {
             m["from"].as_str() == Some("worker-agent")
                 && m["text"].as_str().unwrap_or("").contains("[task] Done by worker-agent")
         }));
+    }
+
+    #[test]
+    fn payment_history_as_filters_by_verified_agent() {
+        let _guard = store::test_env_lock().lock().unwrap();
+        let (_home, room) = setup_plaza_room("server-host", Role::Admin);
+        let ts = current_ts();
+
+        let mut payments = store::load_payments();
+        payments.push(store::PaymentRecord {
+            id: "p1".to_string(),
+            agent_id: "agent-a".to_string(),
+            kind: store::PaymentKind::Deposit,
+            status: store::PaymentStatus::Completed,
+            provider: store::PaymentProvider::Stripe,
+            amount_cents: 100,
+            credits: 1000,
+            fee_credits: 100,
+            stripe_id: Some("sess_a".to_string()),
+            checkout_url: None,
+            created_at: ts,
+            updated_at: ts,
+        });
+        payments.push(store::PaymentRecord {
+            id: "p2".to_string(),
+            agent_id: "agent-b".to_string(),
+            kind: store::PaymentKind::Deposit,
+            status: store::PaymentStatus::Completed,
+            provider: store::PaymentProvider::Stripe,
+            amount_cents: 200,
+            credits: 2000,
+            fee_credits: 200,
+            stripe_id: Some("sess_b".to_string()),
+            checkout_url: None,
+            created_at: ts,
+            updated_at: ts,
+        });
+        store::save_payments(&payments);
+
+        let history = payment_history_as("agent-a", Some("plaza")).unwrap();
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].agent_id, "agent-a");
+        assert_eq!(history[0].id, "p1");
     }
 }
 

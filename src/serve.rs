@@ -1185,6 +1185,13 @@ fn handle_connection(stream: TcpStream) {
         // POST /api/payments/create-checkout — initiate a Stripe deposit
         // Body (JSON): {"credits": N, "room": "plaza"}
         ("POST", ["api", "payments", "create-checkout"]) => {
+            let agent_id = match verify_bearer_agent_token(&raw) {
+                Ok(agent_id) => agent_id,
+                Err(e) => {
+                    send_json(stream, 401, &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'")));
+                    return;
+                }
+            };
             let parsed: serde_json::Value = match serde_json::from_str(body) {
                 Ok(v) => v,
                 Err(_) => {
@@ -1200,9 +1207,9 @@ fn handle_connection(stream: TcpStream) {
                 }
             };
             let room = parsed["room"].as_str();
-            match chat::payment_fund(credits, room) {
+            match chat::payment_fund_as(&agent_id, credits, room) {
                 Ok(checkout_url) => {
-                    let resp = serde_json::json!({"checkout_url": checkout_url});
+                    let resp = serde_json::json!({"checkout_url": checkout_url, "agent_id": agent_id});
                     send_json(stream, 200, &resp.to_string());
                 }
                 Err(e) => send_json(stream, 400, &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'"))),
@@ -1419,6 +1426,13 @@ fn handle_connection(stream: TcpStream) {
         // GET /api/payments/history — list payment history for the calling agent
         // Query param: room=plaza
         ("GET", ["api", "payments", "history"]) => {
+            let agent_id = match verify_bearer_agent_token(&raw) {
+                Ok(agent_id) => agent_id,
+                Err(e) => {
+                    send_json(stream, 401, &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'")));
+                    return;
+                }
+            };
             let room = path.split_once('?').and_then(|(_, qs)| {
                 qs.split('&').find_map(|kv| {
                     let mut parts = kv.splitn(2, '=');
@@ -1426,7 +1440,7 @@ fn handle_connection(stream: TcpStream) {
                     if k == "room" { parts.next().map(|v| v.to_string()) } else { None }
                 })
             });
-            match chat::payment_history(room.as_deref()) {
+            match chat::payment_history_as(&agent_id, room.as_deref()) {
                 Ok(records) => {
                     let resp = serde_json::to_string(&records).unwrap_or_else(|_| "[]".to_string());
                     send_json(stream, 200, &resp);
