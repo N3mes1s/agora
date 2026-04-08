@@ -1693,6 +1693,12 @@ pub fn vouch_count(agent_id: &str) -> usize {
 /// Post a bounty — a task with a priority weight that boosts discoverer trust.
 ///
 /// `acceptance_oracle`: optional shell command run against submissions to auto-verify (e.g. "cargo test").
+/// Minimum trust score required to post a bounty.
+/// A fresh agent scores ~1.0; completing one task in one room yields ~2.4.
+/// This threshold requires at least one verified completed task before posting,
+/// preventing spam bounties from throwaway identities.
+const BOUNTY_POST_MIN_TRUST: f64 = 2.0;
+
 pub fn bounty_post(
     title: &str,
     priority: u32,
@@ -1702,6 +1708,16 @@ pub fn bounty_post(
 ) -> Result<String, String> {
     let room = resolve_room(room_label)?;
     let me = store::get_agent_id();
+
+    // Trust gating: require at least one completed task before posting bounties.
+    let (trust_score, _, _, _) = compute_agent_trust_score(&me);
+    if trust_score < BOUNTY_POST_MIN_TRUST {
+        return Err(format!(
+            "Trust score too low to post a bounty: {trust_score:.2} < {BOUNTY_POST_MIN_TRUST}. \
+             Complete at least one task first to establish trust."
+        ));
+    }
+
     let id = msg_id();
     let room_key = crypto::derive_room_key(&room.secret, &room.room_id);
     let reward_trust = reward_credits.map(|c| (c / 10).max(1));
@@ -3070,8 +3086,12 @@ const PUZZLES: &[(&str, &str, &str, &str)] = &[
 fn seed_credit_reward(difficulty: &str) -> i64 {
     match difficulty {
         "easy" => 0,
-        "medium" => 5,
-        "hard" => 25,
+        // Bootstrap-viable rewards: enough to fund at least one medium bounty submission.
+        // Previous values (medium=5, hard=25) were too small to sustain any economic activity.
+        // At 1000 credits = $1.00, medium=50cr ($0.05) and hard=250cr ($0.25) are still cheap
+        // proof-of-work but allow the economy to actually function.
+        "medium" => 50,
+        "hard" => 250,
         _ => 0,
     }
 }
@@ -5256,6 +5276,44 @@ mod tests {
             .or_else(|| messages.iter().find(|m| m["text"].as_str().unwrap_or("").contains("Ship API auth")))
             .expect("task message saved");
         assert_eq!(msg["from"].as_str(), Some("api-agent"));
+    }
+
+    /// Medium seeds now reward 50 credits (10x from the old 5).
+    #[test]
+    fn seed_credit_reward_medium_is_fifty() {
+        assert_eq!(super::seed_credit_reward("medium"), 50);
+    }
+
+    /// Hard seeds now reward 250 credits (10x from the old 25).
+    #[test]
+    fn seed_credit_reward_hard_is_two_fifty() {
+        assert_eq!(super::seed_credit_reward("hard"), 250);
+    }
+
+    /// Easy seeds remain free (no reward).
+    #[test]
+    fn seed_credit_reward_easy_is_zero() {
+        assert_eq!(super::seed_credit_reward("easy"), 0);
+    }
+
+    /// A fresh agent (trust ≈ 1.0) cannot post a bounty — trust threshold is 2.0.
+    #[test]
+    fn bounty_post_requires_minimum_trust() {
+        let _guard = store::test_env_lock().lock().unwrap();
+        let agent_id = "trust-gating-test-agent";
+        let (_home, _room) = setup_plaza_room(agent_id, Role::Member);
+
+        // Fresh agent has no work receipts → trust score ≈ 1.0, below threshold 2.0.
+        let result = super::bounty_post("Low-trust bounty", 1, None, Some(10), None);
+        assert!(
+            result.is_err(),
+            "bounty_post must reject a fresh agent with trust < 2.0"
+        );
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("Trust score too low"),
+            "error must mention trust score, got: {err}"
+        );
     }
 }
 
