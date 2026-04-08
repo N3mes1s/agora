@@ -5004,6 +5004,28 @@ mod tests {
             "no submission should be recorded for self-dealing attempt"
         );
     }
+
+    #[test]
+    fn agent_leaderboard_output_is_valid_json_array() {
+        // agent_leaderboard reads from whatever rooms are locally joined.
+        // We just verify the function runs without panicking and returns
+        // a JSON array where each entry has the required fields.
+        let rows = super::agent_leaderboard();
+        for (i, row) in rows.iter().enumerate() {
+            assert!(row["rank"].is_u64(), "rank must be an integer");
+            assert!(row["agent_id"].is_string(), "agent_id must be a string");
+            assert!(row["display"].is_string(), "display must be a string");
+            assert!(row["credits"].is_i64() || row["credits"].is_u64(), "credits must be an integer");
+            assert!(row["trust"].is_i64() || row["trust"].is_u64(), "trust must be an integer");
+            assert_eq!(row["rank"].as_u64().unwrap(), (i + 1) as u64, "ranks must be 1-indexed and sequential");
+        }
+        // Verify sort invariant: credits must be non-increasing.
+        for window in rows.windows(2) {
+            let a = window[0]["credits"].as_i64().unwrap_or(0);
+            let b = window[1]["credits"].as_i64().unwrap_or(0);
+            assert!(a >= b, "leaderboard must be sorted by credits descending");
+        }
+    }
 }
 
 /// Search messages by text, optionally filtered by sender.
@@ -5354,6 +5376,60 @@ fn parse_since(since: &str) -> u64 {
     } else {
         7200
     }
+}
+
+/// Aggregate credit and trust balances across all joined rooms, returning a
+/// sorted leaderboard (highest credits first, trust as tiebreaker).
+pub fn agent_leaderboard() -> Vec<serde_json::Value> {
+    let rooms = store::load_registry();
+    let aliases = store::load_aliases();
+
+    // Accumulate per-agent totals across all rooms.
+    let mut credits: HashMap<String, i64> = HashMap::new();
+    let mut trust:   HashMap<String, i64> = HashMap::new();
+
+    for room in &rooms {
+        for entry in store::load_ledger(&room.room_id) {
+            if entry.ledger == "trust" {
+                *trust.entry(entry.agent_id.clone()).or_insert(0) += entry.amount;
+            } else {
+                *credits.entry(entry.agent_id.clone()).or_insert(0) += entry.amount;
+            }
+        }
+    }
+
+    // Collect all known agent IDs.
+    let mut all_agents: std::collections::HashSet<String> = HashSet::new();
+    all_agents.extend(credits.keys().cloned());
+    all_agents.extend(trust.keys().cloned());
+
+    let mut rows: Vec<(String, i64, i64)> = all_agents
+        .into_iter()
+        .map(|id| {
+            let c = credits.get(&id).copied().unwrap_or(0);
+            let t = trust.get(&id).copied().unwrap_or(0);
+            (id, c, t)
+        })
+        .collect();
+
+    // Sort: most credits first; trust as tiebreaker.
+    rows.sort_by(|a, b| b.1.cmp(&a.1).then(b.2.cmp(&a.2)));
+
+    rows.into_iter()
+        .enumerate()
+        .map(|(i, (agent_id, c, t))| {
+            let display = aliases.get(&agent_id)
+                .cloned()
+                .unwrap_or_else(|| format!("{}…{}", &agent_id[..4], &agent_id[agent_id.len()-4..]));
+            serde_json::json!({
+                "rank": i + 1,
+                "agent_id": agent_id,
+                "display": display,
+                "credits": c,
+                "trust": t,
+            })
+        })
+        .collect()
 }
 
 /// Transfer credits between agents.
