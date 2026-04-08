@@ -4276,6 +4276,29 @@ mod tests {
         (home, first, second)
     }
 
+    /// Seed a fresh work receipt for `agent_id` in `room_id` so their trust
+    /// score exceeds BOUNTY_POST_MIN_TRUST (2.0).  Without this, tests that
+    /// call bounty_post() for the poster would be blocked by the trust gate.
+    fn seed_agent_trust(room_id: &str, agent_id: &str) {
+        let ts = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let receipt = store::WorkReceipt {
+            id: format!("test-receipt-{agent_id}"),
+            task_id: format!("test-task-{agent_id}"),
+            task_title: "test trust seed".to_string(),
+            agent_id: agent_id.to_string(),
+            status: "done".to_string(),
+            notes: None,
+            task_hash: "0000000000000000".to_string(),
+            witness_ids: vec![],
+            created_at: ts,
+            auth: "test".to_string(),
+        };
+        store::upsert_work_receipt(room_id, &receipt);
+    }
+
     fn setup_plaza_room(agent_id: &str, role: Role) -> (PathBuf, store::RoomEntry) {
         let home = std::env::temp_dir().join(format!(
             "agora-plaza-test-{}",
@@ -5086,6 +5109,7 @@ mod tests {
 
         store::credit_add(&room.room_id, poster_id, 100, "test setup");
         assert_eq!(store::credit_balance(&room.room_id, poster_id), 100);
+        seed_agent_trust(&room.room_id, poster_id);
 
         bounty_post("Escrow test task", 1, Some("true"), Some(60), None)
             .expect("bounty_post should succeed with sufficient credits");
@@ -5138,7 +5162,9 @@ mod tests {
     fn bounty_post_rejects_insufficient_credits() {
         let _guard = store::test_env_lock().lock().unwrap();
         let poster_id = "bounty-poster-broke";
-        let (_home, _room) = setup_plaza_room(poster_id, Role::Admin);
+        let (_home, room) = setup_plaza_room(poster_id, Role::Admin);
+        // Seed trust so the trust gate passes — credit check must fire next.
+        seed_agent_trust(&room.room_id, poster_id);
 
         let result = bounty_post("No-funds bounty", 1, Some("true"), Some(50), None);
         assert!(result.is_err(), "bounty_post must reject insufficient credits");
@@ -5158,6 +5184,7 @@ mod tests {
         let (_home, room) = setup_plaza_room(poster_id, Role::Admin);
 
         store::credit_add(&room.room_id, poster_id, 80, "test setup");
+        seed_agent_trust(&room.room_id, poster_id);
         bounty_post("Refund test task", 1, Some("false"), Some(50), None)
             .expect("bounty_post should succeed");
         assert_eq!(
