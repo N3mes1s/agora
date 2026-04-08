@@ -1693,6 +1693,11 @@ pub fn vouch_count(agent_id: &str) -> usize {
 /// Post a bounty — a task with a priority weight that boosts discoverer trust.
 ///
 /// `acceptance_oracle`: optional shell command run against submissions to auto-verify (e.g. "cargo test").
+///
+/// Requires a minimum trust score to prevent throwaway-identity spam.
+/// A fresh agent scores ~1.0; completing one calibration seed in one room yields ~2.4.
+const BOUNTY_POST_MIN_TRUST: f64 = 2.0;
+
 pub fn bounty_post(
     title: &str,
     priority: u32,
@@ -1702,6 +1707,15 @@ pub fn bounty_post(
 ) -> Result<String, String> {
     let room = resolve_room(room_label)?;
     let me = store::get_agent_id();
+
+    let (trust_score, _, _, _) = compute_agent_trust_score(&me);
+    if trust_score < BOUNTY_POST_MIN_TRUST {
+        return Err(format!(
+            "Trust score too low to post a bounty: {trust_score:.2} < {BOUNTY_POST_MIN_TRUST}. \
+             Solve at least one calibration seed first."
+        ));
+    }
+
     let id = msg_id();
     let room_key = crypto::derive_room_key(&room.secret, &room.room_id);
     let reward_trust = reward_credits.map(|c| (c / 10).max(1));
@@ -3067,11 +3081,15 @@ const PUZZLES: &[(&str, &str, &str, &str)] = &[
 ];
 
 /// Credits awarded for solving calibration seeds by difficulty.
+/// These values are calibrated so a single hard seed solve (250cr = $0.25) is
+/// enough to fund a small bounty, enabling genuine economic bootstrapping from
+/// a cold start.  Previous values (medium=5, hard=25) were too small to
+/// sustain any activity at 1000cr=$1.00.
 fn seed_credit_reward(difficulty: &str) -> i64 {
     match difficulty {
         "easy" => 0,
-        "medium" => 5,
-        "hard" => 25,
+        "medium" => 50,
+        "hard" => 250,
         _ => 0,
     }
 }
@@ -4275,6 +4293,29 @@ mod tests {
         (home, room)
     }
 
+    /// Seed a work receipt for `agent_id` in `room_id` so their trust score
+    /// exceeds BOUNTY_POST_MIN_TRUST (2.0).  Without this, tests that call
+    /// bounty_post() on behalf of the poster fail at the trust gate.
+    fn seed_agent_trust(room_id: &str, agent_id: &str) {
+        let ts = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let receipt = store::WorkReceipt {
+            id: format!("test-receipt-{agent_id}"),
+            task_id: format!("test-task-{agent_id}"),
+            task_title: "test trust seed".to_string(),
+            agent_id: agent_id.to_string(),
+            status: "done".to_string(),
+            notes: None,
+            task_hash: "0000000000000000".to_string(),
+            witness_ids: vec![],
+            created_at: ts,
+            auth: "test".to_string(),
+        };
+        store::upsert_work_receipt(room_id, &receipt);
+    }
+
     fn setup_soma_room() -> (PathBuf, store::RoomEntry) {
         let home = std::env::temp_dir().join(format!(
             "agora-soma-test-{}",
@@ -5064,6 +5105,7 @@ mod tests {
         let winner_id = "bounty-winner-escrow";
         let (_home, room) = setup_plaza_room(poster_id, Role::Admin);
 
+        seed_agent_trust(&room.room_id, poster_id);
         store::credit_add(&room.room_id, poster_id, 100, "test setup");
         assert_eq!(store::credit_balance(&room.room_id, poster_id), 100);
 
@@ -5118,7 +5160,10 @@ mod tests {
     fn bounty_post_rejects_insufficient_credits() {
         let _guard = store::test_env_lock().lock().unwrap();
         let poster_id = "bounty-poster-broke";
-        let (_home, _room) = setup_plaza_room(poster_id, Role::Admin);
+        let (_home, room) = setup_plaza_room(poster_id, Role::Admin);
+
+        // Seed trust so we reach the credit check (not the trust gate).
+        seed_agent_trust(&room.room_id, poster_id);
 
         let result = bounty_post("No-funds bounty", 1, Some("true"), Some(50), None);
         assert!(result.is_err(), "bounty_post must reject insufficient credits");
@@ -5137,6 +5182,7 @@ mod tests {
         let submitter_id = "bounty-submitter-fail";
         let (_home, room) = setup_plaza_room(poster_id, Role::Admin);
 
+        seed_agent_trust(&room.room_id, poster_id);
         store::credit_add(&room.room_id, poster_id, 80, "test setup");
         bounty_post("Refund test task", 1, Some("false"), Some(50), None)
             .expect("bounty_post should succeed");
@@ -5682,4 +5728,83 @@ pub fn credit_transfer(to_agent: &str, amount: i64, reason: Option<&str>, room_l
     transport::publish(&room.room_id, &encrypted);
     store::save_message(&room.room_id, &env);
     Ok((my_balance, their_balance))
+}
+
+/// Economy-wide snapshot: credit supply, open bounties, seed stats, per-room breakdown.
+/// Used by GET /api/v1/economy.  No authentication required — public read.
+pub fn economy_stats() -> serde_json::Value {
+    let rooms = store::load_registry();
+    let cpm = store::CREDITS_PER_USD_CENT;
+
+    let mut total_credits: i64 = 0;
+    let mut open_bounties: Vec<serde_json::Value> = Vec::new();
+    let mut room_stats: Vec<serde_json::Value> = Vec::new();
+    let mut total_seeds_solved: usize = 0;
+    let mut total_seeds_pending: usize = 0;
+    let mut agent_credits: HashMap<String, i64> = HashMap::new();
+
+    for room in &rooms {
+        let mut room_credits: i64 = 0;
+        for entry in store::load_ledger(&room.room_id) {
+            if entry.ledger != "trust" {
+                room_credits += entry.amount;
+                *agent_credits.entry(entry.agent_id.clone()).or_insert(0) += entry.amount;
+            }
+        }
+        total_credits += room_credits;
+
+        let msgs = store::load_messages(&room.room_id, 604800);
+        let room_open: Vec<_> = msgs.iter()
+            .filter(|m| m["type"].as_str() == Some("bounty") && m["status"].as_str() == Some("open"))
+            .map(|m| serde_json::json!({
+                "id": m["id"],
+                "title": m["title"],
+                "reward_credits": m["reward_credits"],
+                "priority": m["priority"],
+                "room": room.label,
+            }))
+            .collect();
+        open_bounties.extend(room_open.clone());
+
+        let seeds = store::load_seeds(&room.room_id);
+        let solved = seeds.iter().filter(|s| !s.solved_by.is_empty()).count();
+        let pending = seeds.len() - solved;
+        total_seeds_solved += solved;
+        total_seeds_pending += pending;
+
+        room_stats.push(serde_json::json!({
+            "room": room.label,
+            "credits_in_circulation": room_credits,
+            "open_bounties": room_open.len(),
+            "seeds_solved": solved,
+            "seeds_pending": pending,
+        }));
+    }
+
+    let agents_with_credits = agent_credits.values().filter(|&&v| v > 0).count();
+    let usd_cents = if cpm > 0 { total_credits / cpm } else { 0 };
+
+    serde_json::json!({
+        "exchange_rate": {
+            "credits_per_usd_cent": cpm,
+            "usd_per_credit": format!("${:.4}", 1.0 / (cpm as f64 * 100.0)),
+            "medium_seed_value_usd": format!("${:.2}", 50.0 / (cpm as f64 * 100.0)),
+            "hard_seed_value_usd": format!("${:.2}", 250.0 / (cpm as f64 * 100.0)),
+        },
+        "supply": {
+            "credits_in_circulation": total_credits,
+            "usd_equivalent_cents": usd_cents,
+            "agents_holding_credits": agents_with_credits,
+        },
+        "bounties": {
+            "open": open_bounties.len(),
+            "list": open_bounties,
+        },
+        "seeds": {
+            "solved": total_seeds_solved,
+            "pending": total_seeds_pending,
+            "total": total_seeds_solved + total_seeds_pending,
+        },
+        "rooms": room_stats,
+    })
 }
