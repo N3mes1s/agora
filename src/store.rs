@@ -1351,6 +1351,30 @@ pub fn mark_seen(room_id: &str, msg_id: &str) {
     let _ = fs::write(&path, ids.join("\n"));
 }
 
+// ── Sandbox Sessions ───────────────────────────────────────────
+
+/// Persist a sandbox session so ownership can be verified later.
+pub fn save_session(session: &crate::sandbox::SandboxSession) {
+    let dir = agora_dir().join("sandbox_sessions");
+    ensure_dir(&dir);
+    let path = dir.join(format!("{}.json", session.id));
+    let data = serde_json::to_string(session).unwrap_or_default();
+    let _ = fs::write(path, data);
+}
+
+/// Load a sandbox session by ID. Returns None if not found or parse fails.
+pub fn load_session(session_id: &str) -> Option<crate::sandbox::SandboxSession> {
+    let path = agora_dir().join("sandbox_sessions").join(format!("{session_id}.json"));
+    let data = fs::read_to_string(path).ok()?;
+    serde_json::from_str(&data).ok()
+}
+
+/// Remove a session record (call after destroy).
+pub fn remove_session(session_id: &str) {
+    let path = agora_dir().join("sandbox_sessions").join(format!("{session_id}.json"));
+    let _ = fs::remove_file(path);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

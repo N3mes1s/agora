@@ -763,6 +763,12 @@ enum Commands {
         emoji: String,
     },
 
+    /// List all emoji reactions in the current room
+    Reactions,
+
+    /// List muted agents in the current room
+    Muted,
+
     /// Start local web UI for viewing room history
     Serve {
         /// HTTP port (default: 8080)
@@ -3214,6 +3220,57 @@ fn main() {
         Commands::React { message_id, emoji } => {
             match chat::react(&message_id, &emoji, room) {
                 Ok(()) => println!("  Reacted {emoji} to [{message_id}]"),
+                Err(e) => {
+                    eprintln!("  Error: {e}");
+                    process::exit(1);
+                }
+            }
+        }
+
+        Commands::Reactions => {
+            match chat::reactions(room) {
+                Ok(reactions) => {
+                    if reactions.is_empty() {
+                        println!("  No reactions yet.");
+                    } else {
+                        println!("  Reactions in this room:");
+                        let mut entries: Vec<_> = reactions.into_iter().collect();
+                        entries.sort_by(|a, b| a.0.cmp(&b.0));
+                        for (msg_id, reacts) in entries {
+                            let summary: Vec<String> = {
+                                let mut counts: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+                                for (_, emoji) in &reacts {
+                                    *counts.entry(emoji.as_str()).or_insert(0) += 1;
+                                }
+                                let mut c: Vec<_> = counts.into_iter().collect();
+                                c.sort_by(|a, b| b.1.cmp(&a.1));
+                                c.iter().map(|(e, n)| format!("{e} ×{n}")).collect()
+                            };
+                            println!("  [{msg_id}]  {}", summary.join("  "));
+                        }
+                    }
+                }
+                Err(e) => {
+                    eprintln!("  Error: {e}");
+                    process::exit(1);
+                }
+            }
+        }
+
+        Commands::Muted => {
+            match chat::muted(room) {
+                Ok(muted) => {
+                    if muted.is_empty() {
+                        println!("  No muted agents.");
+                    } else {
+                        println!("  Muted agents:");
+                        let mut ids: Vec<_> = muted.into_iter().collect();
+                        ids.sort();
+                        for id in ids {
+                            println!("    {id}");
+                        }
+                    }
+                }
                 Err(e) => {
                     eprintln!("  Error: {e}");
                     process::exit(1);
