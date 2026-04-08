@@ -24,6 +24,15 @@ fn html_escape(s: &str) -> String {
         .replace('"', "&quot;")
 }
 
+/// Escape a string for safe embedding inside a single-quoted JS string literal.
+/// Escapes backslashes, single quotes, and newline characters.
+fn js_string_escape(s: &str) -> String {
+    s.replace('\\', "\\\\")
+        .replace('\'', "\\'")
+        .replace('\n', "\\n")
+        .replace('\r', "\\r")
+}
+
 /// Decode application/x-www-form-urlencoded bytes.
 fn url_decode(s: &str) -> String {
     let bytes = s.as_bytes();
@@ -166,9 +175,9 @@ pub fn render_message_html(
 <button onclick="sendReact('{mid_short}','👀')">👀</button>
 <button onclick="sendReact('{mid_short}','🎉')">🎉</button>
 <button onclick="sendReact('{mid_short}','🤔')">🤔</button>
-</div></span><button onclick="setReply('{mid_short}','{from_raw}')" title="Reply">↩</button><a class="thread-link" href="{thread_link}" title="Open thread">Thread</a></span>"#,
+</div></span><button onclick="setReply('{mid_short}','{from_js}')" title="Reply">↩</button><a class="thread-link" href="{thread_link}" title="Open thread">Thread</a></span>"#,
         mid_short = mid_short,
-        from_raw = m["from"].as_str().unwrap_or("?"),
+        from_js = js_string_escape(m["from"].as_str().unwrap_or("?")),
         thread_link = thread_link,
     );
 
