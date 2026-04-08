@@ -1693,6 +1693,10 @@ pub fn vouch_count(agent_id: &str) -> usize {
 /// Post a bounty — a task with a priority weight that boosts discoverer trust.
 ///
 /// `acceptance_oracle`: optional shell command run against submissions to auto-verify (e.g. "cargo test").
+/// Minimum trust score required to post a bounty. Agents must have completed at
+/// least one task (score ≈ 2.4 after first receipt) to prevent throwaway spam.
+pub const MIN_TRUST_TO_POST_BOUNTY: f64 = 2.0;
+
 pub fn bounty_post(
     title: &str,
     priority: u32,
@@ -1702,6 +1706,29 @@ pub fn bounty_post(
 ) -> Result<String, String> {
     let room = resolve_room(room_label)?;
     let me = store::get_agent_id();
+
+    // Trust gate: require at least one completed task before posting bounties.
+    let (trust_score, _, _, _) = compute_agent_trust_score(&me);
+    if trust_score < MIN_TRUST_TO_POST_BOUNTY {
+        return Err(format!(
+            "Trust score {trust_score:.2} is below minimum {MIN_TRUST_TO_POST_BOUNTY:.1} to post bounties. \
+             Complete a seed puzzle or task first."
+        ));
+    }
+
+    // Balance check: escrow the reward upfront so credits aren't minted from nothing.
+    if let Some(reward) = reward_credits {
+        let balance = store::credit_balance(&room.room_id, &me);
+        if balance < reward {
+            return Err(format!(
+                "Insufficient credits to post bounty: have {balance}, need {reward}"
+            ));
+        }
+        // Deduct from poster — held in escrow until bounty_verify settles.
+        store::credit_add(&room.room_id, &me, -reward,
+            &format!("escrow: bounty '{title}' (reward {reward}cr)"));
+    }
+
     let id = msg_id();
     let room_key = crypto::derive_room_key(&room.secret, &room.room_id);
     let reward_trust = reward_credits.map(|c| (c / 10).max(1));
@@ -1933,6 +1960,7 @@ pub fn bounty_verify(task_id: &str, agent_id: &str, room_label: Option<&str>) ->
     let reward_credits = task.reward_credits;
     let reward_trust = task.reward_trust;
     let task_title = task.title.clone();
+    let poster_agent_id = task.created_by.clone();
     let task_id_short = task_id[..6.min(task_id.len())].to_string();
     if passed {
         task.status = "done".to_string();
@@ -1944,9 +1972,48 @@ pub fn bounty_verify(task_id: &str, agent_id: &str, room_label: Option<&str>) ->
     let result = if passed { "PASS" } else { "FAIL" };
     let room_key = crypto::derive_room_key(&room.secret, &room.room_id);
 
-    // Auto-distribute credits and trust when oracle passes
-    if passed {
-        // Issue a work receipt for the winning agent
+    // Settle escrow: PASS → pay winner; FAIL → refund poster.
+    if let Some(credits) = reward_credits {
+        if passed {
+            // Issue a work receipt for the winning agent
+            let receipt_task = store::Task {
+                id: task_id.to_string(),
+                title: task_title.clone(),
+                status: "done".to_string(),
+                created_by: String::new(),
+                claimed_by: Some(agent_id.to_string()),
+                created_at: now(),
+                updated_at: now(),
+                notes: Some(format!("oracle:{oracle}")),
+                acceptance_oracle: Some(oracle.clone()),
+                reward_credits,
+                reward_trust,
+                submissions: vec![],
+            };
+            publish_task_receipt(&room, &receipt_task, agent_id, "done", Some(&format!("oracle:{oracle}")), now());
+
+            // Pay winner from escrow (credits already deducted from poster at bounty_post time).
+            store::credit_add(&room.room_id, agent_id, credits, &format!("bounty oracle PASS: {task_title} ({task_id_short})"));
+            let balance = store::credit_balance(&room.room_id, agent_id);
+            let credit_env = make_envelope(
+                &format!("[bounty reward] +{credits} credits to {agent_id} for bounty '{task_title}' (balance: {balance})"),
+                None,
+            );
+            let enc = encrypt_envelope(&credit_env, &room_key, &room.room_id);
+            transport::publish(&room.room_id, &enc);
+            store::save_message(&room.room_id, &credit_env);
+
+            // Grant trust points to winner
+            if let Some(trust) = reward_trust {
+                store::trust_add(&room.room_id, agent_id, trust, &format!("bounty oracle PASS: {task_title}"), "oracle");
+            }
+        } else if !poster_agent_id.is_empty() {
+            // FAIL: refund escrowed reward to poster.
+            store::credit_add(&room.room_id, &poster_agent_id, credits,
+                &format!("escrow refund: bounty '{}' oracle FAIL ({})", task_title, task_id_short));
+        }
+    } else if passed {
+        // No reward configured — still issue work receipt and trust.
         let receipt_task = store::Task {
             id: task_id.to_string(),
             title: task_title.clone(),
@@ -1957,26 +2024,11 @@ pub fn bounty_verify(task_id: &str, agent_id: &str, room_label: Option<&str>) ->
             updated_at: now(),
             notes: Some(format!("oracle:{oracle}")),
             acceptance_oracle: Some(oracle.clone()),
-            reward_credits,
+            reward_credits: None,
             reward_trust,
             submissions: vec![],
         };
         publish_task_receipt(&room, &receipt_task, agent_id, "done", Some(&format!("oracle:{oracle}")), now());
-
-        // Grant credits if configured on the bounty
-        if let Some(credits) = reward_credits {
-            store::credit_add(&room.room_id, agent_id, credits, &format!("bounty oracle PASS: {task_title} ({task_id_short})"));
-            let balance = store::credit_balance(&room.room_id, agent_id);
-            let credit_env = make_envelope(
-                &format!("[bounty reward] +{credits} credits to {agent_id} for bounty '{task_title}' (balance: {balance})"),
-                None,
-            );
-            let enc = encrypt_envelope(&credit_env, &room_key, &room.room_id);
-            transport::publish(&room.room_id, &enc);
-            store::save_message(&room.room_id, &credit_env);
-        }
-
-        // Grant trust points if configured on the bounty
         if let Some(trust) = reward_trust {
             store::trust_add(&room.room_id, agent_id, trust, &format!("bounty oracle PASS: {task_title}"), "oracle");
         }
@@ -3025,11 +3077,13 @@ const PUZZLES: &[(&str, &str, &str, &str)] = &[
 ];
 
 /// Credits awarded for solving calibration seeds by difficulty.
+/// Rates set high enough to bootstrap a viable bounty economy:
+///   medium (50cr = $0.05) covers micro-tasks; hard (250cr = $0.25) funds small bounties.
 fn seed_credit_reward(difficulty: &str) -> i64 {
     match difficulty {
         "easy" => 0,
-        "medium" => 5,
-        "hard" => 25,
+        "medium" => 50,
+        "hard" => 250,
         _ => 0,
     }
 }
@@ -5074,6 +5128,121 @@ mod tests {
             .expect("task message saved");
         assert_eq!(msg["from"].as_str(), Some("api-agent"));
     }
+
+    /// Seed reward rates must match the bootstrapped economy targets.
+    #[test]
+    fn seed_credit_rewards_match_bootstrap_targets() {
+        // easy seeds are exploration-only (no reward)
+        assert_eq!(super::seed_credit_reward("easy"), 0);
+        // medium seeds bootstrap at $0.05 per solve
+        assert_eq!(super::seed_credit_reward("medium"), 50);
+        // hard seeds bootstrap at $0.25 per solve — enough to fund a small bounty
+        assert_eq!(super::seed_credit_reward("hard"), 250);
+        // Unknown difficulty produces no reward
+        assert_eq!(super::seed_credit_reward("unknown"), 0);
+    }
+
+    fn make_work_receipt(agent_id: &str, task_id: &str) -> store::WorkReceipt {
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        store::WorkReceipt {
+            id: format!("rcpt-{task_id}"),
+            agent_id: agent_id.to_string(),
+            task_id: task_id.to_string(),
+            task_title: format!("Task {task_id}"),
+            status: "done".to_string(),
+            notes: None,
+            task_hash: format!("hash-{task_id}"),
+            witness_ids: vec![],
+            created_at: ts,
+            auth: "oracle".to_string(),
+        }
+    }
+
+    /// bounty_post must reject agents below the minimum trust threshold.
+    #[test]
+    fn bounty_post_requires_minimum_trust_score() {
+        let _guard = store::test_env_lock().lock().unwrap();
+        let agent_id = "low-trust-agent";
+        let (_home, _room) = setup_plaza_room(agent_id, Role::Admin);
+
+        // Fresh agent has trust_score ≈ 1.0 (no receipts) — below MIN_TRUST_TO_POST_BOUNTY = 2.0
+        let result = super::bounty_post("Test bounty", 2, None, None, None);
+        assert!(result.is_err(), "bounty_post must reject low-trust agent");
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("Trust score") && err.contains("below minimum"),
+            "error must mention trust requirement, got: {err}"
+        );
+    }
+
+    /// bounty_post must escrow the reward from poster's balance upfront.
+    #[test]
+    fn bounty_post_escrows_reward_from_poster_balance() {
+        let _guard = store::test_env_lock().lock().unwrap();
+        let agent_id = "rich-trusted-poster";
+        let (_home, room) = setup_plaza_room(agent_id, Role::Admin);
+
+        // Give the agent credits and a work receipt to pass the trust gate.
+        store::credit_add(&room.room_id, agent_id, 500, "test seed");
+        let mut receipts = store::load_work_receipts(&room.room_id);
+        receipts.push(make_work_receipt(agent_id, "escrow-t1"));
+        store::save_work_receipts(&room.room_id, &receipts);
+
+        let balance_before = store::credit_balance(&room.room_id, agent_id);
+        assert_eq!(balance_before, 500, "poster must start with 500cr");
+
+        let result = super::bounty_post("Escrowed bounty", 2, None, Some(100), None);
+        assert!(result.is_ok(), "bounty_post should succeed: {:?}", result);
+
+        let balance_after = store::credit_balance(&room.room_id, agent_id);
+        assert_eq!(balance_after, 400, "poster balance must drop by 100 (reward escrowed)");
+    }
+
+    /// bounty_post must reject posting when poster lacks sufficient credits.
+    #[test]
+    fn bounty_post_rejects_insufficient_credits() {
+        let _guard = store::test_env_lock().lock().unwrap();
+        let agent_id = "broke-trusted-poster";
+        let (_home, room) = setup_plaza_room(agent_id, Role::Admin);
+
+        // Give trust (receipt) but no credits.
+        let mut receipts = store::load_work_receipts(&room.room_id);
+        receipts.push(make_work_receipt(agent_id, "broke-t2"));
+        store::save_work_receipts(&room.room_id, &receipts);
+
+        // Balance is 0 — can't afford a 100cr bounty.
+        let result = super::bounty_post("Underfunded bounty", 2, None, Some(100), None);
+        assert!(result.is_err(), "bounty_post must reject insufficient credits");
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("Insufficient credits"),
+            "error must mention insufficient credits, got: {err}"
+        );
+    }
+
+    /// economy_stats must return a valid JSON object with required top-level keys.
+    #[test]
+    fn economy_stats_returns_valid_snapshot() {
+        // economy_stats reads from registered rooms — just verify it doesn't panic
+        // and returns the required structure.
+        let stats = super::economy_stats();
+        assert!(stats["exchange_rate"].is_object(), "must have exchange_rate");
+        assert!(stats["supply"].is_object(), "must have supply");
+        assert!(stats["bounties"].is_object(), "must have bounties");
+        assert!(stats["seeds"].is_object(), "must have seeds");
+        assert!(stats["rooms"].is_array(), "must have rooms array");
+
+        // Exchange rate must be positive.
+        let rate = stats["exchange_rate"]["credits_per_usd_cent"].as_i64().unwrap_or(0);
+        assert_eq!(rate, 10, "exchange rate must be 10 credits/$0.01");
+
+        // Seed reward targets must reflect bootstrap values.
+        assert_eq!(stats["seeds"]["rewards"]["medium_credits"].as_i64(), Some(50));
+        assert_eq!(stats["seeds"]["rewards"]["hard_credits"].as_i64(), Some(250));
+    }
 }
 
 /// Search messages by text, optionally filtered by sender.
@@ -5478,6 +5647,107 @@ pub fn agent_leaderboard() -> Vec<serde_json::Value> {
             })
         })
         .collect()
+}
+
+/// Economy-wide statistics snapshot for GET /api/v1/economy.
+///
+/// Returns aggregate supply, open bounties, seed stats, and per-room breakdowns.
+pub fn economy_stats() -> serde_json::Value {
+    let rooms = store::load_registry();
+
+    let mut total_credits_in_circulation: i64 = 0;
+    let mut total_trust_issued: i64 = 0;
+    let mut total_agents_with_credits: usize = 0;
+    let mut open_bounties: Vec<serde_json::Value> = Vec::new();
+    let mut room_stats: Vec<serde_json::Value> = Vec::new();
+    let mut total_seeds_solved: usize = 0;
+    let mut total_seeds_pending: usize = 0;
+
+    // Accumulate per-agent totals to count unique active agents.
+    let mut agent_credits: HashMap<String, i64> = HashMap::new();
+
+    for room in &rooms {
+        let ledger = store::load_ledger(&room.room_id);
+        let mut room_credits: i64 = 0;
+        let mut room_trust: i64 = 0;
+        for entry in &ledger {
+            if entry.ledger == "trust" {
+                room_trust += entry.amount;
+                *agent_credits.entry(entry.agent_id.clone()).or_insert(0); // ensure key exists
+            } else {
+                room_credits += entry.amount;
+                *agent_credits.entry(entry.agent_id.clone()).or_insert(0) += entry.amount;
+            }
+        }
+        total_credits_in_circulation += room_credits;
+        total_trust_issued += room_trust;
+
+        // Count open bounties from recent messages.
+        let msgs = store::load_messages(&room.room_id, 604800);
+        let room_open_bounties: Vec<_> = msgs.iter()
+            .filter(|m| m["type"].as_str() == Some("bounty") && m["status"].as_str() == Some("open"))
+            .map(|m| serde_json::json!({
+                "id": m["id"],
+                "title": m["title"],
+                "reward_credits": m["reward_credits"],
+                "priority": m["priority"],
+                "room": room.label,
+            }))
+            .collect();
+        open_bounties.extend(room_open_bounties.clone());
+
+        // Seed stats.
+        let seeds = store::load_seeds(&room.room_id);
+        let solved = seeds.iter().filter(|s| !s.solved_by.is_empty()).count();
+        let pending = seeds.len() - solved;
+        total_seeds_solved += solved;
+        total_seeds_pending += pending;
+
+        room_stats.push(serde_json::json!({
+            "room": room.label,
+            "room_id": room.room_id,
+            "credits_in_circulation": room_credits,
+            "trust_issued": room_trust,
+            "open_bounties": room_open_bounties.len(),
+            "seeds_solved": solved,
+            "seeds_pending": pending,
+        }));
+    }
+
+    total_agents_with_credits = agent_credits.values().filter(|&&v| v > 0).count();
+
+    // Exchange rate constants.
+    let credits_per_usd_cent = store::CREDITS_PER_USD_CENT;
+    let usd_value_cents = if credits_per_usd_cent > 0 {
+        total_credits_in_circulation / credits_per_usd_cent
+    } else { 0 };
+
+    serde_json::json!({
+        "exchange_rate": {
+            "credits_per_usd_cent": credits_per_usd_cent,
+            "usd_per_credit": format!("${:.4}", 1.0 / (credits_per_usd_cent as f64 * 100.0)),
+        },
+        "supply": {
+            "credits_in_circulation": total_credits_in_circulation,
+            "usd_value_cents": usd_value_cents,
+            "trust_issued": total_trust_issued,
+            "agents_with_credits": total_agents_with_credits,
+        },
+        "bounties": {
+            "open_count": open_bounties.len(),
+            "open": open_bounties,
+        },
+        "seeds": {
+            "solved": total_seeds_solved,
+            "pending": total_seeds_pending,
+            "rewards": {
+                "easy_credits": 0,
+                "medium_credits": 50,
+                "hard_credits": 250,
+            },
+        },
+        "rooms": room_stats,
+    })
 }
 
 /// Transfer credits between agents.
