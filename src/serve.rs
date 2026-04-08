@@ -1274,6 +1274,13 @@ fn handle_connection(stream: TcpStream) {
             send_json(stream, 200, &body);
         }
 
+        // GET /api/v1/economy — economy-wide snapshot (supply, bounties, seeds, rooms)
+        ("GET", ["api", "v1", "economy"]) => {
+            let stats = chat::economy_stats();
+            let body = serde_json::to_string(&stats).unwrap_or_else(|_| "{}".to_string());
+            send_json(stream, 200, &body);
+        }
+
         // GET /api/v1/tasks — list tasks in a room (JSON)
         // Query params: room=<label|id>  status=open|claimed|done  (both optional)
         ("GET", ["api", "v1", "tasks"]) => {

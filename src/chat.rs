@@ -5748,6 +5748,97 @@ pub fn agent_leaderboard() -> Vec<serde_json::Value> {
         .collect()
 }
 
+/// Return an economy-wide snapshot: credit supply, USD value, open bounties,
+/// seed stats, and per-room breakdowns.  Used by GET /api/v1/economy.
+pub fn economy_stats() -> serde_json::Value {
+    let rooms = store::load_registry();
+
+    let mut total_credits: i64 = 0;
+    let mut total_trust: i64 = 0;
+    let mut open_bounties: Vec<serde_json::Value> = Vec::new();
+    let mut room_stats: Vec<serde_json::Value> = Vec::new();
+    let mut total_seeds_solved: usize = 0;
+    let mut total_seeds_pending: usize = 0;
+    let mut agent_credits: HashMap<String, i64> = HashMap::new();
+
+    for room in &rooms {
+        let ledger = store::load_ledger(&room.room_id);
+        let mut room_credits: i64 = 0;
+        let mut room_trust: i64 = 0;
+        for entry in &ledger {
+            if entry.ledger == "trust" {
+                room_trust += entry.amount;
+                agent_credits.entry(entry.agent_id.clone()).or_insert(0);
+            } else {
+                room_credits += entry.amount;
+                *agent_credits.entry(entry.agent_id.clone()).or_insert(0) += entry.amount;
+            }
+        }
+        total_credits += room_credits;
+        total_trust += room_trust;
+
+        let msgs = store::load_messages(&room.room_id, 604800);
+        let room_open: Vec<_> = msgs.iter()
+            .filter(|m| m["type"].as_str() == Some("bounty") && m["status"].as_str() == Some("open"))
+            .map(|m| serde_json::json!({
+                "id": m["id"],
+                "title": m["title"],
+                "reward_credits": m["reward_credits"],
+                "priority": m["priority"],
+                "room": room.label,
+            }))
+            .collect();
+        open_bounties.extend(room_open.clone());
+
+        let seeds = store::load_seeds(&room.room_id);
+        let solved = seeds.iter().filter(|s| !s.solved_by.is_empty()).count();
+        let pending = seeds.len() - solved;
+        total_seeds_solved += solved;
+        total_seeds_pending += pending;
+
+        room_stats.push(serde_json::json!({
+            "room": room.label,
+            "room_id": room.room_id,
+            "credits_in_circulation": room_credits,
+            "trust_issued": room_trust,
+            "open_bounties": room_open.len(),
+            "seeds_solved": solved,
+            "seeds_pending": pending,
+        }));
+    }
+
+    let agents_with_credits = agent_credits.values().filter(|&&v| v > 0).count();
+    let cpm = store::CREDITS_PER_USD_CENT;
+    let usd_cents = if cpm > 0 { total_credits / cpm } else { 0 };
+
+    serde_json::json!({
+        "exchange_rate": {
+            "credits_per_usd_cent": cpm,
+            "usd_per_credit": format!("${:.4}", 1.0 / (cpm as f64 * 100.0)),
+        },
+        "supply": {
+            "credits_in_circulation": total_credits,
+            "usd_value_cents": usd_cents,
+            "trust_issued": total_trust,
+            "agents_with_credits": agents_with_credits,
+        },
+        "bounties": {
+            "open_count": open_bounties.len(),
+            "open": open_bounties,
+        },
+        "seeds": {
+            "solved": total_seeds_solved,
+            "pending": total_seeds_pending,
+            "rewards": {
+                "easy_credits": 0,
+                "medium_credits": 50,
+                "hard_credits": 250,
+            },
+        },
+        "rooms": room_stats,
+    })
+}
+
 /// Transfer credits between agents.
 pub fn credit_transfer(to_agent: &str, amount: i64, reason: Option<&str>, room_label: Option<&str>) -> Result<(i64, i64), String> {
     let room = resolve_room(room_label)?;
