@@ -460,6 +460,14 @@ enum Commands {
         agent_id: String,
     },
 
+    /// Contribute credits to an existing open bounty's reward pool (crowdfunding)
+    BountyFund {
+        /// Task/bounty ID (prefix ok)
+        task_id: String,
+        /// Number of credits to contribute to the pool
+        credits: i64,
+    },
+
     /// Vouch for another agent (adds to their trust score)
     Vouch {
         /// Agent ID to vouch for
@@ -2362,6 +2370,13 @@ fn main() {
 
         Commands::BountyVerify { task_id, agent_id } => {
             match chat::bounty_verify(&task_id, &agent_id, room) {
+                Ok(msg) => println!("  {msg}"),
+                Err(e) => { eprintln!("  Error: {e}"); process::exit(1); }
+            }
+        }
+
+        Commands::BountyFund { task_id, credits } => {
+            match chat::bounty_fund(&task_id, credits, room) {
                 Ok(msg) => println!("  {msg}"),
                 Err(e) => { eprintln!("  Error: {e}"); process::exit(1); }
             }

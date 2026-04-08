@@ -1773,6 +1773,7 @@ fn task_add_with_oracle(
         reward_credits,
         reward_trust,
         submissions: vec![],
+        crowdfund_contributions: vec![],
     });
     store::save_tasks(&room.room_id, &tasks);
     Ok(id)
@@ -1807,6 +1808,7 @@ pub fn bounty_submit(task_id: &str, branch: &str, room_label: Option<&str>) -> R
                         .or_else(|| msg["reward"].as_i64()),
                     reward_trust: msg["reward_trust"].as_i64(),
                     submissions: vec![],
+                    crowdfund_contributions: vec![],
                 });
                 break;
             }
@@ -1930,6 +1932,92 @@ fn run_oracle_on_branch(branch: &str, oracle_cmd: &str) -> Result<bool, String> 
     result
 }
 
+/// Contribute credits to an existing open bounty's reward pool (crowdfunding).
+///
+/// Any agent can pool credits toward a shared bounty. Escrowed funds accumulate in the task record
+/// and are paid out in full to the winning submitter when the oracle passes (or when manually verified).
+pub fn bounty_fund(task_id: &str, credits: i64, room_label: Option<&str>) -> Result<String, String> {
+    if credits <= 0 {
+        return Err("Credits must be a positive integer".to_string());
+    }
+    let room = resolve_room(room_label)?;
+    let me = store::get_agent_id();
+    let mut tasks = store::load_tasks(&room.room_id);
+
+    // Rebuild from messages if not in local store (cross-session support).
+    if !tasks.iter().any(|t| t.id.starts_with(task_id)) {
+        let msgs = store::load_messages(&room.room_id, 604800);
+        for msg in &msgs {
+            if msg["type"].as_str() == Some("bounty")
+                && msg["id"].as_str().map_or(false, |id| id.starts_with(task_id))
+            {
+                let id = msg["id"].as_str().unwrap_or("").to_string();
+                let title = msg["title"].as_str().unwrap_or("").to_string();
+                tasks.push(store::Task {
+                    id,
+                    title,
+                    status: msg["status"].as_str().unwrap_or("open").to_string(),
+                    created_by: msg["from"].as_str().unwrap_or("").to_string(),
+                    claimed_by: None,
+                    created_at: msg["ts"].as_u64().unwrap_or(0),
+                    updated_at: msg["ts"].as_u64().unwrap_or(0),
+                    notes: None,
+                    acceptance_oracle: msg["acceptance_oracle"].as_str().map(|s| s.to_string()),
+                    reward_credits: msg["reward_credits"].as_i64(),
+                    reward_trust: msg["reward_trust"].as_i64(),
+                    submissions: vec![],
+                    crowdfund_contributions: vec![],
+                });
+            }
+        }
+    }
+
+    let task = tasks.iter_mut()
+        .find(|t| t.id.starts_with(task_id))
+        .ok_or_else(|| format!("No task matching '{task_id}'"))?;
+
+    if task.status != "open" {
+        return Err(format!("Bounty '{}' is not open (status: {})", task.title, task.status));
+    }
+
+    let balance = store::credit_balance(&room.room_id, &me);
+    if balance < credits {
+        return Err(format!("Insufficient credits: have {balance}, want to contribute {credits}"));
+    }
+
+    // Escrow the credits from contributor
+    store::credit_add(&room.room_id, &me, -credits, &format!("crowdfund: {} ({})", task.title, &task.id[..6]));
+
+    // Add to task's crowdfund pool
+    task.crowdfund_contributions.push(store::CrowdfundContribution {
+        agent_id: me.clone(),
+        credits,
+        contributed_at: now(),
+    });
+    task.reward_credits = Some(task.reward_credits.unwrap_or(0) + credits);
+
+    let new_total = task.reward_credits.unwrap_or(0);
+    let task_title = task.title.clone();
+    let task_id_short = task.id[..6.min(task.id.len())].to_string();
+    store::save_tasks(&room.room_id, &tasks);
+
+    let room_key = crypto::derive_room_key(&room.secret, &room.room_id);
+    let env = json!({
+        "v": VERSION, "id": msg_id(), "from": me, "ts": now(),
+        "type": "bounty_fund",
+        "bounty_id": task_id,
+        "amount": credits,
+        "new_total": new_total,
+        "text": format!("[crowdfund] {} contributed {}cr to bounty '{}' ({}) — pool now {}cr",
+            &me[..8.min(me.len())], credits, task_title, task_id_short, new_total),
+    });
+    let encrypted = encrypt_envelope(&env, &room_key, &room.room_id);
+    transport::publish(&room.room_id, &encrypted);
+    store::save_message(&room.room_id, &env);
+
+    Ok(format!("Contributed {credits}cr to bounty '{task_title}' ({task_id_short}). Pool now {new_total}cr."))
+}
+
 /// Verify an existing submission by running the oracle now (useful for deferred verification).
 pub fn bounty_verify(task_id: &str, agent_id: &str, room_label: Option<&str>) -> Result<String, String> {
     let room = resolve_room(room_label)?;
@@ -1951,6 +2039,7 @@ pub fn bounty_verify(task_id: &str, agent_id: &str, room_label: Option<&str>) ->
     let task_title = task.title.clone();
     let task_poster = task.created_by.clone();
     let task_id_short = task_id[..6.min(task_id.len())].to_string();
+    let crowdfund_contributions = task.crowdfund_contributions.clone();
     if passed {
         task.status = "done".to_string();
         task.claimed_by = Some(agent_id.to_string());
@@ -1975,6 +2064,7 @@ pub fn bounty_verify(task_id: &str, agent_id: &str, room_label: Option<&str>) ->
             reward_credits,
             reward_trust,
             submissions: vec![],
+            crowdfund_contributions: vec![],
         };
         publish_task_receipt(
             &room,
@@ -2002,13 +2092,28 @@ pub fn bounty_verify(task_id: &str, agent_id: &str, room_label: Option<&str>) ->
             let enc = encrypt_envelope(&credit_env, &room_key, &room.room_id);
             transport::publish(&room.room_id, &enc);
             store::save_message(&room.room_id, &credit_env);
-        } else if !task_poster.is_empty() {
-            store::credit_add(
-                &room.room_id,
-                &task_poster,
-                credits,
-                &format!("bounty escrow refund: {task_title} ({task_id_short}) — oracle FAIL"),
-            );
+        } else {
+            // Oracle FAIL: refund crowdfund contributors first, then poster gets the remainder.
+            let crowdfund_total: i64 = crowdfund_contributions.iter().map(|c| c.credits).sum();
+            for contrib in &crowdfund_contributions {
+                if contrib.credits > 0 {
+                    store::credit_add(
+                        &room.room_id,
+                        &contrib.agent_id,
+                        contrib.credits,
+                        &format!("crowdfund refund: {task_title} ({task_id_short}) — oracle FAIL"),
+                    );
+                }
+            }
+            let poster_escrow = credits - crowdfund_total;
+            if poster_escrow > 0 && !task_poster.is_empty() {
+                store::credit_add(
+                    &room.room_id,
+                    &task_poster,
+                    poster_escrow,
+                    &format!("bounty escrow refund: {task_title} ({task_id_short}) — oracle FAIL"),
+                );
+            }
         }
     }
 
@@ -2855,6 +2960,7 @@ pub fn task_add_as(agent_id: &str, title: &str, room_label: Option<&str>) -> Res
         reward_credits: None,
         reward_trust: None,
         submissions: vec![],
+        crowdfund_contributions: vec![],
     };
     let mut tasks = store::load_tasks(&room.room_id);
     tasks.push(task);
@@ -3171,6 +3277,7 @@ pub fn seed_verify(seed_id: &str, answer: &str, room_label: Option<&str>) -> Res
         reward_credits: if credit_reward > 0 { Some(credit_reward) } else { None },
         reward_trust: None,
         submissions: vec![],
+        crowdfund_contributions: vec![],
     };
 
     publish_task_receipt(&room, &task, &me, "done", task.notes.as_deref(), task.updated_at);
@@ -3234,6 +3341,7 @@ pub fn task_list(room_label: Option<&str>) -> Result<Vec<store::Task>, String> {
                         reward_credits: None,
                         reward_trust: None,
                         submissions: vec![],
+                    crowdfund_contributions: vec![],
                     });
                 }
             }
@@ -4187,7 +4295,7 @@ mod tests {
         role_heartbeat, role_release, payment_complete_solana_deposit,
         seed_plaza_rate_limit_state, send_watch_heartbeat,
         should_display_message, signing_message_bytes, soma_churn_decay, soma_correct,
-        bounty_post, bounty_submit, bounty_verify, stale_claim_weight, task_add, task_add_as,
+        bounty_fund, bounty_post, bounty_submit, bounty_verify, stale_claim_weight, task_add, task_add_as,
         task_add_with_oracle,
         task_checkpoint, task_done, unpin,
         verified_solana_deposit_from_tx, SignedWirePayload, VerifiedSolanaDeposit,
@@ -4693,6 +4801,7 @@ mod tests {
                 reward_credits: None,
                 reward_trust: None,
                 submissions: vec![],
+                crowdfund_contributions: vec![],
             }],
         );
 
@@ -5181,6 +5290,128 @@ mod tests {
             80,
             "poster escrow must be refunded on FAIL"
         );
+
+        let _ = run_git(Path::new(env!("CARGO_MANIFEST_DIR")), &["branch", "-D", &branch]);
+    }
+
+    /// Verify that multiple agents can crowdfund a bounty and the winner gets the pooled total.
+    #[test]
+    fn bounty_crowdfunding_pools_and_pays_winner() {
+        let _guard = store::test_env_lock().lock().unwrap();
+        let _cwd = enter_manifest_dir();
+        let poster_id = "crowdfund-poster";
+        let funder_id = "crowdfund-funder";
+        let winner_id = "crowdfund-winner";
+        let (_home, room) = setup_plaza_room(poster_id, Role::Admin);
+
+        // Poster creates bounty with 20cr reward
+        store::credit_add(&room.room_id, poster_id, 50, "test setup");
+        bounty_post("Crowdfund test bounty", 4, Some("true"), Some(20), None)
+            .expect("bounty_post should succeed");
+        assert_eq!(store::credit_balance(&room.room_id, poster_id), 30);
+
+        let tasks = store::load_tasks(&room.room_id);
+        let task = tasks.iter().find(|t| t.title == "Crowdfund test bounty").expect("task created");
+        let task_id = task.id.clone();
+        drop(tasks);
+
+        // Funder contributes 15cr more
+        store::credit_add(&room.room_id, funder_id, 15, "test setup");
+        // Switch agent context to funder
+        unsafe { std::env::set_var("AGORA_AGENT_ID", funder_id); }
+        bounty_fund(&task_id, 15, None).expect("bounty_fund should succeed");
+        assert_eq!(store::credit_balance(&room.room_id, funder_id), 0, "funder escrowed 15cr");
+
+        // Verify pool total is now 35
+        let tasks = store::load_tasks(&room.room_id);
+        let task = tasks.iter().find(|t| t.id == task_id).expect("task exists");
+        assert_eq!(task.reward_credits, Some(35), "pool should be 35cr (20 + 15)");
+        assert_eq!(task.crowdfund_contributions.len(), 1);
+        assert_eq!(task.crowdfund_contributions[0].credits, 15);
+        drop(tasks);
+
+        // Add a submission from winner and verify
+        unsafe { std::env::set_var("AGORA_AGENT_ID", poster_id); }
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let branch = format!("test-crowdfund-{ts}");
+        let _ = run_git(Path::new(env!("CARGO_MANIFEST_DIR")), &["branch", &branch]);
+
+        let mut tasks = store::load_tasks(&room.room_id);
+        let task = tasks.iter_mut().find(|t| t.id == task_id).expect("task exists");
+        task.submissions.push(store::BountySubmission {
+            agent_id: winner_id.to_string(),
+            branch: branch.clone(),
+            submitted_at: 0,
+            oracle_passed: None,
+        });
+        store::save_tasks(&room.room_id, &tasks);
+
+        let result = bounty_verify(&task_id, winner_id, None).expect("bounty_verify should succeed");
+        assert!(result.starts_with("PASS"), "oracle 'true' must PASS, got: {result}");
+
+        // Winner should get full 35cr pool
+        assert_eq!(
+            store::credit_balance(&room.room_id, winner_id),
+            35,
+            "winner should receive full pooled reward (20 + 15)"
+        );
+
+        let _ = run_git(Path::new(env!("CARGO_MANIFEST_DIR")), &["branch", "-D", &branch]);
+    }
+
+    /// Verify crowdfunding refunds all contributors on oracle FAIL.
+    #[test]
+    fn bounty_crowdfunding_refunds_all_on_fail() {
+        let _guard = store::test_env_lock().lock().unwrap();
+        let _cwd = enter_manifest_dir();
+        let poster_id = "crowdfund-refund-poster";
+        let funder_id = "crowdfund-refund-funder";
+        let submitter_id = "crowdfund-refund-submitter";
+        let (_home, room) = setup_plaza_room(poster_id, Role::Admin);
+
+        store::credit_add(&room.room_id, poster_id, 30, "test setup");
+        bounty_post("Crowdfund refund test", 2, Some("false"), Some(20), None)
+            .expect("bounty_post should succeed");
+
+        let tasks = store::load_tasks(&room.room_id);
+        let task = tasks.iter().find(|t| t.title == "Crowdfund refund test").expect("task created");
+        let task_id = task.id.clone();
+        drop(tasks);
+
+        store::credit_add(&room.room_id, funder_id, 10, "test setup");
+        unsafe { std::env::set_var("AGORA_AGENT_ID", funder_id); }
+        bounty_fund(&task_id, 10, None).expect("bounty_fund should succeed");
+        unsafe { std::env::set_var("AGORA_AGENT_ID", poster_id); }
+
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let branch = format!("test-crowdfund-fail-{ts}");
+        let _ = run_git(Path::new(env!("CARGO_MANIFEST_DIR")), &["branch", &branch]);
+
+        let mut tasks = store::load_tasks(&room.room_id);
+        let task = tasks.iter_mut().find(|t| t.id == task_id).expect("task exists");
+        task.submissions.push(store::BountySubmission {
+            agent_id: submitter_id.to_string(),
+            branch: branch.clone(),
+            submitted_at: 0,
+            oracle_passed: None,
+        });
+        store::save_tasks(&room.room_id, &tasks);
+
+        let result = bounty_verify(&task_id, submitter_id, None).expect("bounty_verify ran");
+        assert!(result.starts_with("FAIL"), "oracle 'false' must FAIL, got: {result}");
+
+        // Funder gets their 10cr back
+        assert_eq!(store::credit_balance(&room.room_id, funder_id), 10, "funder refunded");
+        // Poster gets their 20cr back
+        assert_eq!(store::credit_balance(&room.room_id, poster_id), 30, "poster refunded (10 remaining + 20 back)");
+        // Submitter gets nothing
+        assert_eq!(store::credit_balance(&room.room_id, submitter_id), 0, "submitter gets nothing on FAIL");
 
         let _ = run_git(Path::new(env!("CARGO_MANIFEST_DIR")), &["branch", "-D", &branch]);
     }

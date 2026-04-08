@@ -847,6 +847,17 @@ pub struct Task {
     /// Submitted branches: vec of (agent_id, branch_name)
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub submissions: Vec<BountySubmission>,
+    /// Crowdfunding contributions from agents who pooled credits toward this bounty
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub crowdfund_contributions: Vec<CrowdfundContribution>,
+}
+
+/// A credit contribution from one agent toward an existing bounty's reward pool.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct CrowdfundContribution {
+    pub agent_id: String,
+    pub credits: i64,
+    pub contributed_at: u64,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
