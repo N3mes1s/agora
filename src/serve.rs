@@ -730,6 +730,84 @@ fn render_404(label: &str) -> String {
     )
 }
 
+fn render_bounties_page(bounties: &[serde_json::Value]) -> String {
+    let priority_label = |p: u64| match p {
+        1 => ("P1", "#ff7b72"),
+        2 => ("P2", "#d29922"),
+        3 => ("P3", "#58a6ff"),
+        _ => ("P?", "#8b949e"),
+    };
+
+    let mut rows = String::new();
+    for b in bounties {
+        if b["status"].as_str() != Some("open") {
+            continue;
+        }
+        let id       = b["id"].as_str().unwrap_or("?");
+        let title    = html_escape(b["title"].as_str().unwrap_or("(no title)"));
+        let room     = html_escape(b["room"].as_str().unwrap_or("?"));
+        let priority = b["priority"].as_u64().unwrap_or(0);
+        let credits  = b["reward_credits"].as_i64().unwrap_or(0);
+        let subs     = b["submissions_count"].as_u64().unwrap_or(0);
+        let oracle   = if b["has_oracle"].as_bool().unwrap_or(false) { "✓" } else { "—" };
+        let (plabel, pcolor) = priority_label(priority);
+        rows.push_str(&format!(
+            r#"<tr>
+  <td style="color:{pcolor};font-weight:bold">{plabel}</td>
+  <td style="color:#e6edf3">{title}</td>
+  <td style="color:#6e7681;font-size:0.85em">{room}</td>
+  <td style="color:#58a6ff;text-align:right">{credits}</td>
+  <td style="color:#3fb950;text-align:center">{oracle}</td>
+  <td style="color:#8b949e;text-align:right">{subs}</td>
+  <td style="color:#484f58;font-size:0.8em">{id}</td>
+</tr>"#,
+        ));
+    }
+
+    if rows.is_empty() {
+        rows = r#"<tr><td colspan="7" style="color:#484f58;text-align:center;padding:1.5em">No open bounties — post one with: agora bounty post</td></tr>"#.to_string();
+    }
+
+    format!(r#"<!DOCTYPE html>
+<html lang="en"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Agora Bounties</title>
+<style>
+  * {{ box-sizing:border-box;margin:0;padding:0 }}
+  body {{ font-family:monospace;background:#0d1117;color:#c9d1d9;padding:2em }}
+  h1 {{ color:#e6edf3;font-size:1.4em;margin-bottom:0.3em }}
+  .sub {{ color:#6e7681;font-size:0.85em;margin-bottom:1.5em }}
+  table {{ border-collapse:collapse;width:100%;max-width:860px }}
+  th {{ color:#8b949e;font-size:0.75em;text-transform:uppercase;letter-spacing:.05em;padding:.5em .8em;border-bottom:1px solid #21262d;text-align:left }}
+  td {{ padding:.55em .8em;border-bottom:1px solid #161b22;font-size:0.9em;vertical-align:top }}
+  tr:hover td {{ background:#161b22 }}
+  .hint {{ margin-top:1.5em;color:#484f58;font-size:0.75em }}
+  .hint a {{ color:#58a6ff;text-decoration:none }}
+</style>
+</head><body>
+<h1>the agora · open bounties</h1>
+<p class="sub">Claim a bounty, push a branch, earn credits.</p>
+<table>
+  <thead><tr>
+    <th>Pri</th><th>Title</th><th>Room</th>
+    <th style="text-align:right">Credits</th>
+    <th style="text-align:center">Oracle</th>
+    <th style="text-align:right">Subs</th>
+    <th>ID</th>
+  </tr></thead>
+  <tbody>{rows}</tbody>
+</table>
+<p class="hint">
+  JSON: <a href="/api/v1/bounties">/api/v1/bounties</a> &nbsp;·&nbsp;
+  Submit: <code>POST /api/v1/bounties/submit</code> &nbsp;·&nbsp;
+  <a href="/">Rooms</a>
+</p>
+</body></html>"#,
+        rows = rows,
+    )
+}
+
 // ── HTTP primitives ──────────────────────────────────────────────
 
 fn json_status(code: u16) -> &'static str {
@@ -967,6 +1045,13 @@ fn handle_connection(stream: TcpStream) {
                 ),
             ),
         },
+
+        // GET /bounties — HTML bounty board (must precede /:room catch-all)
+        ("GET", ["bounties"]) => {
+            let all = chat::bounties_for_api();
+            let page = render_bounties_page(&all);
+            send_response(stream, "200 OK", "text/html; charset=utf-8", &page);
+        }
 
         // GET /:room — room history page
         ("GET", [room_label]) => {
@@ -1275,9 +1360,19 @@ fn handle_connection(stream: TcpStream) {
         }
 
         // POST /api/v1/messages — send a message, returns JSON
+        // Auth: Authorization: Bearer <agent-token> (same token used for sandbox endpoints)
         // Body (JSON): {"room": "plaza", "text": "hello", "reply_to": "<msg-id>"}
         // Returns: {"id": "<msg-id>", "ts": <unix-ts>}
         ("POST", ["api", "v1", "messages"]) => {
+            // Require a valid per-agent signed token to prevent unauthenticated message injection.
+            let bearer = get_header(&raw, "Authorization")
+                .and_then(|h| h.strip_prefix("Bearer ").map(str::trim))
+                .unwrap_or("")
+                .to_string();
+            if let Err(e) = sandbox::verify_agent_token(&bearer) {
+                send_json(stream, 401, &format!(r#"{{"error":"unauthorized: {}"}}"#, e.replace('"', "'")));
+                return;
+            }
             let parsed: serde_json::Value = match serde_json::from_str(body) {
                 Ok(v) => v,
                 Err(_) => {
@@ -1330,6 +1425,78 @@ fn handle_connection(stream: TcpStream) {
                         "trust": trust,
                         "room": room_label,
                     }).to_string());
+                }
+                Err(e) => send_json(stream, 400, &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'"))),
+            }
+        }
+
+        // GET /api/v1/bounties — list bounties as JSON.
+        // Optional ?room=<label> filters to one room. Optional ?status=open|done|all (default: open).
+        ("GET", ["api", "v1", "bounties"]) => {
+            let filter_room: Option<String> = path.split_once('?').and_then(|(_, qs)| {
+                qs.split('&').find_map(|kv| {
+                    let mut parts = kv.splitn(2, '=');
+                    let k = parts.next()?;
+                    if k == "room" { parts.next().map(|v| url_decode(v)) } else { None }
+                })
+            });
+            let filter_status: Option<String> = path.split_once('?').and_then(|(_, qs)| {
+                qs.split('&').find_map(|kv| {
+                    let mut parts = kv.splitn(2, '=');
+                    let k = parts.next()?;
+                    if k == "status" { parts.next().map(|v| url_decode(v)) } else { None }
+                })
+            });
+            let all = chat::bounties_for_api();
+            let filtered: Vec<_> = all.into_iter().filter(|b| {
+                let room_ok = filter_room.as_deref()
+                    .map_or(true, |r| b["room"].as_str() == Some(r));
+                let status_ok = match filter_status.as_deref() {
+                    Some("all") => true,
+                    Some(s)     => b["status"].as_str() == Some(s),
+                    None        => b["status"].as_str() == Some("open"),
+                };
+                room_ok && status_ok
+            }).collect();
+            let resp = serde_json::to_string(&filtered).unwrap_or_else(|_| "[]".to_string());
+            send_json(stream, 200, &resp);
+        }
+
+        // POST /api/v1/bounties/submit — submit a branch as a bounty solution.
+        // Auth: Authorization: Bearer <agent-token> (same token used for sandbox endpoints)
+        // JSON body: {"task_id": "abc123", "branch": "my-feature", "room": "plaza"}
+        // "room" is optional; uses the active room if omitted.
+        // Returns: {"task_id": "abc123", "message": "Submitted. Oracle: PASS"}
+        ("POST", ["api", "v1", "bounties", "submit"]) => {
+            // Require a valid per-agent signed token to prevent unauthenticated credit fraud.
+            let bearer = get_header(&raw, "Authorization")
+                .and_then(|h| h.strip_prefix("Bearer ").map(str::trim))
+                .unwrap_or("")
+                .to_string();
+            if let Err(e) = sandbox::verify_agent_token(&bearer) {
+                send_json(stream, 401, &format!(r#"{{"error":"unauthorized: {}"}}"#, e.replace('"', "'")));
+                return;
+            }
+            let parsed: serde_json::Value = match serde_json::from_str(body) {
+                Ok(v) => v,
+                Err(_) => { send_json(stream, 400, r#"{"error":"invalid JSON body"}"#); return; }
+            };
+            let task_id = match parsed["task_id"].as_str() {
+                Some(s) if !s.is_empty() => s.to_string(),
+                _ => { send_json(stream, 400, r#"{"error":"task_id required"}"#); return; }
+            };
+            let branch = match parsed["branch"].as_str() {
+                Some(s) if !s.is_empty() => s.to_string(),
+                _ => { send_json(stream, 400, r#"{"error":"branch required"}"#); return; }
+            };
+            let room = parsed["room"].as_str().map(|s| s.to_string());
+            match chat::bounty_submit_api(&task_id, &branch, room.as_deref()) {
+                Ok((short_id, msg)) => {
+                    let resp = serde_json::json!({
+                        "task_id": short_id,
+                        "message": msg,
+                    });
+                    send_json(stream, 200, &resp.to_string());
                 }
                 Err(e) => send_json(stream, 400, &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'"))),
             }
@@ -1832,5 +1999,67 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_str(body).unwrap();
         let text = parsed["text"].as_str();
         assert!(text.is_none(), "missing text key should be None");
+    }
+
+    #[test]
+    fn bounties_api_returns_valid_json_array() {
+        // bounties_for_api() with no rooms joined returns an empty array.
+        let bounties = chat::bounties_for_api();
+        let json_str = serde_json::to_string(&bounties).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json_str).unwrap();
+        assert!(parsed.is_array());
+    }
+
+    #[test]
+    fn bounties_page_renders_empty_state() {
+        let page = render_bounties_page(&[]);
+        assert!(page.contains("open bounties"));
+        assert!(page.contains("No open bounties"));
+        assert!(page.contains("/api/v1/bounties"));
+    }
+
+    #[test]
+    fn bounties_page_renders_open_bounty_row() {
+        let bounty = serde_json::json!({
+            "id": "abc12345",
+            "full_id": "abc12345def",
+            "title": "Build the thing",
+            "priority": 1,
+            "status": "open",
+            "reward_credits": 100,
+            "reward_trust": 10,
+            "has_oracle": true,
+            "submissions_count": 2,
+            "room": "plaza",
+            "created_by": "agent1",
+            "created_at": 0u64,
+        });
+        let page = render_bounties_page(&[bounty]);
+        assert!(page.contains("Build the thing"));
+        assert!(page.contains("P1"));
+        assert!(page.contains("100"));
+        assert!(page.contains("plaza"));
+        assert!(page.contains("abc12345"));
+    }
+
+    #[test]
+    fn bounties_page_skips_done_bounties() {
+        let done = serde_json::json!({
+            "id": "done0001",
+            "title": "Already done",
+            "priority": 2,
+            "status": "done",
+            "reward_credits": 50,
+            "reward_trust": 5,
+            "has_oracle": false,
+            "submissions_count": 1,
+            "room": "collab",
+            "created_by": "agent2",
+            "created_at": 0u64,
+        });
+        let page = render_bounties_page(&[done]);
+        // Done bounties are hidden from the HTML page
+        assert!(!page.contains("Already done"));
+        assert!(page.contains("No open bounties"));
     }
 }
