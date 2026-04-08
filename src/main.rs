@@ -787,7 +787,9 @@ enum Commands {
 /// Parse a time argument: "HH:MM" (today), "1h" (relative), or unix timestamp.
 fn parse_time_arg(s: &str) -> Option<u64> {
     let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH).ok()?.as_secs();
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_secs();
     // Relative: "1h", "30m", "2d"
     if let Some(h) = s.strip_suffix('h') {
         return Some(now - h.parse::<u64>().ok()? * 3600);
@@ -894,14 +896,12 @@ fn sign_invite_token(payload: InviteTokenPayload) -> Result<String, String> {
         .clone()
         .unwrap_or_else(store::get_agent_id);
     let pkcs8 = store::load_or_create_signing_keypair(&created_by)?;
-    let inviter_signing_pubkey = BASE64.encode(
-        crypto::signing_public_key(&pkcs8).map_err(|e| e.to_string())?,
-    );
+    let inviter_signing_pubkey =
+        BASE64.encode(crypto::signing_public_key(&pkcs8).map_err(|e| e.to_string())?);
     store::trust_signing_key(&created_by, &inviter_signing_pubkey);
     let signing_input = invite_signing_message_bytes(&payload, &inviter_signing_pubkey);
-    let sig = BASE64.encode(
-        crypto::sign_message(&pkcs8, &signing_input).map_err(|e| e.to_string())?,
-    );
+    let sig =
+        BASE64.encode(crypto::sign_message(&pkcs8, &signing_input).map_err(|e| e.to_string())?);
     let token = SignedInviteToken {
         v: SIGNED_INVITE_VERSION.to_string(),
         payload,
@@ -983,25 +983,25 @@ fn parse_invite_token(token: &str) -> Result<ParsedInviteToken, String> {
     }
 
     Ok(ParsedInviteToken {
-            payload: InviteTokenPayload {
-                room_id: parts[0].to_string(),
-                secret: parts[1].to_string(),
-                label: if parts.len() == 3 {
-                    parts[2].to_string()
-                } else {
-                    parts[0][..12.min(parts[0].len())].to_string()
-                },
-                invite_id: None,
-                target_agent_id: None,
-                target_signing_pubkey: None,
-                purpose: None,
-                expires_at: None,
-                max_uses: None,
-                created_by: None,
-                issued_at: None,
+        payload: InviteTokenPayload {
+            room_id: parts[0].to_string(),
+            secret: parts[1].to_string(),
+            label: if parts.len() == 3 {
+                parts[2].to_string()
+            } else {
+                parts[0][..12.min(parts[0].len())].to_string()
             },
-            auth: InviteTokenAuth::Unsigned,
-        })
+            invite_id: None,
+            target_agent_id: None,
+            target_signing_pubkey: None,
+            purpose: None,
+            expires_at: None,
+            max_uses: None,
+            created_by: None,
+            issued_at: None,
+        },
+        auth: InviteTokenAuth::Unsigned,
+    })
 }
 
 fn print_msg(env: &serde_json::Value) {
@@ -1015,11 +1015,10 @@ fn resolve_display_name(agent_id: &str) -> String {
     }
     // 2. Check profiles
     for room in store::load_registry() {
-        if let Some(p) = store::get_profile(&room.room_id, agent_id) {
-            if let Some(name) = &p.name {
+        if let Some(p) = store::get_profile(&room.room_id, agent_id)
+            && let Some(name) = &p.name {
                 return format!("{name} ({agent_id})");
             }
-        }
     }
     // 3. Raw ID
     agent_id.to_string()
@@ -1075,10 +1074,9 @@ fn print_soma_details(belief: &serde_json::Value) {
 }
 
 fn print_msg_with_depth(env: &serde_json::Value, depth: usize) {
-    match env["type"].as_str() {
-        Some("heartbeat" | "receipt" | "reaction" | "invite_redeem" | "work_receipt" | "role_state") => return,
-        _ => {}
-    }
+    if let Some(
+            "heartbeat" | "receipt" | "reaction" | "invite_redeem" | "work_receipt" | "role_state",
+        ) = env["type"].as_str() { return }
     let time = ts(env["ts"].as_u64().unwrap_or(0));
     let sender_id = env["from"].as_str().unwrap_or("?");
     let sender = resolve_display_name(sender_id);
@@ -1107,29 +1105,31 @@ fn main() {
     let room = cli.room.as_deref();
 
     match cli.command {
-        Commands::Create { label } => {
-            match chat::create(&label) {
-                Ok((room_id, secret)) => {
-                    let room_key = crypto::derive_room_key(&secret, &room_id);
-                    println!("  Created encrypted room '{label}'");
-                    println!("  Room ID:    {room_id}");
-                    println!("  Secret:     {secret}");
-                    println!("  Encryption: AES-256-GCM + HKDF-SHA256");
-                    println!();
-                    println!("  Share this join command:");
-                    println!("    agora join {room_id} {secret} {label}");
-                    println!();
-                    println!("  Key fingerprint (verify out-of-band):");
-                    println!("    {}", crypto::fingerprint(&room_key));
-                }
-                Err(e) => {
-                    eprintln!("  Error: {e}");
-                    process::exit(1);
-                }
+        Commands::Create { label } => match chat::create(&label) {
+            Ok((room_id, secret)) => {
+                let room_key = crypto::derive_room_key(&secret, &room_id);
+                println!("  Created encrypted room '{label}'");
+                println!("  Room ID:    {room_id}");
+                println!("  Secret:     {secret}");
+                println!("  Encryption: AES-256-GCM + HKDF-SHA256");
+                println!();
+                println!("  Share this join command:");
+                println!("    agora join {room_id} {secret} {label}");
+                println!();
+                println!("  Key fingerprint (verify out-of-band):");
+                println!("    {}", crypto::fingerprint(&room_key));
             }
-        }
+            Err(e) => {
+                eprintln!("  Error: {e}");
+                process::exit(1);
+            }
+        },
 
-        Commands::Join { room_id, secret, label } => {
+        Commands::Join {
+            room_id,
+            secret,
+            label,
+        } => {
             let label = label.unwrap_or_else(|| room_id[..12.min(room_id.len())].to_string());
             match chat::join(&room_id, &secret, &label) {
                 Ok(_) => {
@@ -1146,16 +1146,27 @@ fn main() {
         }
 
         Commands::Invite { expires, max_uses } => {
-            let active = if let Some(r) = room { store::find_room(r) } else { store::get_active_room() };
+            let active = if let Some(r) = room {
+                store::find_room(r)
+            } else {
+                store::get_active_room()
+            };
             match active {
                 Some(r) => {
                     let now_ts = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_secs();
                     let expires_at = expires.as_ref().and_then(|e| {
-                        let secs = if let Some(h) = e.strip_suffix('h') { h.parse::<u64>().ok().map(|v| v * 3600) }
-                        else if let Some(d) = e.strip_suffix('d') { d.parse::<u64>().ok().map(|v| v * 86400) }
-                        else if let Some(m) = e.strip_suffix('m') { m.parse::<u64>().ok().map(|v| v * 60) }
-                        else { None };
+                        let secs = if let Some(h) = e.strip_suffix('h') {
+                            h.parse::<u64>().ok().map(|v| v * 3600)
+                        } else if let Some(d) = e.strip_suffix('d') {
+                            d.parse::<u64>().ok().map(|v| v * 86400)
+                        } else if let Some(m) = e.strip_suffix('m') {
+                            m.parse::<u64>().ok().map(|v| v * 60)
+                        } else {
+                            None
+                        };
                         secs.map(|s| now_ts + s)
                     });
                     let payload = InviteTokenPayload {
@@ -1203,7 +1214,9 @@ fn main() {
                     // Check expiry
                     if let Some(expires_at) = payload.expires_at {
                         let now_ts = std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap()
+                            .as_secs();
                         if now_ts > expires_at {
                             eprintln!("  Error: invite token has expired.");
                             process::exit(1);
@@ -1217,7 +1230,9 @@ fn main() {
                                 "  Error: invite token is intended for '{}' but your agent ID is '{}'.",
                                 target, me
                             );
-                            eprintln!("  Note: agent IDs are not authenticated yet; this is a soft guardrail.");
+                            eprintln!(
+                                "  Note: agent IDs are not authenticated yet; this is a soft guardrail."
+                            );
                             process::exit(1);
                         }
                     }
@@ -1269,8 +1284,8 @@ fn main() {
 
                     match chat::join(&payload.room_id, &payload.secret, &payload.label) {
                         Ok(_) => {
-                            if let Some(invite_id) = payload.invite_id.as_deref() {
-                                if let Err(e) = chat::redeem_invite(
+                            if let Some(invite_id) = payload.invite_id.as_deref()
+                                && let Err(e) = chat::redeem_invite(
                                     &payload.room_id,
                                     &payload.secret,
                                     invite_id,
@@ -1279,8 +1294,8 @@ fn main() {
                                 ) {
                                     eprintln!("  Warning: failed to record invite redemption: {e}");
                                 }
-                            }
-                            let room_key = crypto::derive_room_key(&payload.secret, &payload.room_id);
+                            let room_key =
+                                crypto::derive_room_key(&payload.secret, &payload.room_id);
                             println!("  Joined room '{}'", payload.label);
                             println!("  Encryption: AES-256-GCM + HKDF-SHA256");
                             println!("  Fingerprint: {}", crypto::fingerprint(&room_key));
@@ -1292,7 +1307,9 @@ fn main() {
                                     println!("  Invite signature: unsigned legacy token");
                                 }
                             }
-                            if let (Some(used_before), Some(max_uses)) = (redemption_count, payload.max_uses) {
+                            if let (Some(used_before), Some(max_uses)) =
+                                (redemption_count, payload.max_uses)
+                            {
                                 println!(
                                     "  Invite uses: {}/{} (best-effort decentralized check)",
                                     used_before + 1,
@@ -1443,7 +1460,10 @@ fn main() {
                 process::exit(1);
             }
             match chat::send(&text, reply.as_deref(), room) {
-                Ok(mid) => println!("  Sent [{}] (AES-256-GCM encrypted)", &mid[..6.min(mid.len())]),
+                Ok(mid) => println!(
+                    "  Sent [{}] (AES-256-GCM encrypted)",
+                    &mid[..6.min(mid.len())]
+                ),
                 Err(e) => {
                     eprintln!("  Error: {e}");
                     process::exit(1);
@@ -1451,64 +1471,67 @@ fn main() {
             }
         }
 
-        Commands::Read { tail } => {
-            match chat::read("2h", 50, room) {
-                Ok(msgs) => {
-                    let msgs = if let Some(n) = tail {
-                        if msgs.len() > n { &msgs[msgs.len() - n..] } else { &msgs }
+        Commands::Read { tail } => match chat::read("2h", 50, room) {
+            Ok(msgs) => {
+                let msgs = if let Some(n) = tail {
+                    if msgs.len() > n {
+                        &msgs[msgs.len() - n..]
                     } else {
                         &msgs
-                    };
-                    if msgs.is_empty() {
-                        println!("  (no messages)");
-                        return;
                     }
-                    let header_room = if let Some(target) = room {
-                        store::find_room(target)
-                    } else {
-                        store::get_active_room()
-                    };
-                    if let Some(header_room) = header_room {
-                        println!("  --- {} ({} messages, AES-256-GCM) ---\n", header_room.label, msgs.len());
-                    }
-                    if let Ok(pinned) = chat::pins(room) {
-                        if !pinned.is_empty() {
-                            println!("  --- pinned ({}) ---\n", pinned.len());
-                            for p in &pinned {
-                                print_msg(p);
-                            }
-                            println!();
+                } else {
+                    &msgs
+                };
+                if msgs.is_empty() {
+                    println!("  (no messages)");
+                    return;
+                }
+                let header_room = if let Some(target) = room {
+                    store::find_room(target)
+                } else {
+                    store::get_active_room()
+                };
+                if let Some(header_room) = header_room {
+                    println!(
+                        "  --- {} ({} messages, AES-256-GCM) ---\n",
+                        header_room.label,
+                        msgs.len()
+                    );
+                }
+                if let Ok(pinned) = chat::pins(room)
+                    && !pinned.is_empty() {
+                        println!("  --- pinned ({}) ---\n", pinned.len());
+                        for p in &pinned {
+                            print_msg(p);
                         }
+                        println!();
                     }
-                    for m in msgs {
+                for m in msgs {
+                    print_msg(m);
+                }
+            }
+            Err(e) => {
+                eprintln!("  Error: {e}");
+                process::exit(1);
+            }
+        },
+
+        Commands::Check { wake } => match chat::check("5m", room) {
+            Ok(msgs) => {
+                if !msgs.is_empty() {
+                    for m in &msgs {
                         print_msg(m);
                     }
-                }
-                Err(e) => {
-                    eprintln!("  Error: {e}");
-                    process::exit(1);
-                }
-            }
-        }
-
-        Commands::Check { wake } => {
-            match chat::check("5m", room) {
-                Ok(msgs) => {
-                    if !msgs.is_empty() {
-                        for m in &msgs {
-                            print_msg(m);
-                        }
-                        if wake {
-                            process::exit(2);
-                        }
+                    if wake {
+                        process::exit(2);
                     }
                 }
-                Err(e) => {
-                    eprintln!("  Error: {e}");
-                    process::exit(1);
-                }
             }
-        }
+            Err(e) => {
+                eprintln!("  Error: {e}");
+                process::exit(1);
+            }
+        },
 
         Commands::Rooms => {
             let rooms = store::load_registry();
@@ -1519,126 +1542,157 @@ fn main() {
             let active = store::get_active_room();
             let active_id = active.map(|r| r.room_id).unwrap_or_default();
             println!("  {:<20} {:<22} {:<8} Joined", "Label", "Room ID", "Active");
-            println!("  {:<20} {:<22} {:<8} {}", "─".repeat(20), "─".repeat(22), "─".repeat(8), "─".repeat(20));
+            println!(
+                "  {:<20} {:<22} {:<8} {}",
+                "─".repeat(20),
+                "─".repeat(22),
+                "─".repeat(8),
+                "─".repeat(20)
+            );
             for r in &rooms {
                 let is_active = if r.room_id == active_id { " *" } else { "" };
                 let joined = chrono::DateTime::from_timestamp(r.joined_at as i64, 0)
                     .map(|dt| dt.format("%Y-%m-%d %H:%M").to_string())
                     .unwrap_or_default();
-                println!("  {:<20} {:<22} {:<8} {joined}", r.label, r.room_id, is_active);
+                println!(
+                    "  {:<20} {:<22} {:<8} {joined}",
+                    r.label, r.room_id, is_active
+                );
             }
         }
 
-        Commands::Switch { label } => {
-            match store::find_room(&label) {
-                Some(_) => {
-                    store::set_active_room(&label);
-                    println!("  Switched to '{label}'");
+        Commands::Switch { label } => match store::find_room(&label) {
+            Some(_) => {
+                store::set_active_room(&label);
+                println!("  Switched to '{label}'");
+            }
+            None => {
+                eprintln!("  Room '{label}' not found. Run: agora rooms");
+                process::exit(1);
+            }
+        },
+
+        Commands::Leave => match chat::leave(room) {
+            Ok(info) => {
+                println!("  Left room '{}'.", info["label"].as_str().unwrap_or("?"));
+                if info["daemon_stopped"].as_bool().unwrap_or(false) {
+                    println!("  Daemon stopped.");
                 }
-                None => {
-                    eprintln!("  Room '{label}' not found. Run: agora rooms");
-                    process::exit(1);
+                if let Some(active_room) = info["active_room"].as_str() {
+                    println!("  Active room: {active_room}");
+                } else {
+                    println!("  No rooms left.");
                 }
             }
-        }
+            Err(e) => {
+                eprintln!("  Error: {e}");
+                process::exit(1);
+            }
+        },
 
-        Commands::Leave => {
-            match chat::leave(room) {
-                Ok(info) => {
-                    println!("  Left room '{}'.", info["label"].as_str().unwrap_or("?"));
-                    if info["daemon_stopped"].as_bool().unwrap_or(false) {
-                        println!("  Daemon stopped.");
-                    }
-                    if let Some(active_room) = info["active_room"].as_str() {
-                        println!("  Active room: {active_room}");
+        Commands::Info => match chat::info(room) {
+            Ok(info) => {
+                println!("  Room:        {}", info["label"].as_str().unwrap_or("?"));
+                println!("  ID:          {}", info["room_id"].as_str().unwrap_or("?"));
+                if let Some(topic) = info["topic"].as_str() {
+                    println!("  Topic:       {topic}");
+                }
+                println!(
+                    "  Encryption:  {}",
+                    info["encryption"].as_str().unwrap_or("?")
+                );
+                println!(
+                    "  KDF:         {}",
+                    info["key_derivation"].as_str().unwrap_or("?")
+                );
+                println!("  Messages:    {}", info["messages"].as_u64().unwrap_or(0));
+                let member_count = info["members"].as_array().map(|a| a.len()).unwrap_or(0);
+                println!("  Members:     {member_count}");
+                println!(
+                    "  Fingerprint: {}",
+                    info["fingerprint"].as_str().unwrap_or("?")
+                );
+            }
+            Err(e) => {
+                eprintln!("  Error: {e}");
+                process::exit(1);
+            }
+        },
+
+        Commands::Who { online } => match chat::who(room, online) {
+            Ok(members) => {
+                if members.is_empty() {
+                    if online {
+                        println!("  No one online (seen in last 5 minutes).");
                     } else {
-                        println!("  No rooms left.");
+                        println!("  No members tracked yet.");
                     }
+                    return;
                 }
-                Err(e) => {
-                    eprintln!("  Error: {e}");
-                    process::exit(1);
-                }
-            }
-        }
-
-        Commands::Info => {
-            match chat::info(room) {
-                Ok(info) => {
-                    println!("  Room:        {}", info["label"].as_str().unwrap_or("?"));
-                    println!("  ID:          {}", info["room_id"].as_str().unwrap_or("?"));
-                    if let Some(topic) = info["topic"].as_str() {
-                        println!("  Topic:       {topic}");
-                    }
-                    println!("  Encryption:  {}", info["encryption"].as_str().unwrap_or("?"));
-                    println!("  KDF:         {}", info["key_derivation"].as_str().unwrap_or("?"));
-                    println!("  Messages:    {}", info["messages"].as_u64().unwrap_or(0));
-                    let member_count = info["members"].as_array().map(|a| a.len()).unwrap_or(0);
-                    println!("  Members:     {member_count}");
-                    println!("  Fingerprint: {}", info["fingerprint"].as_str().unwrap_or("?"));
-                }
-                Err(e) => {
-                    eprintln!("  Error: {e}");
-                    process::exit(1);
-                }
-            }
-        }
-
-        Commands::Who { online } => {
-            match chat::who(room, online) {
-                Ok(members) => {
-                    if members.is_empty() {
-                        if online {
-                            println!("  No one online (seen in last 5 minutes).");
+                let me = store::get_agent_id();
+                let now_ts = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs();
+                println!(
+                    "  {:<20} {:<12} {:<8} {:<10} Last seen",
+                    "Name", "Agent", "Role", "Status"
+                );
+                println!(
+                    "  {:<20} {:<12} {:<8} {:<10} {}",
+                    "─".repeat(20),
+                    "─".repeat(12),
+                    "─".repeat(8),
+                    "─".repeat(10),
+                    "─".repeat(16)
+                );
+                for m in &members {
+                    let role = format!("{:?}", m.role);
+                    let is_me = if m.agent_id == me { " (you)" } else { "" };
+                    let display = resolve_display_name(&m.agent_id);
+                    let name = if display == m.agent_id {
+                        "".to_string()
+                    } else {
+                        display
+                    };
+                    let status = if m.last_seen > 0 && now_ts - m.last_seen < 300 {
+                        "\x1b[92monline\x1b[0m"
+                    } else if m.last_seen > 0 {
+                        "offline"
+                    } else {
+                        "unknown"
+                    };
+                    let seen = if m.last_seen > 0 {
+                        let ago = now_ts - m.last_seen;
+                        if ago < 60 {
+                            format!("{ago}s ago")
+                        } else if ago < 3600 {
+                            format!("{}m ago", ago / 60)
                         } else {
-                            println!("  No members tracked yet.");
+                            format!("{}h ago", ago / 3600)
                         }
-                        return;
-                    }
-                    let me = store::get_agent_id();
-                    let now_ts = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
-                    println!("  {:<20} {:<12} {:<8} {:<10} Last seen", "Name", "Agent", "Role", "Status");
-                    println!("  {:<20} {:<12} {:<8} {:<10} {}", "─".repeat(20), "─".repeat(12), "─".repeat(8), "─".repeat(10), "─".repeat(16));
-                    for m in &members {
-                        let role = format!("{:?}", m.role);
-                        let is_me = if m.agent_id == me { " (you)" } else { "" };
-                        let display = resolve_display_name(&m.agent_id);
-                        let name = if display == m.agent_id { "".to_string() } else { display };
-                        let status = if m.last_seen > 0 && now_ts - m.last_seen < 300 {
-                            "\x1b[92monline\x1b[0m"
-                        } else if m.last_seen > 0 {
-                            "offline"
-                        } else {
-                            "unknown"
-                        };
-                        let seen = if m.last_seen > 0 {
-                            let ago = now_ts - m.last_seen;
-                            if ago < 60 { format!("{ago}s ago") }
-                            else if ago < 3600 { format!("{}m ago", ago / 60) }
-                            else { format!("{}h ago", ago / 3600) }
-                        } else {
-                            "never".to_string()
-                        };
-                        println!("  {:<20} {:<12} {:<8} {:<18} {seen}{is_me}", name, m.agent_id, role, status);
-                    }
-                }
-                Err(e) => {
-                    eprintln!("  Error: {e}");
-                    process::exit(1);
+                    } else {
+                        "never".to_string()
+                    };
+                    println!(
+                        "  {:<20} {:<12} {:<8} {:<18} {seen}{is_me}",
+                        name, m.agent_id, role, status
+                    );
                 }
             }
-        }
+            Err(e) => {
+                eprintln!("  Error: {e}");
+                process::exit(1);
+            }
+        },
 
-        Commands::Heartbeat => {
-            match chat::heartbeat(room) {
-                Ok(()) => println!("  Heartbeat sent."),
-                Err(e) => {
-                    eprintln!("  Error: {e}");
-                    process::exit(1);
-                }
+        Commands::Heartbeat => match chat::heartbeat(room) {
+            Ok(()) => println!("  Heartbeat sent."),
+            Err(e) => {
+                eprintln!("  Error: {e}");
+                process::exit(1);
             }
-        }
+        },
 
         Commands::Topic { text } => {
             let topic = text.join(" ");
@@ -1655,59 +1709,68 @@ fn main() {
             }
         }
 
-        Commands::Promote { agent_id } => {
-            match chat::promote(&agent_id, room) {
-                Ok(()) => println!("  Promoted {agent_id} to admin."),
-                Err(e) => {
-                    eprintln!("  Error: {e}");
-                    process::exit(1);
-                }
+        Commands::Promote { agent_id } => match chat::promote(&agent_id, room) {
+            Ok(()) => println!("  Promoted {agent_id} to admin."),
+            Err(e) => {
+                eprintln!("  Error: {e}");
+                process::exit(1);
             }
-        }
+        },
 
-        Commands::Kick { agent_id } => {
-            match chat::kick(&agent_id, room) {
-                Ok(()) => println!("  Kicked {agent_id}."),
-                Err(e) => {
-                    eprintln!("  Error: {e}");
-                    process::exit(1);
-                }
+        Commands::Kick { agent_id } => match chat::kick(&agent_id, room) {
+            Ok(()) => println!("  Kicked {agent_id}."),
+            Err(e) => {
+                eprintln!("  Error: {e}");
+                process::exit(1);
             }
-        }
+        },
 
-        Commands::Delete { msg_id } => {
-            match chat::delete_message(&msg_id, room) {
-                Ok(()) => println!("  Message [{msg_id}] deleted."),
-                Err(e) => { eprintln!("  Error: {e}"); process::exit(1); }
+        Commands::Delete { msg_id } => match chat::delete_message(&msg_id, room) {
+            Ok(()) => println!("  Message [{msg_id}] deleted."),
+            Err(e) => {
+                eprintln!("  Error: {e}");
+                process::exit(1);
             }
-        }
+        },
 
-        Commands::Verify => {
-            match chat::verify(room) {
-                Ok(proof) => {
-                    let valid = proof["proof_valid"].as_bool().unwrap_or(false);
-                    println!("  Room: {}", proof["room_id"].as_str().unwrap_or("?"));
-                    println!("  ZKP membership proof: {}", if valid { "VALID" } else { "INVALID" });
-                    let nonce = proof["nonce"].as_str().unwrap_or("");
-                    let commitment = proof["commitment"].as_str().unwrap_or("");
-                    let challenge = proof["challenge"].as_str().unwrap_or("");
-                    let response = proof["response"].as_str().unwrap_or("");
-                    println!("  Nonce:      {}...", &nonce[..32.min(nonce.len())]);
-                    println!("  Commitment: {}...", &commitment[..32.min(commitment.len())]);
-                    println!("  Challenge:  {}...", &challenge[..32.min(challenge.len())]);
-                    println!("  Response:   {}...", &response[..32.min(response.len())]);
-                }
-                Err(e) => {
-                    eprintln!("  Error: {e}");
-                    process::exit(1);
-                }
+        Commands::Verify => match chat::verify(room) {
+            Ok(proof) => {
+                let valid = proof["proof_valid"].as_bool().unwrap_or(false);
+                println!("  Room: {}", proof["room_id"].as_str().unwrap_or("?"));
+                println!(
+                    "  ZKP membership proof: {}",
+                    if valid { "VALID" } else { "INVALID" }
+                );
+                let nonce = proof["nonce"].as_str().unwrap_or("");
+                let commitment = proof["commitment"].as_str().unwrap_or("");
+                let challenge = proof["challenge"].as_str().unwrap_or("");
+                let response = proof["response"].as_str().unwrap_or("");
+                println!("  Nonce:      {}...", &nonce[..32.min(nonce.len())]);
+                println!(
+                    "  Commitment: {}...",
+                    &commitment[..32.min(commitment.len())]
+                );
+                println!("  Challenge:  {}...", &challenge[..32.min(challenge.len())]);
+                println!("  Response:   {}...", &response[..32.min(response.len())]);
             }
-        }
+            Err(e) => {
+                eprintln!("  Error: {e}");
+                process::exit(1);
+            }
+        },
 
-        Commands::Search { query, from, after, before, regex: use_regex } => {
+        Commands::Search {
+            query,
+            from,
+            after,
+            before,
+            regex: use_regex,
+        } => {
             let q = query.join(" ");
             if q.is_empty() {
-                eprintln!("Usage: agora search <query> [--from <id>] [--after HH:MM] [--before HH:MM] [--regex]");
+                eprintln!(
+                    "Usage: agora search <query> [--from <id>] [--after HH:MM] [--before HH:MM] [--regex]"
+                );
                 process::exit(1);
             }
             let after_ts = after.and_then(|t| parse_time_arg(&t));
@@ -1730,84 +1793,79 @@ fn main() {
             }
         }
 
-        Commands::Pin { message_id } => {
-            match chat::pin(&message_id, room) {
-                Ok((resolved_id, added)) => {
-                    let short = &resolved_id[..6.min(resolved_id.len())];
-                    if added {
-                        println!("  Pinned [{short}].");
-                    } else {
-                        println!("  Already pinned [{short}].");
-                    }
-                }
-                Err(e) => {
-                    eprintln!("  Error: {e}");
-                    process::exit(1);
+        Commands::Pin { message_id } => match chat::pin(&message_id, room) {
+            Ok((resolved_id, added)) => {
+                let short = &resolved_id[..6.min(resolved_id.len())];
+                if added {
+                    println!("  Pinned [{short}].");
+                } else {
+                    println!("  Already pinned [{short}].");
                 }
             }
-        }
+            Err(e) => {
+                eprintln!("  Error: {e}");
+                process::exit(1);
+            }
+        },
 
-        Commands::Unpin { message_id } => {
-            match chat::unpin(&message_id, room) {
-                Ok((resolved_id, removed)) => {
-                    let short = &resolved_id[..6.min(resolved_id.len())];
-                    if removed {
-                        println!("  Unpinned [{short}].");
-                    } else {
-                        println!("  [{short}] was not pinned.");
-                    }
-                }
-                Err(e) => {
-                    eprintln!("  Error: {e}");
-                    process::exit(1);
+        Commands::Unpin { message_id } => match chat::unpin(&message_id, room) {
+            Ok((resolved_id, removed)) => {
+                let short = &resolved_id[..6.min(resolved_id.len())];
+                if removed {
+                    println!("  Unpinned [{short}].");
+                } else {
+                    println!("  [{short}] was not pinned.");
                 }
             }
-        }
+            Err(e) => {
+                eprintln!("  Error: {e}");
+                process::exit(1);
+            }
+        },
 
-        Commands::Pins => {
-            match chat::pins(room) {
-                Ok(pinned) => {
-                    if pinned.is_empty() {
-                        println!("  (no pinned messages)");
-                        return;
-                    }
-                    println!("  {} pinned message(s):\n", pinned.len());
-                    for p in &pinned {
-                        print_msg(p);
-                    }
+        Commands::Pins => match chat::pins(room) {
+            Ok(pinned) => {
+                if pinned.is_empty() {
+                    println!("  (no pinned messages)");
+                    return;
                 }
-                Err(e) => {
-                    eprintln!("  Error: {e}");
-                    process::exit(1);
+                println!("  {} pinned message(s):\n", pinned.len());
+                for p in &pinned {
+                    print_msg(p);
                 }
             }
-        }
+            Err(e) => {
+                eprintln!("  Error: {e}");
+                process::exit(1);
+            }
+        },
 
-        Commands::Thread { message_id } => {
-            match chat::thread(&message_id, room) {
-                Ok(items) => {
-                    if items.is_empty() {
-                        println!("  (no thread messages)");
-                        return;
-                    }
-                    println!("  Thread for '{message_id}':\n");
-                    for item in &items {
-                        print_msg_with_depth(&item.env, item.depth);
-                    }
+        Commands::Thread { message_id } => match chat::thread(&message_id, room) {
+            Ok(items) => {
+                if items.is_empty() {
+                    println!("  (no thread messages)");
+                    return;
                 }
-                Err(e) => {
-                    eprintln!("  Error: {e}");
-                    process::exit(1);
+                println!("  Thread for '{message_id}':\n");
+                for item in &items {
+                    print_msg_with_depth(&item.env, item.depth);
                 }
             }
-        }
+            Err(e) => {
+                eprintln!("  Error: {e}");
+                process::exit(1);
+            }
+        },
 
         Commands::Recap { since } => {
             match chat::recap(&since, room) {
                 Ok(info) => {
                     let room_name = info["room"].as_str().unwrap_or("?");
                     let total = info["total_messages"].as_u64().unwrap_or(0);
-                    println!("  ╔═══ Recap: {} ({} messages, last {}) ═══╗\n", room_name, total, since);
+                    println!(
+                        "  ╔═══ Recap: {} ({} messages, last {}) ═══╗\n",
+                        room_name, total, since
+                    );
 
                     if total == 0 {
                         println!("  No activity.");
@@ -1833,15 +1891,13 @@ fn main() {
                     }
 
                     // Keywords
-                    if let Some(kws) = info["top_keywords"].as_array() {
-                        if !kws.is_empty() {
+                    if let Some(kws) = info["top_keywords"].as_array()
+                        && !kws.is_empty() {
                             println!("\n  Topics:");
-                            let words: Vec<_> = kws.iter()
-                                .filter_map(|k| k["word"].as_str())
-                                .collect();
+                            let words: Vec<_> =
+                                kws.iter().filter_map(|k| k["word"].as_str()).collect();
                             println!("    {}", words.join(", "));
                         }
-                    }
 
                     println!("\n  ╚{}╝", "═".repeat(40));
                 }
@@ -1852,43 +1908,57 @@ fn main() {
             }
         }
 
-        Commands::SendFile { path } => {
-            match chat::send_file(&path, room) {
-                Ok((file_id, size)) => {
-                    println!("  Sent file [{file_id}] ({size} bytes, AES-256-GCM encrypted)");
-                }
-                Err(e) => {
-                    eprintln!("  Error: {e}");
-                    process::exit(1);
-                }
+        Commands::SendFile { path } => match chat::send_file(&path, room) {
+            Ok((file_id, size)) => {
+                println!("  Sent file [{file_id}] ({size} bytes, AES-256-GCM encrypted)");
             }
-        }
+            Err(e) => {
+                eprintln!("  Error: {e}");
+                process::exit(1);
+            }
+        },
 
-        Commands::Files => {
-            match chat::list_files(room) {
-                Ok(files) => {
-                    if files.is_empty() {
-                        println!("  (no files shared)");
-                        return;
-                    }
-                    println!("  {:<10} {:<20} {:>10} {:<12} {}", "ID", "Filename", "Size", "From", "Time");
-                    println!("  {:<10} {:<20} {:>10} {:<12} {}", "─".repeat(10), "─".repeat(20), "─".repeat(10), "─".repeat(12), "─".repeat(8));
-                    for f in &files {
-                        let fid = &f["file_id"].as_str().unwrap_or("?")[..6.min(f["file_id"].as_str().unwrap_or("?").len())];
-                        let name = f["filename"].as_str().unwrap_or("?");
-                        let size = f["size"].as_u64().unwrap_or(0);
-                        let from = f["from"].as_str().unwrap_or("?");
-                        let time = ts(f["ts"].as_u64().unwrap_or(0));
-                        let size_str = if size > 1024 { format!("{}KB", size / 1024) } else { format!("{}B", size) };
-                        println!("  {:<10} {:<20} {:>10} {:<12} {}", fid, name, size_str, from, time);
-                    }
+        Commands::Files => match chat::list_files(room) {
+            Ok(files) => {
+                if files.is_empty() {
+                    println!("  (no files shared)");
+                    return;
                 }
-                Err(e) => {
-                    eprintln!("  Error: {e}");
-                    process::exit(1);
+                println!(
+                    "  {:<10} {:<20} {:>10} {:<12} Time",
+                    "ID", "Filename", "Size", "From"
+                );
+                println!(
+                    "  {:<10} {:<20} {:>10} {:<12} {}",
+                    "─".repeat(10),
+                    "─".repeat(20),
+                    "─".repeat(10),
+                    "─".repeat(12),
+                    "─".repeat(8)
+                );
+                for f in &files {
+                    let fid = &f["file_id"].as_str().unwrap_or("?")
+                        [..6.min(f["file_id"].as_str().unwrap_or("?").len())];
+                    let name = f["filename"].as_str().unwrap_or("?");
+                    let size = f["size"].as_u64().unwrap_or(0);
+                    let from = f["from"].as_str().unwrap_or("?");
+                    let time = ts(f["ts"].as_u64().unwrap_or(0));
+                    let size_str = if size > 1024 {
+                        format!("{}KB", size / 1024)
+                    } else {
+                        format!("{}B", size)
+                    };
+                    println!(
+                        "  {:<10} {:<20} {:>10} {:<12} {}",
+                        fid, name, size_str, from, time
+                    );
                 }
             }
-        }
+            Err(e) => {
+                eprintln!("  Error: {e}");
+                process::exit(1);
+            }
+        },
 
         Commands::Download { file_id, out } => {
             match chat::download_file(&file_id, out.as_deref(), room) {
@@ -1900,83 +1970,78 @@ fn main() {
             }
         }
 
-        Commands::Daemon => {
-            match chat::daemon(room) {
-                Ok(pid) => {
-                    let daemon_room = if let Some(target) = room {
-                        store::find_room(target)
-                    } else {
-                        store::get_active_room()
-                    };
-                    if let Some(daemon_room) = daemon_room {
-                        println!(
-                            "  Daemon started (PID {pid}) for '{}'.\n  Notify flag: {}\n  Hook: agora notify --wake",
-                            daemon_room.label,
-                            store::notify_flag_path(&daemon_room.room_id).display()
-                        );
-                    } else {
-                        println!("  Daemon started (PID {pid}).\n  Hook: agora notify --wake");
-                    }
-                }
-                Err(e) => {
-                    eprintln!("  Error: {e}");
-                    process::exit(1);
+        Commands::Daemon => match chat::daemon(room) {
+            Ok(pid) => {
+                let daemon_room = if let Some(target) = room {
+                    store::find_room(target)
+                } else {
+                    store::get_active_room()
+                };
+                if let Some(daemon_room) = daemon_room {
+                    println!(
+                        "  Daemon started (PID {pid}) for '{}'.\n  Notify flag: {}\n  Hook: agora notify --wake",
+                        daemon_room.label,
+                        store::notify_flag_path(&daemon_room.room_id).display()
+                    );
+                } else {
+                    println!("  Daemon started (PID {pid}).\n  Hook: agora notify --wake");
                 }
             }
-        }
+            Err(e) => {
+                eprintln!("  Error: {e}");
+                process::exit(1);
+            }
+        },
 
-        Commands::Notify { wake } => {
-            match chat::notify("24h", room) {
-                Ok(msgs) => {
+        Commands::Notify { wake } => match chat::notify("24h", room) {
+            Ok(msgs) => {
+                if !msgs.is_empty() {
+                    for m in &msgs {
+                        print_msg(m);
+                    }
+                    if wake {
+                        process::exit(2);
+                    }
+                }
+            }
+            Err(e) => {
+                eprintln!("  Error: {e}");
+                process::exit(1);
+            }
+        },
+
+        Commands::Stop => match chat::stop_daemon(room) {
+            Ok(()) => println!("  Daemon stopped."),
+            Err(e) => eprintln!("  {e}"),
+        },
+
+        Commands::Watch => match selected_room(room) {
+            Ok(watch_room) => {
+                println!(
+                    "  Watching '{}' (AES-256-GCM, Ctrl+C to stop)",
+                    watch_room.label
+                );
+                println!("  Auto-heartbeat every 2 minutes\n");
+                if let Ok(msgs) = chat::read("30m", 20, room) {
+                    for m in &msgs {
+                        print_msg(m);
+                    }
                     if !msgs.is_empty() {
-                        for m in &msgs {
-                            print_msg(m);
-                        }
-                        if wake {
-                            process::exit(2);
-                        }
+                        println!("  ─── live ───\n");
                     }
                 }
-                Err(e) => {
+                if let Err(e) = chat::watch(room, 120, |env| {
+                    print_msg(env);
+                }) {
                     eprintln!("  Error: {e}");
                     process::exit(1);
                 }
             }
-        }
-
-        Commands::Stop => {
-            match chat::stop_daemon(room) {
-                Ok(()) => println!("  Daemon stopped."),
-                Err(e) => eprintln!("  {e}"),
+            Err(e) => {
+                eprintln!("  {e}");
+                process::exit(1);
             }
-        }
-
-        Commands::Watch => {
-            match selected_room(room) {
-                Ok(watch_room) => {
-                    println!("  Watching '{}' (AES-256-GCM, Ctrl+C to stop)", watch_room.label);
-                    println!("  Auto-heartbeat every 2 minutes\n");
-                    if let Ok(msgs) = chat::read("30m", 20, room) {
-                        for m in &msgs {
-                            print_msg(m);
-                        }
-                        if !msgs.is_empty() {
-                            println!("  ─── live ───\n");
-                        }
-                    }
-                    if let Err(e) = chat::watch(room, 120, |env| {
-                        print_msg(env);
-                    }) {
-                        eprintln!("  Error: {e}");
-                        process::exit(1);
-                    }
-                }
-                Err(e) => {
-                    eprintln!("  {e}");
-                    process::exit(1);
-                }
-            }
-        }
+        },
 
         Commands::Hub { log } => {
             let active_room = match selected_room(room) {
@@ -2003,15 +2068,14 @@ fn main() {
             println!("  Status:      \x1b[92mLISTENING\x1b[0m (Ctrl+C to stop)\n");
 
             // Print recent history
-            if let Ok(msgs) = chat::read("1h", 30, room) {
-                if !msgs.is_empty() {
+            if let Ok(msgs) = chat::read("1h", 30, room)
+                && !msgs.is_empty() {
                     println!("  ─── recent ({} messages) ───\n", msgs.len());
                     for m in &msgs {
                         print_msg(m);
                     }
                     println!("\n  ─── live ───\n");
                 }
-            }
 
             let mut msg_count: u64 = 0;
             let log_file = log.clone();
@@ -2038,7 +2102,9 @@ fn main() {
                 });
 
                 // SSE disconnected — reconnect
-                eprintln!("  \x1b[33m[hub] Connection lost. Reconnecting in 5s... ({msg_count} messages received so far)\x1b[0m");
+                eprintln!(
+                    "  \x1b[33m[hub] Connection lost. Reconnecting in 5s... ({msg_count} messages received so far)\x1b[0m"
+                );
                 std::thread::sleep(std::time::Duration::from_secs(5));
             }
         }
@@ -2049,8 +2115,7 @@ fn main() {
 
         Commands::Status { json } => {
             let agent_id = store::get_agent_id();
-            let (credits, trust_ledger) = chat::credit_balance_check(None, room)
-                .unwrap_or((0, 0));
+            let (credits, trust_ledger) = chat::credit_balance_check(None, room).unwrap_or((0, 0));
             let (trust_score, receipt_count, rooms_active, vouches) =
                 chat::compute_agent_trust_score(&agent_id);
             let receipts = chat::read_status(room).unwrap_or_default();
@@ -2073,13 +2138,24 @@ fn main() {
                     return;
                 }
                 for item in &receipts {
-                    let mid = &item["id"].as_str().unwrap_or("?")[..6.min(item["id"].as_str().unwrap_or("?").len())];
+                    let mid = &item["id"].as_str().unwrap_or("?")
+                        [..6.min(item["id"].as_str().unwrap_or("?").len())];
                     let text = item["text"].as_str().unwrap_or("");
                     let time = ts(item["ts"].as_u64().unwrap_or(0));
-                    let readers = item["read_by"].as_array()
-                        .map(|a| a.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>().join(", "))
+                    let readers = item["read_by"]
+                        .as_array()
+                        .map(|a| {
+                            a.iter()
+                                .filter_map(|v| v.as_str())
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        })
                         .unwrap_or_default();
-                    let check = if readers.is_empty() { "  " } else { "\u{2713}\u{2713}" };
+                    let check = if readers.is_empty() {
+                        "  "
+                    } else {
+                        "\u{2713}\u{2713}"
+                    };
                     println!("  [{mid}] {time} {check} {text}");
                     if !readers.is_empty() {
                         println!("         Read by: {readers}");
@@ -2088,81 +2164,124 @@ fn main() {
             }
         }
 
-        Commands::CreditGrant { agent_id, amount, reason } => {
-            match chat::credit_grant(&agent_id, amount, &reason, room) {
-                Ok(balance) => {
-                    let name = resolve_display_name(&agent_id);
-                    println!("  Granted {amount} credits to {name}. Balance: {balance}");
-                }
-                Err(e) => { eprintln!("  Error: {e}"); process::exit(1); }
+        Commands::CreditGrant {
+            agent_id,
+            amount,
+            reason,
+        } => match chat::credit_grant(&agent_id, amount, &reason, room) {
+            Ok(balance) => {
+                let name = resolve_display_name(&agent_id);
+                println!("  Granted {amount} credits to {name}. Balance: {balance}");
             }
-        }
+            Err(e) => {
+                eprintln!("  Error: {e}");
+                process::exit(1);
+            }
+        },
 
         Commands::Balance { agent_id } => {
             match chat::credit_balance_check(agent_id.as_deref(), room) {
                 Ok((credits, trust)) => {
-                    let id = agent_id.clone().unwrap_or_else(|| store::get_agent_id());
+                    let id = agent_id.clone().unwrap_or_else(store::get_agent_id);
                     let name = resolve_display_name(&id);
                     println!("  {name}:");
                     println!("    Credits (spendable): {credits}");
                     println!("    Trust (ledger):      {trust}");
-                    let (score, receipt_count, rooms_active, vouches) = chat::compute_agent_trust_score(&id);
-                    println!("    Trust (live score):  {score:.2}  [{receipt_count} receipts, {rooms_active} rooms, {vouches} vouches]");
+                    let (score, receipt_count, rooms_active, vouches) =
+                        chat::compute_agent_trust_score(&id);
+                    println!(
+                        "    Trust (live score):  {score:.2}  [{receipt_count} receipts, {rooms_active} rooms, {vouches} vouches]"
+                    );
                 }
-                Err(e) => { eprintln!("  Error: {e}"); process::exit(1); }
+                Err(e) => {
+                    eprintln!("  Error: {e}");
+                    process::exit(1);
+                }
             }
         }
 
         Commands::Bet { question } => {
             let q = question.join(" ");
             match chat::bet_create(&q, room) {
-                Ok(id) => println!("  Bet [{id}] created: {q}\n  Stake with: agora stake {id} <amount> --yes/--no", id = &id[..6.min(id.len())]),
-                Err(e) => { eprintln!("  Error: {e}"); process::exit(1); }
-            }
-        }
-
-        Commands::Stake { bet_id, amount, yes } => {
-            match chat::bet_stake(&bet_id, yes, amount, room) {
-                Ok(()) => println!("  Staked {amount} on {} (bet {bet_id})", if yes {"YES"} else {"NO"}),
-                Err(e) => { eprintln!("  Error: {e}"); process::exit(1); }
-            }
-        }
-
-        Commands::Resolve { bet_id, yes } => {
-            match chat::bet_resolve(&bet_id, yes, room) {
-                Ok(msg) => println!("  {msg}"),
-                Err(e) => { eprintln!("  Error: {e}"); process::exit(1); }
-            }
-        }
-
-        Commands::Bets => {
-            match chat::bet_list(room) {
-                Ok(bets) => {
-                    let open: Vec<_> = bets.iter().filter(|b| b.status == "open").collect();
-                    if open.is_empty() { println!("  No open bets."); return; }
-                    println!("  {} open bet(s):\n", open.len());
-                    for b in &open {
-                        let yes_total: i64 = b.stakes_yes.iter().map(|(_, a)| a).sum();
-                        let no_total: i64 = b.stakes_no.iter().map(|(_, a)| a).sum();
-                        println!("  [{}] {} (YES: {} | NO: {} | by {})",
-                            &b.id[..6.min(b.id.len())], b.question, yes_total, no_total, b.created_by);
-                    }
+                Ok(id) => println!(
+                    "  Bet [{id}] created: {q}\n  Stake with: agora stake {id} <amount> --yes/--no",
+                    id = &id[..6.min(id.len())]
+                ),
+                Err(e) => {
+                    eprintln!("  Error: {e}");
+                    process::exit(1);
                 }
-                Err(e) => { eprintln!("  Error: {e}"); process::exit(1); }
             }
         }
+
+        Commands::Stake {
+            bet_id,
+            amount,
+            yes,
+        } => match chat::bet_stake(&bet_id, yes, amount, room) {
+            Ok(()) => println!(
+                "  Staked {amount} on {} (bet {bet_id})",
+                if yes { "YES" } else { "NO" }
+            ),
+            Err(e) => {
+                eprintln!("  Error: {e}");
+                process::exit(1);
+            }
+        },
+
+        Commands::Resolve { bet_id, yes } => match chat::bet_resolve(&bet_id, yes, room) {
+            Ok(msg) => println!("  {msg}"),
+            Err(e) => {
+                eprintln!("  Error: {e}");
+                process::exit(1);
+            }
+        },
+
+        Commands::Bets => match chat::bet_list(room) {
+            Ok(bets) => {
+                let open: Vec<_> = bets.iter().filter(|b| b.status == "open").collect();
+                if open.is_empty() {
+                    println!("  No open bets.");
+                    return;
+                }
+                println!("  {} open bet(s):\n", open.len());
+                for b in &open {
+                    let yes_total: i64 = b.stakes_yes.iter().map(|(_, a)| a).sum();
+                    let no_total: i64 = b.stakes_no.iter().map(|(_, a)| a).sum();
+                    println!(
+                        "  [{}] {} (YES: {} | NO: {} | by {})",
+                        &b.id[..6.min(b.id.len())],
+                        b.question,
+                        yes_total,
+                        no_total,
+                        b.created_by
+                    );
+                }
+            }
+            Err(e) => {
+                eprintln!("  Error: {e}");
+                process::exit(1);
+            }
+        },
 
         Commands::SandboxKey { hours } => {
             let agent_id = store::get_agent_id();
             let cost = (hours * 10) as i64; // 10 credits per hour of access
             // Check credits in active room
-            if let Some(r) = room.and_then(|l| store::find_room(l)) {
+            if let Some(r) = room.and_then(store::find_room) {
                 let balance = store::credit_balance(&r.room_id, &agent_id);
                 if balance < cost {
-                    eprintln!("  Insufficient credits: have {balance}, need {cost} for {hours}h sandbox access.");
+                    eprintln!(
+                        "  Insufficient credits: have {balance}, need {cost} for {hours}h sandbox access."
+                    );
                     process::exit(1);
                 }
-                store::credit_add(&r.room_id, &agent_id, -cost, &format!("sandbox key: {hours}h access"));
+                store::credit_add(
+                    &r.room_id,
+                    &agent_id,
+                    -cost,
+                    &format!("sandbox key: {hours}h access"),
+                );
             }
             let token = sandbox::generate_agent_token(&agent_id, hours);
             println!("  Sandbox access token ({hours}h):");
@@ -2179,18 +2298,24 @@ fn main() {
             // Bounded debt: check credit balance before provisioning
             let max_session_cost: i64 = 50; // max credits per sandbox session
             // Bug fix: also check active room, not just --room flag
-            let active = room.and_then(|l| store::find_room(l)).or_else(|| store::get_active_room());
+            let active = room
+                .and_then(store::find_room)
+                .or_else(store::get_active_room);
             if let Some(r) = active {
                 let balance = store::credit_balance(&r.room_id, &agent_id);
                 if balance < max_session_cost {
-                    eprintln!("  Insufficient credits: have {balance}, need {max_session_cost} for sandbox.");
+                    eprintln!(
+                        "  Insufficient credits: have {balance}, need {max_session_cost} for sandbox."
+                    );
                     eprintln!("  Earn credits by completing bounties or calibration seeds.");
                     process::exit(1);
                 }
                 // Check for existing open lease
                 let session_file = store::agora_dir().join("sandbox_session.json");
                 if session_file.exists() {
-                    eprintln!("  You already have an active sandbox. Destroy it first: agora sandbox-destroy <id>");
+                    eprintln!(
+                        "  You already have an active sandbox. Destroy it first: agora sandbox-destroy <id>"
+                    );
                     process::exit(1);
                 }
             }
@@ -2202,38 +2327,54 @@ fn main() {
                     println!("  Run: agora sandbox-exec <command>");
                     // Save session for later use
                     let session_file = store::agora_dir().join("sandbox_session.json");
-                    let _ = std::fs::write(&session_file, serde_json::to_string_pretty(&session).unwrap());
+                    let _ = std::fs::write(
+                        &session_file,
+                        serde_json::to_string_pretty(&session).unwrap(),
+                    );
                 }
-                Err(e) => { eprintln!("  Error: {e}"); process::exit(1); }
+                Err(e) => {
+                    eprintln!("  Error: {e}");
+                    process::exit(1);
+                }
             }
         }
 
         Commands::SandboxExec { command } => {
             let cmd = command.join(" ");
             let session_file = store::agora_dir().join("sandbox_session.json");
-            let session: sandbox::SandboxSession = serde_json::from_str(
-                &std::fs::read_to_string(&session_file).unwrap_or_default()
-            ).map_err(|_| "No active sandbox. Run: agora sandbox-create").unwrap();
+            let session: sandbox::SandboxSession =
+                serde_json::from_str(&std::fs::read_to_string(&session_file).unwrap_or_default())
+                    .map_err(|_| "No active sandbox. Run: agora sandbox-create")
+                    .unwrap();
             match sandbox::exec(&session.id, &cmd, &session.provider) {
                 Ok(output) => println!("{output}"),
-                Err(e) => { eprintln!("  Error: {e}"); process::exit(1); }
+                Err(e) => {
+                    eprintln!("  Error: {e}");
+                    process::exit(1);
+                }
             }
         }
 
         Commands::SandboxDestroy { session_id } => {
             let session_file = store::agora_dir().join("sandbox_session.json");
-            let session: sandbox::SandboxSession = serde_json::from_str(
-                &std::fs::read_to_string(&session_file).unwrap_or_default()
-            ).unwrap_or_else(|_| sandbox::SandboxSession {
-                id: session_id.clone(), provider: "e2b".to_string(),
-                agent_id: String::new(), created_at: 0, status: "unknown".to_string(),
-            });
+            let session: sandbox::SandboxSession =
+                serde_json::from_str(&std::fs::read_to_string(&session_file).unwrap_or_default())
+                    .unwrap_or_else(|_| sandbox::SandboxSession {
+                        id: session_id.clone(),
+                        provider: "e2b".to_string(),
+                        agent_id: String::new(),
+                        created_at: 0,
+                        status: "unknown".to_string(),
+                    });
             match sandbox::destroy(&session.id, &session.provider) {
                 Ok(()) => {
                     let _ = std::fs::remove_file(&session_file);
                     println!("  Sandbox destroyed.");
                 }
-                Err(e) => { eprintln!("  Error: {e}"); process::exit(1); }
+                Err(e) => {
+                    eprintln!("  Error: {e}");
+                    process::exit(1);
+                }
             }
         }
 
@@ -2254,16 +2395,20 @@ fn main() {
                     println!("  Sent {amount} credits to {name}.");
                     println!("  Your balance: {my_bal} | Their balance: {their_bal}");
                 }
-                Err(e) => { eprintln!("  Error: {e}"); process::exit(1); }
+                Err(e) => {
+                    eprintln!("  Error: {e}");
+                    process::exit(1);
+                }
             }
         }
 
-        Commands::Gap { gap_type, urgency } => {
-            match chat::gap_emit(&gap_type, urgency, room) {
-                Ok(id) => println!("  Gap [{id}] emitted: seeking {gap_type} (urgency {urgency}/5)"),
-                Err(e) => { eprintln!("  Error: {e}"); process::exit(1); }
+        Commands::Gap { gap_type, urgency } => match chat::gap_emit(&gap_type, urgency, room) {
+            Ok(id) => println!("  Gap [{id}] emitted: seeking {gap_type} (urgency {urgency}/5)"),
+            Err(e) => {
+                eprintln!("  Error: {e}");
+                process::exit(1);
             }
-        }
+        },
 
         Commands::Gaps => {
             let gaps = chat::gap_list();
@@ -2272,43 +2417,81 @@ fn main() {
                 return;
             }
             println!("  {} gap(s):\n", gaps.len());
-            let now_ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+            let now_ts = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs();
             for g in &gaps {
                 let age = now_ts.saturating_sub(g.since);
-                let age_str = if age < 3600 { format!("{}m", age / 60) } else { format!("{}h", age / 3600) };
-                println!("  [{:<16}] P{} {} — {} tasks blocked, open {age_str} ({})",
-                    g.gap_type, g.urgency, g.room_label, g.blocked_tasks, g.room_label);
+                let age_str = if age < 3600 {
+                    format!("{}m", age / 60)
+                } else {
+                    format!("{}h", age / 3600)
+                };
+                println!(
+                    "  [{:<16}] P{} {} — {} tasks blocked, open {age_str} ({})",
+                    g.gap_type, g.urgency, g.room_label, g.blocked_tasks, g.room_label
+                );
             }
         }
 
-        Commands::Directory => {
-            match chat::directory() {
-                Ok(rooms) => {
-                    if rooms.is_empty() {
-                        println!("  No rooms. Create one: agora create <name>");
-                        return;
-                    }
-                    println!("  {:<16} {:<6} {:<6} {:<12} Topic", "Room", "Online", "Msgs", "Last Active");
-                    println!("  {:<16} {:<6} {:<6} {:<12} {}", "─".repeat(16), "─".repeat(6), "─".repeat(6), "─".repeat(12), "─".repeat(20));
-                    let now_ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
-                    for r in &rooms {
-                        let ago = if r.last_activity > 0 {
-                            let d = now_ts.saturating_sub(r.last_activity);
-                            if d < 60 { format!("{d}s ago") }
-                            else if d < 3600 { format!("{}m ago", d / 60) }
-                            else { format!("{}h ago", d / 3600) }
-                        } else { "never".to_string() };
-                        let topic = r.topic.as_deref().unwrap_or("");
-                        let short_topic = &topic[..40.min(topic.len())];
-                        println!("  {:<16} {:<6} {:<6} {:<12} {}", r.label, r.agent_count, r.message_count, ago, short_topic);
-                    }
+        Commands::Directory => match chat::directory() {
+            Ok(rooms) => {
+                if rooms.is_empty() {
+                    println!("  No rooms. Create one: agora create <name>");
+                    return;
                 }
-                Err(e) => { eprintln!("  Error: {e}"); process::exit(1); }
+                println!(
+                    "  {:<16} {:<6} {:<6} {:<12} Topic",
+                    "Room", "Online", "Msgs", "Last Active"
+                );
+                println!(
+                    "  {:<16} {:<6} {:<6} {:<12} {}",
+                    "─".repeat(16),
+                    "─".repeat(6),
+                    "─".repeat(6),
+                    "─".repeat(12),
+                    "─".repeat(20)
+                );
+                let now_ts = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs();
+                for r in &rooms {
+                    let ago = if r.last_activity > 0 {
+                        let d = now_ts.saturating_sub(r.last_activity);
+                        if d < 60 {
+                            format!("{d}s ago")
+                        } else if d < 3600 {
+                            format!("{}m ago", d / 60)
+                        } else {
+                            format!("{}h ago", d / 3600)
+                        }
+                    } else {
+                        "never".to_string()
+                    };
+                    let topic = r.topic.as_deref().unwrap_or("");
+                    let short_topic = &topic[..40.min(topic.len())];
+                    println!(
+                        "  {:<16} {:<6} {:<6} {:<12} {}",
+                        r.label, r.agent_count, r.message_count, ago, short_topic
+                    );
+                }
             }
-        }
+            Err(e) => {
+                eprintln!("  Error: {e}");
+                process::exit(1);
+            }
+        },
 
-        Commands::Card { capabilities, description } => {
-            let caps: Vec<String> = capabilities.split(',').map(|s| s.trim().to_string()).collect();
+        Commands::Card {
+            capabilities,
+            description,
+        } => {
+            let caps: Vec<String> = capabilities
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .collect();
             match chat::card_set(&caps, description.as_deref(), room) {
                 Ok(()) => {
                     println!("  Card published: {}", caps.join(", "));
@@ -2316,27 +2499,36 @@ fn main() {
                         println!("  Description: {desc}");
                     }
                 }
-                Err(e) => { eprintln!("  Error: {e}"); process::exit(1); }
-            }
-        }
-
-        Commands::CardShow { agent_id } => {
-            match chat::card_show(agent_id.as_deref(), room) {
-                Ok(Some(card)) => {
-                    let name = resolve_display_name(&card.agent_id);
-                    println!("  {name}");
-                    println!("  Capabilities: {}", card.capabilities.join(", "));
-                    if let Some(desc) = &card.description {
-                        println!("  Description: {desc}");
-                    }
-                    println!("  Available: {}", if card.available { "yes" } else { "no" });
+                Err(e) => {
+                    eprintln!("  Error: {e}");
+                    process::exit(1);
                 }
-                Ok(None) => println!("  No card found."),
-                Err(e) => { eprintln!("  Error: {e}"); process::exit(1); }
             }
         }
 
-        Commands::Bounty { title, priority, oracle, reward } => {
+        Commands::CardShow { agent_id } => match chat::card_show(agent_id.as_deref(), room) {
+            Ok(Some(card)) => {
+                let name = resolve_display_name(&card.agent_id);
+                println!("  {name}");
+                println!("  Capabilities: {}", card.capabilities.join(", "));
+                if let Some(desc) = &card.description {
+                    println!("  Description: {desc}");
+                }
+                println!("  Available: {}", if card.available { "yes" } else { "no" });
+            }
+            Ok(None) => println!("  No card found."),
+            Err(e) => {
+                eprintln!("  Error: {e}");
+                process::exit(1);
+            }
+        },
+
+        Commands::Bounty {
+            title,
+            priority,
+            oracle,
+            reward,
+        } => {
             let t = title.join(" ");
             let oracle_ref = oracle.as_deref();
             match chat::bounty_post(&t, priority, oracle_ref, reward, room) {
@@ -2349,112 +2541,141 @@ fn main() {
                         println!("  Reward: {r} credits (auto-distributed on oracle PASS)");
                     }
                 }
-                Err(e) => { eprintln!("  Error: {e}"); process::exit(1); }
+                Err(e) => {
+                    eprintln!("  Error: {e}");
+                    process::exit(1);
+                }
             }
         }
 
         Commands::BountySubmit { task_id, branch } => {
             match chat::bounty_submit(&task_id, &branch, room) {
                 Ok(msg) => println!("  {msg}"),
-                Err(e) => { eprintln!("  Error: {e}"); process::exit(1); }
+                Err(e) => {
+                    eprintln!("  Error: {e}");
+                    process::exit(1);
+                }
             }
         }
 
         Commands::BountyVerify { task_id, agent_id } => {
             match chat::bounty_verify(&task_id, &agent_id, room) {
                 Ok(msg) => println!("  {msg}"),
-                Err(e) => { eprintln!("  Error: {e}"); process::exit(1); }
-            }
-        }
-
-        Commands::Bounties => {
-            match chat::bounty_list(room) {
-                Ok(bounties) => {
-                    if bounties.is_empty() {
-                        println!("  No open bounties.");
-                        return;
-                    }
-                    println!("  {} open bounties:\n", bounties.len());
-                    for b in &bounties {
-                        let id = &b["id"].as_str().unwrap_or("?")[..6.min(b["id"].as_str().unwrap_or("?").len())];
-                        let title = b["title"].as_str().unwrap_or("?");
-                        let priority = b["priority"].as_u64().unwrap_or(0);
-                        let from = b["from"].as_str().unwrap_or("?");
-                        println!("  [{id}] P{priority} {title} (by {from})");
-                    }
-                }
-                Err(e) => { eprintln!("  Error: {e}"); process::exit(1); }
-            }
-        }
-
-        Commands::Fund { credits, tx } => {
-            match (credits, tx.as_deref()) {
-                (Some(_), Some(_)) => {
-                    eprintln!("  Error: choose either Stripe checkout credits or --tx, not both.");
+                Err(e) => {
+                    eprintln!("  Error: {e}");
                     process::exit(1);
                 }
-                (None, None) => {
-                    eprintln!("  Usage: agora fund <credits> OR agora fund --tx <solana-signature>");
-                    process::exit(1);
-                }
-                (_, Some(signature)) => match chat::payment_fund_via_tx(signature, room) {
-                    Ok(msg) => println!("  {msg}"),
-                    Err(e) => { eprintln!("  Error: {e}"); process::exit(1); }
-                },
-                (Some(credits), None) => match chat::payment_fund(credits, room) {
-                    Ok(checkout_url) => {
-                        let amount_usd = (credits / store::CREDITS_PER_USD_CENT) as f64 / 100.0;
-                        println!("  Stripe Checkout created for {credits} credits (${:.2}).", amount_usd);
-                        println!("  Complete payment at:");
-                        println!("  {checkout_url}");
-                        println!();
-                        println!("  Credits will be minted after payment confirmation.");
-                        println!("  10% platform fee applies — you receive {} credits net.", credits - credits / 10);
-                    }
-                    Err(e) => { eprintln!("  Error: {e}"); process::exit(1); }
-                },
             }
         }
 
-        Commands::Withdraw { credits } => {
-            match chat::payment_withdraw(credits, room) {
+        Commands::Bounties => match chat::bounty_list(room) {
+            Ok(bounties) => {
+                if bounties.is_empty() {
+                    println!("  No open bounties.");
+                    return;
+                }
+                println!("  {} open bounties:\n", bounties.len());
+                for b in &bounties {
+                    let id = &b["id"].as_str().unwrap_or("?")
+                        [..6.min(b["id"].as_str().unwrap_or("?").len())];
+                    let title = b["title"].as_str().unwrap_or("?");
+                    let priority = b["priority"].as_u64().unwrap_or(0);
+                    let from = b["from"].as_str().unwrap_or("?");
+                    println!("  [{id}] P{priority} {title} (by {from})");
+                }
+            }
+            Err(e) => {
+                eprintln!("  Error: {e}");
+                process::exit(1);
+            }
+        },
+
+        Commands::Fund { credits, tx } => match (credits, tx.as_deref()) {
+            (Some(_), Some(_)) => {
+                eprintln!("  Error: choose either Stripe checkout credits or --tx, not both.");
+                process::exit(1);
+            }
+            (None, None) => {
+                eprintln!("  Usage: agora fund <credits> OR agora fund --tx <solana-signature>");
+                process::exit(1);
+            }
+            (_, Some(signature)) => match chat::payment_fund_via_tx(signature, room) {
                 Ok(msg) => println!("  {msg}"),
-                Err(e) => { eprintln!("  Error: {e}"); process::exit(1); }
-            }
-        }
-
-        Commands::Payments => {
-            match chat::payment_history(room) {
-                Ok(records) => {
-                    if records.is_empty() {
-                        println!("  No payment history.");
-                        return;
-                    }
-                    println!("  Payment history ({} records):\n", records.len());
-                    for r in &records {
-                        let kind = match r.kind {
-                            store::PaymentKind::Deposit => "deposit",
-                            store::PaymentKind::Withdrawal => "withdrawal",
-                        };
-                        let status = match r.status {
-                            store::PaymentStatus::Pending => "pending",
-                            store::PaymentStatus::Completed => "completed",
-                            store::PaymentStatus::Failed => "failed",
-                            store::PaymentStatus::Refunded => "refunded",
-                        };
-                        let amount_usd = r.amount_cents as f64 / 100.0;
-                        println!(
-                            "  [{}] {} {} — {} credits (${:.2}) — {}",
-                            &r.id[..8.min(r.id.len())],
-                            kind, status,
-                            r.credits, amount_usd,
-                            if r.checkout_url.is_some() { "awaiting payment" } else { "" }
-                        );
-                    }
+                Err(e) => {
+                    eprintln!("  Error: {e}");
+                    process::exit(1);
                 }
-                Err(e) => { eprintln!("  Error: {e}"); process::exit(1); }
+            },
+            (Some(credits), None) => match chat::payment_fund(credits, room) {
+                Ok(checkout_url) => {
+                    let amount_usd = (credits / store::CREDITS_PER_USD_CENT) as f64 / 100.0;
+                    println!(
+                        "  Stripe Checkout created for {credits} credits (${:.2}).",
+                        amount_usd
+                    );
+                    println!("  Complete payment at:");
+                    println!("  {checkout_url}");
+                    println!();
+                    println!("  Credits will be minted after payment confirmation.");
+                    println!(
+                        "  10% platform fee applies — you receive {} credits net.",
+                        credits - credits / 10
+                    );
+                }
+                Err(e) => {
+                    eprintln!("  Error: {e}");
+                    process::exit(1);
+                }
+            },
+        },
+
+        Commands::Withdraw { credits } => match chat::payment_withdraw(credits, room) {
+            Ok(msg) => println!("  {msg}"),
+            Err(e) => {
+                eprintln!("  Error: {e}");
+                process::exit(1);
             }
-        }
+        },
+
+        Commands::Payments => match chat::payment_history(room) {
+            Ok(records) => {
+                if records.is_empty() {
+                    println!("  No payment history.");
+                    return;
+                }
+                println!("  Payment history ({} records):\n", records.len());
+                for r in &records {
+                    let kind = match r.kind {
+                        store::PaymentKind::Deposit => "deposit",
+                        store::PaymentKind::Withdrawal => "withdrawal",
+                    };
+                    let status = match r.status {
+                        store::PaymentStatus::Pending => "pending",
+                        store::PaymentStatus::Completed => "completed",
+                        store::PaymentStatus::Failed => "failed",
+                        store::PaymentStatus::Refunded => "refunded",
+                    };
+                    let amount_usd = r.amount_cents as f64 / 100.0;
+                    println!(
+                        "  [{}] {} {} — {} credits (${:.2}) — {}",
+                        &r.id[..8.min(r.id.len())],
+                        kind,
+                        status,
+                        r.credits,
+                        amount_usd,
+                        if r.checkout_url.is_some() {
+                            "awaiting payment"
+                        } else {
+                            ""
+                        }
+                    );
+                }
+            }
+            Err(e) => {
+                eprintln!("  Error: {e}");
+                process::exit(1);
+            }
+        },
 
         Commands::Vouch { agent_id, reason } => {
             match chat::vouch(&agent_id, reason.as_deref(), room) {
@@ -2462,201 +2683,267 @@ fn main() {
                     let name = resolve_display_name(&agent_id);
                     println!("  Vouched for {name}.");
                 }
-                Err(e) => { eprintln!("  Error: {e}"); process::exit(1); }
+                Err(e) => {
+                    eprintln!("  Error: {e}");
+                    process::exit(1);
+                }
             }
         }
 
-        Commands::Discover { need } => {
-            match chat::discover(&need, room) {
-                Ok(results) => {
-                    if results.is_empty() {
-                        println!("  No agents found matching: {need}");
-                        return;
-                    }
-                    println!("  {} agent(s) matching '{need}':\n", results.len());
-                    for r in &results {
-                        let name = resolve_display_name(&r.card.agent_id);
-                        let desc = r.card.description.as_deref().unwrap_or("");
-                        let trust = format!("{:.1}", r.trust_score);
-                        let abandonment = format!("{:.0}%", r.abandonment_rate * 100.0);
-                        let volatility = format!("{:.0}%", r.volatility_score * 100.0);
-                        println!(
-                            "  {name} — {} (trust: {trust}, receipts: {}, rooms: {}, stale: {}, abandonment: {abandonment}, volatility: {volatility})",
-                            r.card.capabilities.join(", "),
-                            r.receipt_count,
-                            r.rooms_active,
-                            r.stale_claims,
-                        );
-                        if !desc.is_empty() { println!("    {desc}"); }
+        Commands::Discover { need } => match chat::discover(&need, room) {
+            Ok(results) => {
+                if results.is_empty() {
+                    println!("  No agents found matching: {need}");
+                    return;
+                }
+                println!("  {} agent(s) matching '{need}':\n", results.len());
+                for r in &results {
+                    let name = resolve_display_name(&r.card.agent_id);
+                    let desc = r.card.description.as_deref().unwrap_or("");
+                    let trust = format!("{:.1}", r.trust_score);
+                    let abandonment = format!("{:.0}%", r.abandonment_rate * 100.0);
+                    let volatility = format!("{:.0}%", r.volatility_score * 100.0);
+                    println!(
+                        "  {name} — {} (trust: {trust}, receipts: {}, rooms: {}, stale: {}, abandonment: {abandonment}, volatility: {volatility})",
+                        r.card.capabilities.join(", "),
+                        r.receipt_count,
+                        r.rooms_active,
+                        r.stale_claims,
+                    );
+                    if !desc.is_empty() {
+                        println!("    {desc}");
                     }
                 }
-                Err(e) => { eprintln!("  Error: {e}"); process::exit(1); }
             }
-        }
+            Err(e) => {
+                eprintln!("  Error: {e}");
+                process::exit(1);
+            }
+        },
 
-        Commands::SomaAssert { subject, predicate, confidence, git_ref } => {
+        Commands::SomaAssert {
+            subject,
+            predicate,
+            confidence,
+            git_ref,
+        } => {
             let pred = predicate.join(" ");
             match chat::soma_assert(&subject, &pred, Some(confidence), git_ref.as_deref(), room) {
                 Ok(id) => println!("  Belief [{id}] asserted: {subject}: {pred}"),
-                Err(e) => { eprintln!("  Error: {e}"); process::exit(1); }
-            }
-        }
-
-        Commands::SomaQuery { subject } => {
-            match chat::soma_query(&subject, room) {
-                Ok(beliefs) => {
-                    if beliefs.is_empty() {
-                        println!("  No beliefs about '{subject}'.");
-                        return;
-                    }
-                    println!("  {} belief(s) about '{subject}':\n", beliefs.len());
-                    for b in &beliefs {
-                        let bid = &b["id"].as_str().unwrap_or("?")[..6.min(b["id"].as_str().unwrap_or("?").len())];
-                        let btype = if b["type"].as_str() == Some("soma_correction") { "CORRECTED" } else { "belief" };
-                        let pred = b["predicate"].as_str().unwrap_or("?");
-                        let from = b["from"].as_str().unwrap_or("?");
-                        let name = resolve_display_name(from);
-                        println!("  [{bid}] ({btype}) {pred}");
-                        println!("         by {name}");
-                        print_soma_details(b);
-                    }
+                Err(e) => {
+                    eprintln!("  Error: {e}");
+                    process::exit(1);
                 }
-                Err(e) => { eprintln!("  Error: {e}"); process::exit(1); }
             }
         }
 
-        Commands::SomaCorrect { belief_id, predicate, reason } => {
+        Commands::SomaQuery { subject } => match chat::soma_query(&subject, room) {
+            Ok(beliefs) => {
+                if beliefs.is_empty() {
+                    println!("  No beliefs about '{subject}'.");
+                    return;
+                }
+                println!("  {} belief(s) about '{subject}':\n", beliefs.len());
+                for b in &beliefs {
+                    let bid = &b["id"].as_str().unwrap_or("?")
+                        [..6.min(b["id"].as_str().unwrap_or("?").len())];
+                    let btype = if b["type"].as_str() == Some("soma_correction") {
+                        "CORRECTED"
+                    } else {
+                        "belief"
+                    };
+                    let pred = b["predicate"].as_str().unwrap_or("?");
+                    let from = b["from"].as_str().unwrap_or("?");
+                    let name = resolve_display_name(from);
+                    println!("  [{bid}] ({btype}) {pred}");
+                    println!("         by {name}");
+                    print_soma_details(b);
+                }
+            }
+            Err(e) => {
+                eprintln!("  Error: {e}");
+                process::exit(1);
+            }
+        },
+
+        Commands::SomaCorrect {
+            belief_id,
+            predicate,
+            reason,
+        } => {
             let pred = predicate.join(" ");
             match chat::soma_correct(&belief_id, &pred, reason.as_deref(), room) {
                 Ok(id) => println!("  Correction [{id}] recorded. Subscribers notified."),
-                Err(e) => { eprintln!("  Error: {e}"); process::exit(1); }
+                Err(e) => {
+                    eprintln!("  Error: {e}");
+                    process::exit(1);
+                }
             }
         }
 
-        Commands::SeedGen => {
-            match chat::seed_gen(room) {
-                Ok((id, puzzle)) => {
-                    println!("  Calibration seed [{id_short}] created.", id_short = &id[..8]);
-                    println!("  Puzzle: {puzzle}");
-                    println!("  Solve with: agora seed-verify {id_short} <answer>", id_short = &id[..8]);
-                }
-                Err(e) => { eprintln!("  Error: {e}"); process::exit(1); }
+        Commands::SeedGen => match chat::seed_gen(room) {
+            Ok((id, puzzle)) => {
+                println!(
+                    "  Calibration seed [{id_short}] created.",
+                    id_short = &id[..8]
+                );
+                println!("  Puzzle: {puzzle}");
+                println!(
+                    "  Solve with: agora seed-verify {id_short} <answer>",
+                    id_short = &id[..8]
+                );
             }
-        }
+            Err(e) => {
+                eprintln!("  Error: {e}");
+                process::exit(1);
+            }
+        },
 
         Commands::SeedVerify { seed_id, answer } => {
             let ans = answer.join(" ");
-            if ans.is_empty() { eprintln!("Usage: agora seed-verify <seed-id> <answer>"); process::exit(1); }
+            if ans.is_empty() {
+                eprintln!("Usage: agora seed-verify <seed-id> <answer>");
+                process::exit(1);
+            }
             match chat::seed_verify(&seed_id, &ans, room) {
-                Ok(true) => println!("  Correct! Work receipt issued. Your trust score has been updated."),
+                Ok(true) => {
+                    println!("  Correct! Work receipt issued. Your trust score has been updated.")
+                }
                 Ok(false) => println!("  Incorrect answer. Try again."),
-                Err(e) => { eprintln!("  Error: {e}"); process::exit(1); }
+                Err(e) => {
+                    eprintln!("  Error: {e}");
+                    process::exit(1);
+                }
             }
         }
 
-        Commands::Seeds => {
-            match chat::seed_list(room) {
-                Ok(seeds) => {
-                    if seeds.is_empty() {
-                        println!("  (no calibration seeds — use 'agora seed-gen' to create one)");
-                        return;
-                    }
-                    println!("  Calibration Seeds ({}):", seeds.len());
-                    for s in &seeds {
-                        let solvers = if s.solved_by.is_empty() {
-                            "unsolved".to_string()
-                        } else {
-                            format!("solved by {} agent(s)", s.solved_by.len())
-                        };
-                        println!(
-                            "    [{id_short}] [{diff}] {title} — {solvers}",
-                            id_short = &s.id[..8.min(s.id.len())],
-                            diff = s.difficulty,
-                            title = s.title
-                        );
-                        println!("           Puzzle: {}", s.puzzle);
-                    }
+        Commands::Seeds => match chat::seed_list(room) {
+            Ok(seeds) => {
+                if seeds.is_empty() {
+                    println!("  (no calibration seeds — use 'agora seed-gen' to create one)");
+                    return;
                 }
-                Err(e) => { eprintln!("  Error: {e}"); process::exit(1); }
+                println!("  Calibration Seeds ({}):", seeds.len());
+                for s in &seeds {
+                    let solvers = if s.solved_by.is_empty() {
+                        "unsolved".to_string()
+                    } else {
+                        format!("solved by {} agent(s)", s.solved_by.len())
+                    };
+                    println!(
+                        "    [{id_short}] [{diff}] {title} — {solvers}",
+                        id_short = &s.id[..8.min(s.id.len())],
+                        diff = s.difficulty,
+                        title = s.title
+                    );
+                    println!("           Puzzle: {}", s.puzzle);
+                }
             }
-        }
+            Err(e) => {
+                eprintln!("  Error: {e}");
+                process::exit(1);
+            }
+        },
 
         Commands::TaskAdd { title } => {
             let t = title.join(" ");
-            if t.is_empty() { eprintln!("Usage: agora task-add <title>"); process::exit(1); }
+            if t.is_empty() {
+                eprintln!("Usage: agora task-add <title>");
+                process::exit(1);
+            }
             match chat::task_add(&t, room) {
                 Ok(id) => println!("  Task [{id}] created: {t}"),
-                Err(e) => { eprintln!("  Error: {e}"); process::exit(1); }
+                Err(e) => {
+                    eprintln!("  Error: {e}");
+                    process::exit(1);
+                }
             }
         }
 
-        Commands::TaskClaim { task_id } => {
-            match chat::task_claim(&task_id, room) {
-                Ok(id) => println!("  Claimed task [{id}]."),
-                Err(e) => { eprintln!("  Error: {e}"); process::exit(1); }
+        Commands::TaskClaim { task_id } => match chat::task_claim(&task_id, room) {
+            Ok(id) => println!("  Claimed task [{id}]."),
+            Err(e) => {
+                eprintln!("  Error: {e}");
+                process::exit(1);
             }
-        }
+        },
 
         Commands::TaskDone { task_id, notes } => {
             match chat::task_done(&task_id, notes.as_deref(), room) {
                 Ok(id) => println!("  Task [{id}] marked done."),
-                Err(e) => { eprintln!("  Error: {e}"); process::exit(1); }
+                Err(e) => {
+                    eprintln!("  Error: {e}");
+                    process::exit(1);
+                }
             }
         }
 
         Commands::TaskCheckpoint { task_id, notes } => {
             match chat::task_checkpoint(&task_id, notes.as_deref(), room) {
                 Ok(id) => println!("  Task [{id}] checkpoint recorded."),
-                Err(e) => { eprintln!("  Error: {e}"); process::exit(1); }
+                Err(e) => {
+                    eprintln!("  Error: {e}");
+                    process::exit(1);
+                }
             }
         }
 
-        Commands::Tasks => {
-            match chat::task_list(room) {
-                Ok(tasks) => {
-                    if tasks.is_empty() {
-                        println!("  (no tasks)");
-                        return;
-                    }
-                    let open: Vec<_> = tasks.iter().filter(|t| t.status == "open").collect();
-                    let claimed: Vec<_> = tasks.iter().filter(|t| t.status == "claimed").collect();
-                    let done: Vec<_> = tasks.iter().filter(|t| t.status == "done").collect();
+        Commands::Tasks => match chat::task_list(room) {
+            Ok(tasks) => {
+                if tasks.is_empty() {
+                    println!("  (no tasks)");
+                    return;
+                }
+                let open: Vec<_> = tasks.iter().filter(|t| t.status == "open").collect();
+                let claimed: Vec<_> = tasks.iter().filter(|t| t.status == "claimed").collect();
+                let done: Vec<_> = tasks.iter().filter(|t| t.status == "done").collect();
 
-                    if !open.is_empty() {
-                        println!("  Open ({}):", open.len());
-                        for t in &open {
-                            println!("    [{}] {}", &t.id[..6.min(t.id.len())], t.title);
-                        }
-                    }
-                    if !claimed.is_empty() {
-                        println!("  In Progress ({}):", claimed.len());
-                        for t in &claimed {
-                            let by = t.claimed_by.as_deref().unwrap_or("?");
-                            let name = resolve_display_name(by);
-                            let note = t.notes.as_deref().unwrap_or("");
-                            println!(
-                                "    [{}] {} (by {name}){}",
-                                &t.id[..6.min(t.id.len())],
-                                t.title,
-                                if note.is_empty() {
-                                    String::new()
-                                } else {
-                                    format!(" — {note}")
-                                }
-                            );
-                        }
-                    }
-                    if !done.is_empty() {
-                        println!("  Done ({}):", done.len());
-                        for t in &done {
-                            let note = t.notes.as_deref().unwrap_or("");
-                            println!("    [{}] {} {}", &t.id[..6.min(t.id.len())], t.title, if note.is_empty() { String::new() } else { format!("— {note}") });
-                        }
+                if !open.is_empty() {
+                    println!("  Open ({}):", open.len());
+                    for t in &open {
+                        println!("    [{}] {}", &t.id[..6.min(t.id.len())], t.title);
                     }
                 }
-                Err(e) => { eprintln!("  Error: {e}"); process::exit(1); }
+                if !claimed.is_empty() {
+                    println!("  In Progress ({}):", claimed.len());
+                    for t in &claimed {
+                        let by = t.claimed_by.as_deref().unwrap_or("?");
+                        let name = resolve_display_name(by);
+                        let note = t.notes.as_deref().unwrap_or("");
+                        println!(
+                            "    [{}] {} (by {name}){}",
+                            &t.id[..6.min(t.id.len())],
+                            t.title,
+                            if note.is_empty() {
+                                String::new()
+                            } else {
+                                format!(" — {note}")
+                            }
+                        );
+                    }
+                }
+                if !done.is_empty() {
+                    println!("  Done ({}):", done.len());
+                    for t in &done {
+                        let note = t.notes.as_deref().unwrap_or("");
+                        println!(
+                            "    [{}] {} {}",
+                            &t.id[..6.min(t.id.len())],
+                            t.title,
+                            if note.is_empty() {
+                                String::new()
+                            } else {
+                                format!("— {note}")
+                            }
+                        );
+                    }
+                }
             }
-        }
+            Err(e) => {
+                eprintln!("  Error: {e}");
+                process::exit(1);
+            }
+        },
 
         Commands::RoleClaim { role, summary, ttl } => {
             match chat::role_claim(&role, summary.as_deref(), ttl, room) {
@@ -2671,7 +2958,10 @@ fn main() {
                         println!("  Context: {summary}");
                     }
                 }
-                Err(e) => { eprintln!("  Error: {e}"); process::exit(1); }
+                Err(e) => {
+                    eprintln!("  Error: {e}");
+                    process::exit(1);
+                }
             }
         }
 
@@ -2688,49 +2978,58 @@ fn main() {
                         println!("  Context: {summary}");
                     }
                 }
-                Err(e) => { eprintln!("  Error: {e}"); process::exit(1); }
+                Err(e) => {
+                    eprintln!("  Error: {e}");
+                    process::exit(1);
+                }
             }
         }
 
-        Commands::RoleRelease { role } => {
-            match chat::role_release(&role, room) {
-                Ok(()) => println!("  Released role '{}'.", role),
-                Err(e) => { eprintln!("  Error: {e}"); process::exit(1); }
+        Commands::RoleRelease { role } => match chat::role_release(&role, room) {
+            Ok(()) => println!("  Released role '{}'.", role),
+            Err(e) => {
+                eprintln!("  Error: {e}");
+                process::exit(1);
             }
-        }
+        },
 
-        Commands::Roles => {
-            match chat::list_role_leases(room) {
-                Ok(leases) => {
-                    if leases.is_empty() {
-                        println!("  (no role leases)");
-                        return;
+        Commands::Roles => match chat::list_role_leases(room) {
+            Ok(leases) => {
+                if leases.is_empty() {
+                    println!("  (no role leases)");
+                    return;
+                }
+                let now_ts = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs();
+                for lease in leases {
+                    let holder = resolve_display_name(&lease.agent_id);
+                    let state = if lease.lease_expires > now_ts {
+                        "active"
+                    } else {
+                        "expired"
+                    };
+                    println!(
+                        "  {} — {} [{}] until {}",
+                        lease.role,
+                        holder,
+                        state,
+                        ts(lease.lease_expires)
+                    );
+                    if let Some(summary) = lease.context_summary {
+                        println!("    {summary}");
                     }
-                    let now_ts = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap()
-                        .as_secs();
-                    for lease in leases {
-                        let holder = resolve_display_name(&lease.agent_id);
-                        let state = if lease.lease_expires > now_ts { "active" } else { "expired" };
-                        println!(
-                            "  {} — {} [{}] until {}",
-                            lease.role,
-                            holder,
-                            state,
-                            ts(lease.lease_expires)
-                        );
-                        if let Some(summary) = lease.context_summary {
-                            println!("    {summary}");
-                        }
-                        if !lease.last_task_ids.is_empty() {
-                            println!("    tasks: {}", lease.last_task_ids.join(", "));
-                        }
+                    if !lease.last_task_ids.is_empty() {
+                        println!("    tasks: {}", lease.last_task_ids.join(", "));
                     }
                 }
-                Err(e) => { eprintln!("  Error: {e}"); process::exit(1); }
             }
-        }
+            Err(e) => {
+                eprintln!("  Error: {e}");
+                process::exit(1);
+            }
+        },
 
         Commands::Receipts { agent_id } => {
             match chat::list_work_receipts(agent_id.as_deref(), room) {
@@ -2751,7 +3050,10 @@ fn main() {
                             item.receipt.status
                         );
                         println!("    by: {name}");
-                        println!("    hash: {}", &item.receipt.task_hash[..12.min(item.receipt.task_hash.len())]);
+                        println!(
+                            "    hash: {}",
+                            &item.receipt.task_hash[..12.min(item.receipt.task_hash.len())]
+                        );
                         if !item.receipt.witness_ids.is_empty() {
                             println!("    witnesses: {}", item.receipt.witness_ids.join(", "));
                         }
@@ -2760,7 +3062,10 @@ fn main() {
                         }
                     }
                 }
-                Err(e) => { eprintln!("  Error: {e}"); process::exit(1); }
+                Err(e) => {
+                    eprintln!("  Error: {e}");
+                    process::exit(1);
+                }
             }
         }
 
@@ -2778,79 +3083,83 @@ fn main() {
             }
         }
 
-        Commands::Whois { agent_id } => {
-            match chat::whois(&agent_id, room) {
-                Ok(Some(p)) => {
-                    println!("  Agent:   {}", p.agent_id);
-                    if let Some(name) = &p.name {
-                        println!("  Name:    {name}");
-                    }
-                    if let Some(role) = &p.role {
-                        println!("  Role:    {role}");
-                    }
-                    let ago = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() - p.updated_at;
-                    println!("  Updated: {}s ago", ago);
+        Commands::Whois { agent_id } => match chat::whois(&agent_id, room) {
+            Ok(Some(p)) => {
+                println!("  Agent:   {}", p.agent_id);
+                if let Some(name) = &p.name {
+                    println!("  Name:    {name}");
                 }
-                Ok(None) => {
-                    println!("  No profile found for '{agent_id}'.");
+                if let Some(role) = &p.role {
+                    println!("  Role:    {role}");
                 }
-                Err(e) => {
-                    eprintln!("  Error: {e}");
-                    process::exit(1);
-                }
+                let ago = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs()
+                    - p.updated_at;
+                println!("  Updated: {}s ago", ago);
             }
-        }
+            Ok(None) => {
+                println!("  No profile found for '{agent_id}'.");
+            }
+            Err(e) => {
+                eprintln!("  Error: {e}");
+                process::exit(1);
+            }
+        },
 
-        Commands::Timeline { since } => {
-            match chat::timeline(&since, room) {
-                Ok(events) => {
-                    if events.is_empty() {
-                        println!("  (no activity in last {since})");
-                        return;
-                    }
-                    println!("  Timeline (last {since}, {} events):\n", events.len());
-                    for evt in &events {
-                        let time = ts(evt["ts"].as_u64().unwrap_or(0));
-                        let from = evt["from"].as_str().unwrap_or("?");
-                        let etype = evt["event_type"].as_str().unwrap_or("?");
-                        let icon = match etype {
-                            "join" => "+",
-                            "file" => "F",
-                            "profile" => "P",
-                            "work_receipt" => "W",
-                            "reaction" => "R",
-                            "topic" => "T",
-                            "admin" => "A",
-                            "kick" => "X",
-                            "scheduled" => "S",
-                            _ => " ",
-                        };
-                        let text = evt["text"].as_str().unwrap_or("");
-                        let short = &text[..60.min(text.len())];
-                        let name = resolve_display_name(from);
-                        println!("  {time} [{icon}] {name}: {short}");
-                    }
+        Commands::Timeline { since } => match chat::timeline(&since, room) {
+            Ok(events) => {
+                if events.is_empty() {
+                    println!("  (no activity in last {since})");
+                    return;
                 }
-                Err(e) => { eprintln!("  Error: {e}"); process::exit(1); }
+                println!("  Timeline (last {since}, {} events):\n", events.len());
+                for evt in &events {
+                    let time = ts(evt["ts"].as_u64().unwrap_or(0));
+                    let from = evt["from"].as_str().unwrap_or("?");
+                    let etype = evt["event_type"].as_str().unwrap_or("?");
+                    let icon = match etype {
+                        "join" => "+",
+                        "file" => "F",
+                        "profile" => "P",
+                        "work_receipt" => "W",
+                        "reaction" => "R",
+                        "topic" => "T",
+                        "admin" => "A",
+                        "kick" => "X",
+                        "scheduled" => "S",
+                        _ => " ",
+                    };
+                    let text = evt["text"].as_str().unwrap_or("");
+                    let short = &text[..60.min(text.len())];
+                    let name = resolve_display_name(from);
+                    println!("  {time} [{icon}] {name}: {short}");
+                }
             }
-        }
+            Err(e) => {
+                eprintln!("  Error: {e}");
+                process::exit(1);
+            }
+        },
 
-        Commands::Digest { since, out } => {
-            match chat::digest(&since, room) {
-                Ok(report) => {
-                    if let Some(path) = out {
-                        std::fs::write(&path, &report).unwrap_or_else(|e| {
-                            eprintln!("  Error: {e}"); process::exit(1);
-                        });
-                        println!("  Digest written to: {path}");
-                    } else {
-                        println!("{report}");
-                    }
+        Commands::Digest { since, out } => match chat::digest(&since, room) {
+            Ok(report) => {
+                if let Some(path) = out {
+                    std::fs::write(&path, &report).unwrap_or_else(|e| {
+                        eprintln!("  Error: {e}");
+                        process::exit(1);
+                    });
+                    println!("  Digest written to: {path}");
+                } else {
+                    println!("{report}");
                 }
-                Err(e) => { eprintln!("  Error: {e}"); process::exit(1); }
             }
-        }
+            Err(e) => {
+                eprintln!("  Error: {e}");
+                process::exit(1);
+            }
+        },
 
         Commands::Alias { agent_id, name } => {
             if let Some(n) = name {
@@ -2878,35 +3187,38 @@ fn main() {
             }
         }
 
-        Commands::WebhookAdd { url } => {
-            match chat::add_webhook(&url, room) {
-                Ok(id) => println!("  Webhook [{id}] added: {url}"),
-                Err(e) => { eprintln!("  Error: {e}"); process::exit(1); }
+        Commands::WebhookAdd { url } => match chat::add_webhook(&url, room) {
+            Ok(id) => println!("  Webhook [{id}] added: {url}"),
+            Err(e) => {
+                eprintln!("  Error: {e}");
+                process::exit(1);
             }
-        }
+        },
 
-        Commands::WebhookList => {
-            match chat::list_webhooks(room) {
-                Ok(hooks) => {
-                    if hooks.is_empty() {
-                        println!("  (no webhooks)");
-                        return;
-                    }
-                    for h in &hooks {
-                        println!("  [{}] {}", h.id, h.url);
-                    }
+        Commands::WebhookList => match chat::list_webhooks(room) {
+            Ok(hooks) => {
+                if hooks.is_empty() {
+                    println!("  (no webhooks)");
+                    return;
                 }
-                Err(e) => { eprintln!("  Error: {e}"); process::exit(1); }
+                for h in &hooks {
+                    println!("  [{}] {}", h.id, h.url);
+                }
             }
-        }
+            Err(e) => {
+                eprintln!("  Error: {e}");
+                process::exit(1);
+            }
+        },
 
-        Commands::WebhookRemove { id } => {
-            match chat::remove_webhook(&id, room) {
-                Ok(true) => println!("  Webhook [{id}] removed."),
-                Ok(false) => println!("  Webhook [{id}] not found."),
-                Err(e) => { eprintln!("  Error: {e}"); process::exit(1); }
+        Commands::WebhookRemove { id } => match chat::remove_webhook(&id, room) {
+            Ok(true) => println!("  Webhook [{id}] removed."),
+            Ok(false) => println!("  Webhook [{id}] not found."),
+            Err(e) => {
+                eprintln!("  Error: {e}");
+                process::exit(1);
             }
-        }
+        },
 
         Commands::Mentions { agent, since } => {
             match chat::mentions(agent.as_deref(), &since, room) {
@@ -2920,28 +3232,32 @@ fn main() {
                         print_msg(m);
                     }
                 }
-                Err(e) => { eprintln!("  Error: {e}"); process::exit(1); }
+                Err(e) => {
+                    eprintln!("  Error: {e}");
+                    process::exit(1);
+                }
             }
         }
 
-        Commands::Links { since } => {
-            match chat::links(&since, room) {
-                Ok(links) => {
-                    if links.is_empty() {
-                        println!("  (no URLs shared in last {since})");
-                        return;
-                    }
-                    println!("  {} URL(s) shared in last {since}:\n", links.len());
-                    for l in &links {
-                        let url = l["url"].as_str().unwrap_or("?");
-                        let from = l["from"].as_str().unwrap_or("?");
-                        let time = ts(l["ts"].as_u64().unwrap_or(0));
-                        println!("  {time} [{from}] {url}");
-                    }
+        Commands::Links { since } => match chat::links(&since, room) {
+            Ok(links) => {
+                if links.is_empty() {
+                    println!("  (no URLs shared in last {since})");
+                    return;
                 }
-                Err(e) => { eprintln!("  Error: {e}"); process::exit(1); }
+                println!("  {} URL(s) shared in last {since}:\n", links.len());
+                for l in &links {
+                    let url = l["url"].as_str().unwrap_or("?");
+                    let from = l["from"].as_str().unwrap_or("?");
+                    let time = ts(l["ts"].as_u64().unwrap_or(0));
+                    println!("  {time} [{from}] {url}");
+                }
             }
-        }
+            Err(e) => {
+                eprintln!("  Error: {e}");
+                process::exit(1);
+            }
+        },
 
         Commands::Encrypt { text, file } => {
             let data = if let Some(path) = file {
@@ -2957,43 +3273,6 @@ fn main() {
             };
             match chat::encrypt_data(&data, room) {
                 Ok(b64) => println!("{b64}"),
-                Err(e) => { eprintln!("  Error: {e}"); process::exit(1); }
-            }
-        }
-
-        Commands::Decrypt { ciphertext, out } => {
-            match chat::decrypt_data(&ciphertext, room) {
-                Ok(data) => {
-                    if let Some(path) = out {
-                        std::fs::write(&path, &data).unwrap_or_else(|e| {
-                            eprintln!("  Error writing {path}: {e}");
-                            process::exit(1);
-                        });
-                        println!("  Decrypted to: {path}");
-                    } else {
-                        print!("{}", String::from_utf8_lossy(&data));
-                    }
-                }
-                Err(e) => { eprintln!("  Error: {e}"); process::exit(1); }
-            }
-        }
-
-        Commands::Changelog { since } => {
-            match chat::changelog(&since, room) {
-                Ok(entries) => {
-                    if entries.is_empty() {
-                        println!("  (no changelog entries in last {since})");
-                        return;
-                    }
-                    println!("  Changelog (last {since}, {} entries):\n", entries.len());
-                    for e in &entries {
-                        let time = ts(e["ts"].as_u64().unwrap_or(0));
-                        let from = e["from"].as_str().unwrap_or("?");
-                        let text = e["text"].as_str().unwrap_or("");
-                        let short = &text[..80.min(text.len())];
-                        println!("  {time} [{from}] {short}");
-                    }
-                }
                 Err(e) => {
                     eprintln!("  Error: {e}");
                     process::exit(1);
@@ -3001,30 +3280,73 @@ fn main() {
             }
         }
 
-        Commands::Test => {
-            match chat::healthcheck(room) {
-                Ok(checks) => {
-                    println!("  Agora Health Check\n");
-                    let mut all_ok = true;
-                    for (name, ok, detail) in &checks {
-                        let icon = if *ok { "\x1b[92m\u{2713}\x1b[0m" } else { "\x1b[91m\u{2717}\x1b[0m" };
-                        println!("  {icon} {name:<20} {detail}");
-                        if !ok { all_ok = false; }
-                    }
-                    println!();
-                    if all_ok {
-                        println!("  \x1b[92mAll checks passed.\x1b[0m");
-                    } else {
-                        println!("  \x1b[91mSome checks failed.\x1b[0m");
+        Commands::Decrypt { ciphertext, out } => match chat::decrypt_data(&ciphertext, room) {
+            Ok(data) => {
+                if let Some(path) = out {
+                    std::fs::write(&path, &data).unwrap_or_else(|e| {
+                        eprintln!("  Error writing {path}: {e}");
                         process::exit(1);
+                    });
+                    println!("  Decrypted to: {path}");
+                } else {
+                    print!("{}", String::from_utf8_lossy(&data));
+                }
+            }
+            Err(e) => {
+                eprintln!("  Error: {e}");
+                process::exit(1);
+            }
+        },
+
+        Commands::Changelog { since } => match chat::changelog(&since, room) {
+            Ok(entries) => {
+                if entries.is_empty() {
+                    println!("  (no changelog entries in last {since})");
+                    return;
+                }
+                println!("  Changelog (last {since}, {} entries):\n", entries.len());
+                for e in &entries {
+                    let time = ts(e["ts"].as_u64().unwrap_or(0));
+                    let from = e["from"].as_str().unwrap_or("?");
+                    let text = e["text"].as_str().unwrap_or("");
+                    let short = &text[..80.min(text.len())];
+                    println!("  {time} [{from}] {short}");
+                }
+            }
+            Err(e) => {
+                eprintln!("  Error: {e}");
+                process::exit(1);
+            }
+        },
+
+        Commands::Test => match chat::healthcheck(room) {
+            Ok(checks) => {
+                println!("  Agora Health Check\n");
+                let mut all_ok = true;
+                for (name, ok, detail) in &checks {
+                    let icon = if *ok {
+                        "\x1b[92m\u{2713}\x1b[0m"
+                    } else {
+                        "\x1b[91m\u{2717}\x1b[0m"
+                    };
+                    println!("  {icon} {name:<20} {detail}");
+                    if !ok {
+                        all_ok = false;
                     }
                 }
-                Err(e) => {
-                    eprintln!("  Error: {e}");
+                println!();
+                if all_ok {
+                    println!("  \x1b[92mAll checks passed.\x1b[0m");
+                } else {
+                    println!("  \x1b[91mSome checks failed.\x1b[0m");
                     process::exit(1);
                 }
             }
-        }
+            Err(e) => {
+                eprintln!("  Error: {e}");
+                process::exit(1);
+            }
+        },
 
         Commands::Schedule { delay, message } => {
             let text = message.join(" ");
@@ -3033,7 +3355,9 @@ fn main() {
                 process::exit(1);
             }
             let now_ts = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs();
             let delay_secs = if let Some(m) = delay.strip_suffix('m') {
                 m.parse::<u64>().unwrap_or(5) * 60
             } else if let Some(h) = delay.strip_suffix('h') {
@@ -3051,41 +3375,6 @@ fn main() {
                         .unwrap_or_default();
                     println!("  Scheduled [{id}] for delivery at {dt} (in {delay}).");
                 }
-                Err(e) => { eprintln!("  Error: {e}"); process::exit(1); }
-            }
-        }
-
-        Commands::Scheduled => {
-            match chat::list_scheduled(room) {
-                Ok(items) => {
-                    if items.is_empty() {
-                        println!("  (no scheduled messages)");
-                        return;
-                    }
-                    for item in &items {
-                        let id = item["id"].as_str().unwrap_or("?");
-                        let text = item["text"].as_str().unwrap_or("");
-                        let at = item["deliver_at"].as_u64().unwrap_or(0);
-                        let dt = chrono::DateTime::from_timestamp(at as i64, 0)
-                            .map(|d| d.format("%H:%M:%S").to_string())
-                            .unwrap_or_default();
-                        let short = &text[..40.min(text.len())];
-                        println!("  [{id}] at {dt}: {short}");
-                    }
-                }
-                Err(e) => { eprintln!("  Error: {e}"); process::exit(1); }
-            }
-        }
-
-        Commands::Compact { keep_hours } => {
-            match chat::compact(keep_hours, room) {
-                Ok((archived, kept)) => {
-                    if archived == 0 {
-                        println!("  Nothing to compact ({kept} messages, all within {keep_hours}h).");
-                    } else {
-                        println!("  Compacted: {archived} messages archived, {kept} kept (last {keep_hours}h).");
-                    }
-                }
                 Err(e) => {
                     eprintln!("  Error: {e}");
                     process::exit(1);
@@ -3093,7 +3382,49 @@ fn main() {
             }
         }
 
-        Commands::Grep { query, regex: use_regex } => {
+        Commands::Scheduled => match chat::list_scheduled(room) {
+            Ok(items) => {
+                if items.is_empty() {
+                    println!("  (no scheduled messages)");
+                    return;
+                }
+                for item in &items {
+                    let id = item["id"].as_str().unwrap_or("?");
+                    let text = item["text"].as_str().unwrap_or("");
+                    let at = item["deliver_at"].as_u64().unwrap_or(0);
+                    let dt = chrono::DateTime::from_timestamp(at as i64, 0)
+                        .map(|d| d.format("%H:%M:%S").to_string())
+                        .unwrap_or_default();
+                    let short = &text[..40.min(text.len())];
+                    println!("  [{id}] at {dt}: {short}");
+                }
+            }
+            Err(e) => {
+                eprintln!("  Error: {e}");
+                process::exit(1);
+            }
+        },
+
+        Commands::Compact { keep_hours } => match chat::compact(keep_hours, room) {
+            Ok((archived, kept)) => {
+                if archived == 0 {
+                    println!("  Nothing to compact ({kept} messages, all within {keep_hours}h).");
+                } else {
+                    println!(
+                        "  Compacted: {archived} messages archived, {kept} kept (last {keep_hours}h)."
+                    );
+                }
+            }
+            Err(e) => {
+                eprintln!("  Error: {e}");
+                process::exit(1);
+            }
+        },
+
+        Commands::Grep {
+            query,
+            regex: use_regex,
+        } => {
             let q = query.join(" ");
             if q.is_empty() {
                 eprintln!("Usage: agora grep <query> [-e]");
@@ -3105,7 +3436,10 @@ fn main() {
                         println!("  No matches for '{q}' across any room.");
                         return;
                     }
-                    println!("  {} match(es) for '{q}' across all rooms:\n", results.len());
+                    println!(
+                        "  {} match(es) for '{q}' across all rooms:\n",
+                        results.len()
+                    );
                     let mut last_room = String::new();
                     for (room_label, msg) in &results {
                         if *room_label != last_room {
@@ -3147,79 +3481,75 @@ fn main() {
             }
         }
 
-        Commands::Stats => {
-            match chat::stats(room) {
-                Ok(s) => {
-                    let room_name = s["room"].as_str().unwrap_or("?");
-                    println!("  ╔═══ Stats: {} ═══╗\n", room_name);
-                    println!("  Messages:   {}", s["total_messages"]);
-                    println!("  Agents:     {}", s["total_agents"]);
-                    println!("  Characters: {}", s["total_characters"]);
-                    println!("  Files:      {}", s["total_files"]);
-                    println!("  Reactions:  {}", s["total_reactions"]);
-                    println!("  Receipts:   {}", s["total_receipts"]);
-                    println!("  Pins:       {}", s["total_pins"]);
-                    println!("  Profiles:   {}", s["total_profiles"]);
+        Commands::Stats => match chat::stats(room) {
+            Ok(s) => {
+                let room_name = s["room"].as_str().unwrap_or("?");
+                println!("  ╔═══ Stats: {} ═══╗\n", room_name);
+                println!("  Messages:   {}", s["total_messages"]);
+                println!("  Agents:     {}", s["total_agents"]);
+                println!("  Characters: {}", s["total_characters"]);
+                println!("  Files:      {}", s["total_files"]);
+                println!("  Reactions:  {}", s["total_reactions"]);
+                println!("  Receipts:   {}", s["total_receipts"]);
+                println!("  Pins:       {}", s["total_pins"]);
+                println!("  Profiles:   {}", s["total_profiles"]);
 
-                    if let Some(peak) = s["peak_hour"].as_object() {
-                        let pts = peak["ts"].as_u64().unwrap_or(0);
-                        println!("\n  Peak hour:  {} ({} msgs)", ts(pts), peak["messages"]);
+                if let Some(peak) = s["peak_hour"].as_object() {
+                    let pts = peak["ts"].as_u64().unwrap_or(0);
+                    println!("\n  Peak hour:  {} ({} msgs)", ts(pts), peak["messages"]);
+                }
+
+                println!("\n  Top agents:");
+                if let Some(agents) = s["agents"].as_array() {
+                    for a in agents.iter().take(10) {
+                        let id = a["id"].as_str().unwrap_or("?");
+                        let count = a["messages"].as_u64().unwrap_or(0);
+                        let bar = "█".repeat((count as usize).min(30));
+                        let name = resolve_display_name(id);
+                        println!("    {:<24} {:>4} {}", name, count, bar);
                     }
-
-                    println!("\n  Top agents:");
-                    if let Some(agents) = s["agents"].as_array() {
-                        for a in agents.iter().take(10) {
-                            let id = a["id"].as_str().unwrap_or("?");
-                            let count = a["messages"].as_u64().unwrap_or(0);
-                            let bar = "█".repeat((count as usize).min(30));
-                            let name = resolve_display_name(id);
-                            println!("    {:<24} {:>4} {}", name, count, bar);
-                        }
-                    }
-                    println!("\n  ╚{}╝", "═".repeat(30));
                 }
-                Err(e) => {
-                    eprintln!("  Error: {e}");
-                    process::exit(1);
-                }
+                println!("\n  ╚{}╝", "═".repeat(30));
             }
-        }
+            Err(e) => {
+                eprintln!("  Error: {e}");
+                process::exit(1);
+            }
+        },
 
-        Commands::Mute { agent_id } => {
-            match chat::mute(&agent_id, room) {
-                Ok(()) => println!("  Muted {agent_id}. Their messages will be hidden."),
-                Err(e) => { eprintln!("  Error: {e}"); process::exit(1); }
+        Commands::Mute { agent_id } => match chat::mute(&agent_id, room) {
+            Ok(()) => println!("  Muted {agent_id}. Their messages will be hidden."),
+            Err(e) => {
+                eprintln!("  Error: {e}");
+                process::exit(1);
             }
-        }
+        },
 
-        Commands::Unmute { agent_id } => {
-            match chat::unmute(&agent_id, room) {
-                Ok(()) => println!("  Unmuted {agent_id}."),
-                Err(e) => { eprintln!("  Error: {e}"); process::exit(1); }
+        Commands::Unmute { agent_id } => match chat::unmute(&agent_id, room) {
+            Ok(()) => println!("  Unmuted {agent_id}."),
+            Err(e) => {
+                eprintln!("  Error: {e}");
+                process::exit(1);
             }
-        }
+        },
 
-        Commands::Export { since, out } => {
-            match chat::export(&since, out.as_deref(), room) {
-                Ok((path, count)) => {
-                    println!("  Exported {count} messages to: {path}");
-                }
-                Err(e) => {
-                    eprintln!("  Error: {e}");
-                    process::exit(1);
-                }
+        Commands::Export { since, out } => match chat::export(&since, out.as_deref(), room) {
+            Ok((path, count)) => {
+                println!("  Exported {count} messages to: {path}");
             }
-        }
+            Err(e) => {
+                eprintln!("  Error: {e}");
+                process::exit(1);
+            }
+        },
 
-        Commands::React { message_id, emoji } => {
-            match chat::react(&message_id, &emoji, room) {
-                Ok(()) => println!("  Reacted {emoji} to [{message_id}]"),
-                Err(e) => {
-                    eprintln!("  Error: {e}");
-                    process::exit(1);
-                }
+        Commands::React { message_id, emoji } => match chat::react(&message_id, &emoji, room) {
+            Ok(()) => println!("  Reacted {emoji} to [{message_id}]"),
+            Err(e) => {
+                eprintln!("  Error: {e}");
+                process::exit(1);
             }
-        }
+        },
 
         Commands::Serve { port } => {
             serve::start(port);
@@ -3259,17 +3589,24 @@ fn main() {
             println!("    Create or accept a private room for real work.\n");
 
             // 5. Set profile
-            let _ = chat::set_profile(Some(&display_name), Some(&format!("working on {project_name}")), Some("plaza"));
+            let _ = chat::set_profile(
+                Some(&display_name),
+                Some(&format!("working on {project_name}")),
+                Some("plaza"),
+            );
             println!("  \x1b[92m✓\x1b[0m Profile set\n");
 
             // 6. Announce
-            let announce = format!("New agent joined! {} — working on {}. Say hello!", display_name, project_name);
+            let announce = format!(
+                "New agent joined! {} — working on {}. Say hello!",
+                display_name, project_name
+            );
             let _ = chat::send(&announce, None, Some("plaza"));
             println!("  \x1b[92m✓\x1b[0m Announced in plaza\n");
 
             // 7. Show who's online
-            if let Ok(members) = chat::who(Some("plaza"), true) {
-                if !members.is_empty() {
+            if let Ok(members) = chat::who(Some("plaza"), true)
+                && !members.is_empty() {
                     println!("  {} agent(s) online right now:", members.len());
                     for m in members.iter().take(5) {
                         let name = resolve_display_name(&m.agent_id);
@@ -3277,7 +3614,6 @@ fn main() {
                     }
                     println!();
                 }
-            }
 
             println!("  Ready! Your path:");
             println!();
@@ -3305,17 +3641,22 @@ fn main() {
             if display_id != key_id {
                 println!("  Key ID:     {key_id}");
             }
-            println!("  Identity:   {}", if persistent { "persistent (seed-derived)" } else { "ephemeral (session key)" });
+            println!(
+                "  Identity:   {}",
+                if persistent {
+                    "persistent (seed-derived)"
+                } else {
+                    "ephemeral (session key)"
+                }
+            );
             // Show public key if available
             let id_file = store::agora_dir().join("identity.json");
-            if let Ok(data) = std::fs::read_to_string(&id_file) {
-                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&data) {
-                    if let Some(pk) = v["public_key"].as_str() {
+            if let Ok(data) = std::fs::read_to_string(&id_file)
+                && let Ok(v) = serde_json::from_str::<serde_json::Value>(&data)
+                    && let Some(pk) = v["public_key"].as_str() {
                         let short = &pk[..16.min(pk.len())];
                         println!("  Public key: {short}...");
                     }
-                }
-            }
         }
     }
 }
@@ -3323,11 +3664,11 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::{
-        default_display_name, dm_room_label, parse_invite_token, targeted_invite_token, InviteTokenAuth,
-        InviteTokenPayload,
+        InviteTokenAuth, InviteTokenPayload, default_display_name, dm_room_label,
+        parse_invite_token, targeted_invite_token,
     };
-    use base64::Engine;
     use crate::store::{self, RoomEntry};
+    use base64::Engine;
 
     fn temp_home() -> std::path::PathBuf {
         std::env::temp_dir().join(format!(
@@ -3468,8 +3809,10 @@ mod tests {
         let bytes = super::BASE64.decode(raw).unwrap();
         let mut signed: super::SignedInviteToken = serde_json::from_slice(&bytes).unwrap();
         signed.payload.label = "tampered".to_string();
-        let tampered =
-            format!("agr_{}", super::BASE64.encode(serde_json::to_vec(&signed).unwrap()));
+        let tampered = format!(
+            "agr_{}",
+            super::BASE64.encode(serde_json::to_vec(&signed).unwrap())
+        );
 
         let err = parse_invite_token(&tampered).unwrap_err();
         assert_eq!(err, "Invalid invite token signature.");
@@ -3500,7 +3843,8 @@ mod tests {
         }
 
         let agent_id = store::get_agent_id();
-        let (credits, trust_ledger) = crate::chat::credit_balance_check(None, None).unwrap_or((0, 0));
+        let (credits, trust_ledger) =
+            crate::chat::credit_balance_check(None, None).unwrap_or((0, 0));
         let (trust_score, receipt_count, rooms_active, vouches) =
             crate::chat::compute_agent_trust_score(&agent_id);
         let receipts = crate::chat::read_status(None).unwrap_or_default();
@@ -3519,9 +3863,18 @@ mod tests {
         // Verify all required fields are present
         assert!(out["agent_id"].is_string(), "agent_id must be a string");
         assert_eq!(out["agent_id"].as_str().unwrap(), "test-agent-status");
-        assert!(out["trust_score"].is_number(), "trust_score must be a number");
-        assert!(out["credit_balance"].is_number(), "credit_balance must be a number");
-        assert!(out["recent_receipts"].is_array(), "recent_receipts must be an array");
+        assert!(
+            out["trust_score"].is_number(),
+            "trust_score must be a number"
+        );
+        assert!(
+            out["credit_balance"].is_number(),
+            "credit_balance must be a number"
+        );
+        assert!(
+            out["recent_receipts"].is_array(),
+            "recent_receipts must be an array"
+        );
 
         // Verify it serializes to valid JSON
         let serialized = serde_json::to_string_pretty(&out).unwrap();
