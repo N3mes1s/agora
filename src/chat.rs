@@ -3176,6 +3176,38 @@ fn seed_credit_reward(difficulty: &str) -> i64 {
     }
 }
 
+/// Age-based reward multiplier for calibration seeds.
+///
+/// Seeds that sit unsolved longer are worth more — this combats sparse-participation
+/// economics where early agents exhaust easy seeds and later agents find none worth solving.
+/// Tiers (Community-19 design proposal):
+///   < 1h:    1.0× (baseline)
+///   1–6h:    1.5×
+///   6–24h:   2.0×
+///   24–72h:  3.0×
+///   72h+:    5.0× (max)
+fn seed_age_multiplier(created_at: u64) -> f64 {
+    let age_secs = now().saturating_sub(created_at);
+    match age_secs {
+        0..=3599       => 1.0,   // < 1 hour
+        3600..=21599   => 1.5,   // 1–6 hours
+        21600..=86399  => 2.0,   // 6–24 hours
+        86400..=259199 => 3.0,   // 24–72 hours
+        _              => 5.0,   // 72+ hours
+    }
+}
+
+/// Effective reward = base difficulty reward × age multiplier (rounded to nearest integer).
+/// Easy seeds always return 0 regardless of age — they are trust-building, not credit-earning.
+fn seed_effective_reward(difficulty: &str, created_at: u64) -> i64 {
+    let base = seed_credit_reward(difficulty);
+    if base == 0 {
+        return 0;
+    }
+    let multiplier = seed_age_multiplier(created_at);
+    (base as f64 * multiplier).round() as i64
+}
+
 fn sha256_hex(input: &str) -> String {
     let d = digest::digest(&digest::SHA256, input.as_bytes());
     hex::encode(d.as_ref())
@@ -3211,7 +3243,8 @@ pub fn seed_gen(room_label: Option<&str>) -> Result<(String, String), String> {
     let room_key = crypto::derive_room_key(&room.secret, &room.room_id);
     let credit_reward = seed_credit_reward(difficulty);
     let reward_note = if credit_reward > 0 {
-        format!(", reward: {credit_reward} credits")
+        // Show base reward; actual reward grows with age (age multiplier kicks in after 1h).
+        format!(", reward: {credit_reward}+ credits")
     } else {
         String::new()
     };
@@ -3254,8 +3287,8 @@ pub fn seed_verify(seed_id: &str, answer: &str, room_label: Option<&str>) -> Res
     let seed_snapshot = seed.clone();
     store::save_seeds(&room.room_id, &seeds);
 
-    // Award credits based on difficulty (autonomous economy bootstrapping).
-    let credit_reward = seed_credit_reward(&seed_snapshot.difficulty);
+    // Award credits based on difficulty × age multiplier (sparse-participation bootstrapping).
+    let credit_reward = seed_effective_reward(&seed_snapshot.difficulty, seed_snapshot.created_at);
 
     // Synthesise a Task so we can reuse publish_task_receipt.
     let task = store::Task {
@@ -5405,6 +5438,69 @@ mod tests {
     #[test]
     fn seed_credit_reward_easy_is_zero() {
         assert_eq!(super::seed_credit_reward("easy"), 0);
+    }
+
+    /// Age multiplier: fresh seed (< 1h) has 1.0× multiplier.
+    #[test]
+    fn seed_age_multiplier_fresh_is_one() {
+        let created_at = super::now();
+        assert!((super::seed_age_multiplier(created_at) - 1.0).abs() < f64::EPSILON);
+    }
+
+    /// Age multiplier: seed 2 hours old gets 1.5×.
+    #[test]
+    fn seed_age_multiplier_two_hours_is_one_point_five() {
+        let created_at = super::now().saturating_sub(7200); // 2h ago
+        assert!((super::seed_age_multiplier(created_at) - 1.5).abs() < f64::EPSILON);
+    }
+
+    /// Age multiplier: seed 12 hours old gets 2.0×.
+    #[test]
+    fn seed_age_multiplier_twelve_hours_is_two() {
+        let created_at = super::now().saturating_sub(43200); // 12h ago
+        assert!((super::seed_age_multiplier(created_at) - 2.0).abs() < f64::EPSILON);
+    }
+
+    /// Age multiplier: seed 48 hours old gets 3.0×.
+    #[test]
+    fn seed_age_multiplier_fortyeight_hours_is_three() {
+        let created_at = super::now().saturating_sub(172800); // 48h ago
+        assert!((super::seed_age_multiplier(created_at) - 3.0).abs() < f64::EPSILON);
+    }
+
+    /// Age multiplier: seed 4 days old gets 5.0× (max).
+    #[test]
+    fn seed_age_multiplier_four_days_is_five() {
+        let created_at = super::now().saturating_sub(345600); // 4 days ago
+        assert!((super::seed_age_multiplier(created_at) - 5.0).abs() < f64::EPSILON);
+    }
+
+    /// Easy seeds always earn 0 regardless of age (they are trust-building, not credit-earning).
+    #[test]
+    fn seed_effective_reward_easy_always_zero() {
+        let old_seed = super::now().saturating_sub(1_000_000); // ancient
+        assert_eq!(super::seed_effective_reward("easy", old_seed), 0);
+    }
+
+    /// A fresh medium seed earns the base 50cr.
+    #[test]
+    fn seed_effective_reward_medium_fresh_is_fifty() {
+        let created_at = super::now();
+        assert_eq!(super::seed_effective_reward("medium", created_at), 50);
+    }
+
+    /// A 2h-old medium seed earns 50 × 1.5 = 75cr.
+    #[test]
+    fn seed_effective_reward_medium_two_hours_is_seventy_five() {
+        let created_at = super::now().saturating_sub(7200); // 2h ago
+        assert_eq!(super::seed_effective_reward("medium", created_at), 75);
+    }
+
+    /// A 4-day-old hard seed earns 250 × 5.0 = 1250cr.
+    #[test]
+    fn seed_effective_reward_hard_four_days_is_twelve_fifty() {
+        let created_at = super::now().saturating_sub(345600); // 4 days ago
+        assert_eq!(super::seed_effective_reward("hard", created_at), 1250);
     }
 
     /// Bounties with a deadline auto-expire: credits are refunded to the poster.
