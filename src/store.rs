@@ -11,7 +11,6 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
-#[cfg(test)]
 use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -719,7 +718,14 @@ pub fn load_ledger(room_id: &str) -> Vec<CreditEntry> {
 pub fn save_ledger(room_id: &str, ledger: &[CreditEntry]) {
     let dir = agora_dir().join("rooms").join(room_id);
     ensure_dir(&dir);
-    let _ = fs::write(dir.join("ledger.json"), serde_json::to_string_pretty(ledger).unwrap());
+    let data = serde_json::to_string_pretty(ledger).unwrap();
+    let _ = atomic_write(&dir.join("ledger.json"), &data);
+}
+
+/// Per-process mutex serialising all ledger mutations to prevent TOCTOU races.
+fn ledger_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
 }
 
 pub fn credit_balance(room_id: &str, agent_id: &str) -> i64 {
@@ -735,6 +741,7 @@ pub fn trust_balance(room_id: &str, agent_id: &str) -> i64 {
 }
 
 pub fn credit_add(room_id: &str, agent_id: &str, amount: i64, reason: &str) {
+    let _guard = ledger_lock().lock().unwrap();
     let mut ledger = load_ledger(room_id);
     ledger.push(CreditEntry {
         agent_id: agent_id.to_string(), amount, reason: reason.to_string(),
@@ -750,6 +757,45 @@ pub fn trust_add(room_id: &str, agent_id: &str, amount: i64, reason: &str, verif
         ts: now(), ledger: "trust".to_string(), verified_by: verified_by.to_string(),
     });
     save_ledger(room_id, &ledger);
+}
+
+/// Atomically check-and-debit credits for `agent_id`.
+///
+/// `amount` must be positive — it is the number of credits to spend.
+/// Returns the new balance on success, or `Err` if the agent has insufficient funds.
+///
+/// The check and the ledger append are performed under a per-process mutex so
+/// concurrent sandbox-create requests cannot both see a passing balance and
+/// then both deduct, driving the account negative (TOCTOU race).
+pub fn atomic_credit_debit(
+    room_id: &str,
+    agent_id: &str,
+    amount: i64,
+    reason: &str,
+) -> Result<i64, String> {
+    assert!(amount > 0, "debit amount must be positive");
+    let _guard = ledger_lock().lock().unwrap();
+    let mut ledger = load_ledger(room_id);
+    let balance: i64 = ledger
+        .iter()
+        .filter(|e| e.agent_id == agent_id && (e.ledger.is_empty() || e.ledger == "credit"))
+        .map(|e| e.amount)
+        .sum();
+    if balance < amount {
+        return Err(format!(
+            "Insufficient credits: need {amount}, have {balance}"
+        ));
+    }
+    ledger.push(CreditEntry {
+        agent_id: agent_id.to_string(),
+        amount: -amount,
+        reason: reason.to_string(),
+        ts: now(),
+        ledger: "credit".to_string(),
+        verified_by: "system".to_string(),
+    });
+    save_ledger(room_id, &ledger);
+    Ok(balance - amount)
 }
 
 // ── Prediction Market ──────────────────────────────────────────
@@ -1595,6 +1641,85 @@ mod tests {
         let fresh = persisted.iter().find(|l| l.id == "fresh-sandbox").unwrap();
         assert_eq!(stale.status, LeaseStatus::Closed);
         assert_eq!(fresh.status, LeaseStatus::Active);
+
+        if let Some(old) = old_home { unsafe { env::set_var("HOME", old); } }
+        else { unsafe { env::remove_var("HOME"); } }
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn atomic_credit_debit_succeeds_with_sufficient_balance() {
+        let _guard = test_env_lock().lock().unwrap();
+        let home = test_home("debit-ok");
+        let _ = fs::remove_dir_all(&home);
+        fs::create_dir_all(home.join(".agora")).unwrap();
+        let old_home = env::var("HOME").ok();
+        unsafe { env::set_var("HOME", &home); }
+
+        credit_add("room-1", "agent-1", 50, "seed");
+        let result = atomic_credit_debit("room-1", "agent-1", 10, "sandbox:open");
+        assert_eq!(result, Ok(40));
+        assert_eq!(credit_balance("room-1", "agent-1"), 40);
+
+        if let Some(old) = old_home { unsafe { env::set_var("HOME", old); } }
+        else { unsafe { env::remove_var("HOME"); } }
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn atomic_credit_debit_rejects_insufficient_balance() {
+        let _guard = test_env_lock().lock().unwrap();
+        let home = test_home("debit-fail");
+        let _ = fs::remove_dir_all(&home);
+        fs::create_dir_all(home.join(".agora")).unwrap();
+        let old_home = env::var("HOME").ok();
+        unsafe { env::set_var("HOME", &home); }
+
+        credit_add("room-1", "agent-1", 5, "seed");
+        let result = atomic_credit_debit("room-1", "agent-1", 10, "sandbox:open");
+        assert!(result.is_err());
+        // Balance must be unchanged after a failed debit
+        assert_eq!(credit_balance("room-1", "agent-1"), 5);
+
+        if let Some(old) = old_home { unsafe { env::set_var("HOME", old); } }
+        else { unsafe { env::remove_var("HOME"); } }
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn atomic_credit_debit_rejects_zero_balance() {
+        let _guard = test_env_lock().lock().unwrap();
+        let home = test_home("debit-zero");
+        let _ = fs::remove_dir_all(&home);
+        fs::create_dir_all(home.join(".agora")).unwrap();
+        let old_home = env::var("HOME").ok();
+        unsafe { env::set_var("HOME", &home); }
+
+        // No credits added — debit must fail
+        let result = atomic_credit_debit("room-1", "agent-1", 1, "sandbox:open");
+        assert!(result.is_err());
+        assert_eq!(credit_balance("room-1", "agent-1"), 0);
+
+        if let Some(old) = old_home { unsafe { env::set_var("HOME", old); } }
+        else { unsafe { env::remove_var("HOME"); } }
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn atomic_credit_debit_drains_to_zero() {
+        let _guard = test_env_lock().lock().unwrap();
+        let home = test_home("debit-drain");
+        let _ = fs::remove_dir_all(&home);
+        fs::create_dir_all(home.join(".agora")).unwrap();
+        let old_home = env::var("HOME").ok();
+        unsafe { env::set_var("HOME", &home); }
+
+        credit_add("room-1", "agent-1", 10, "seed");
+        let result = atomic_credit_debit("room-1", "agent-1", 10, "sandbox:open");
+        assert_eq!(result, Ok(0));
+        // Next debit must fail
+        let second = atomic_credit_debit("room-1", "agent-1", 1, "sandbox:open");
+        assert!(second.is_err());
 
         if let Some(old) = old_home { unsafe { env::set_var("HOME", old); } }
         else { unsafe { env::remove_var("HOME"); } }
