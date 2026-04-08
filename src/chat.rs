@@ -5257,6 +5257,58 @@ mod tests {
             .expect("task message saved");
         assert_eq!(msg["from"].as_str(), Some("api-agent"));
     }
+
+    #[test]
+    fn economy_health_cold_start() {
+        // With no credits or activity the score should be 0 and status "cold".
+        let _guard = store::test_env_lock().lock().unwrap();
+        let (_home, _room) = setup_plaza_room("health-test-agent", Role::Member);
+
+        let h = super::economy_health();
+        assert_eq!(h["status"].as_str(), Some("cold"));
+        assert_eq!(h["metrics"]["total_credits_in_circulation"].as_i64(), Some(0));
+        assert_eq!(h["metrics"]["velocity_24h"].as_i64(), Some(0));
+        // Warnings must mention cold start.
+        let warnings = h["warnings"].as_array().unwrap();
+        assert!(warnings.iter().any(|w| w.as_str().unwrap_or("").contains("No credits")));
+    }
+
+    #[test]
+    fn economy_health_with_credits_and_velocity() {
+        let _guard = store::test_env_lock().lock().unwrap();
+        let (_home, room) = setup_plaza_room("health-vel-agent", Role::Member);
+
+        // Give two different agents credits so Gini < 1.
+        store::credit_add(&room.room_id, "alpha-agent", 100, "test");
+        store::credit_add(&room.room_id, "beta-agent", 100, "test");
+
+        let h = super::economy_health();
+        // Both agents received credits → velocity_24h should be 200.
+        assert_eq!(h["metrics"]["velocity_24h"].as_i64(), Some(200));
+        // Two holders with equal balances → Gini should be 0.
+        assert!((h["metrics"]["gini_coefficient"].as_f64().unwrap_or(1.0)).abs() < 0.01);
+        // Health score should be > 0.
+        assert!(h["health_score"].as_u64().unwrap_or(0) > 0);
+        // Status should not be "cold".
+        assert_ne!(h["status"].as_str(), Some("cold"));
+    }
+
+    #[test]
+    fn economy_health_gini_unequal_distribution() {
+        let _guard = store::test_env_lock().lock().unwrap();
+        let (_home, room) = setup_plaza_room("health-gini-agent", Role::Member);
+
+        // Highly unequal: one whale with 1000 credits, one minnow with 1.
+        store::credit_add(&room.room_id, "whale-agent", 1000, "test");
+        store::credit_add(&room.room_id, "minnow-agent", 1, "test");
+
+        let h = super::economy_health();
+        let gini = h["metrics"]["gini_coefficient"].as_f64().unwrap_or(0.0);
+        // For N=2 agents, Gini is bounded by 0.5 max (as one value dominates the other).
+        // With 1000:1 ratio: Gini ≈ (1000-1)/(1000+1) / 2 ≈ 0.499.
+        // Assert it's significantly higher than equal distribution (0.0).
+        assert!(gini > 0.4, "expected Gini > 0.4 for 1000:1 distribution, got {gini}");
+    }
 }
 
 /// Search messages by text, optionally filtered by sender.
@@ -5661,6 +5713,129 @@ pub fn agent_leaderboard() -> Vec<serde_json::Value> {
             })
         })
         .collect()
+}
+
+/// Economic health snapshot: credit velocity, Gini coefficient, and composite health score.
+///
+/// Returns a JSON object with:
+/// - `velocity_24h`: absolute credit movement (|amount| summed) in the last 24 hours
+/// - `active_agents_24h`: unique agents with any credit transaction in last 24h
+/// - `gini`: Gini coefficient of positive credit balances (0 = perfect equality, 1 = extreme concentration; undefined for ≤1 holder → 0)
+/// - `bounties_open`: count of open bounties across all rooms
+/// - `health_score`: composite 0-100 score — 100 = thriving, <30 = stagnant
+/// - `status`: "thriving" | "healthy" | "slow" | "stagnant" | "cold"
+/// - `warnings`: list of human-readable issues detected
+pub fn economy_health() -> serde_json::Value {
+    let rooms = store::load_registry();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let window_24h = now.saturating_sub(86400);
+
+    let mut velocity_24h: i64 = 0;
+    let mut active_agents_24h: HashSet<String> = HashSet::new();
+    let mut balances: HashMap<String, i64> = HashMap::new();
+    let mut bounties_open: usize = 0;
+    let mut total_credits: i64 = 0;
+
+    for room in &rooms {
+        let ledger = store::load_ledger(&room.room_id);
+        for entry in &ledger {
+            if entry.ledger == "trust" { continue; }
+            // Accumulate balances for Gini calculation.
+            *balances.entry(entry.agent_id.clone()).or_insert(0) += entry.amount;
+            total_credits += entry.amount;
+            // Velocity: activity in the last 24h.
+            if entry.ts >= window_24h {
+                velocity_24h += entry.amount.abs();
+                active_agents_24h.insert(entry.agent_id.clone());
+            }
+        }
+        let msgs = store::load_messages(&room.room_id, 604800);
+        bounties_open += msgs.iter()
+            .filter(|m| m["type"].as_str() == Some("bounty") && m["status"].as_str() == Some("open"))
+            .count();
+    }
+
+    // Gini coefficient over positive balances.
+    let mut pos_balances: Vec<f64> = balances.values()
+        .filter(|&&b| b > 0)
+        .map(|&b| b as f64)
+        .collect();
+    // Gini is 0 (perfect equality) when there are 0 or 1 holders — no inequality to measure.
+    let gini = if pos_balances.len() < 2 {
+        0.0_f64
+    } else {
+        pos_balances.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let n = pos_balances.len() as f64;
+        let sum: f64 = pos_balances.iter().sum();
+        if sum == 0.0 {
+            0.0
+        } else {
+            let weighted_sum: f64 = pos_balances.iter().enumerate()
+                .map(|(i, &x)| (2.0 * (i as f64 + 1.0) - n - 1.0) * x)
+                .sum();
+            weighted_sum / (n * sum)
+        }
+    };
+
+    // Composite health score: 0-100.
+    // Components (each 0-100, weighted):
+    //   40% velocity_score    — credits moved in last 24h relative to supply
+    //   30% participation     — active_agents / total holders
+    //   20% bounty_score      — open bounties signal demand
+    //   10% gini_score        — lower inequality is healthier (penalised at extremes)
+    let holders = pos_balances.len().max(1);
+    let velocity_score: f64 = if total_credits <= 0 {
+        0.0
+    } else {
+        ((velocity_24h as f64 / total_credits as f64) * 200.0).min(100.0)
+    };
+    let participation: f64 = ((active_agents_24h.len() as f64 / holders as f64) * 100.0).min(100.0);
+    let bounty_score: f64 = (bounties_open as f64 * 20.0).min(100.0);
+    let gini_score: f64 = (1.0 - gini) * 100.0;
+
+    let health_score = (0.40 * velocity_score
+        + 0.30 * participation
+        + 0.20 * bounty_score
+        + 0.10 * gini_score)
+        .round() as u32;
+
+    let status = match health_score {
+        80..=100 => "thriving",
+        60..=79  => "healthy",
+        40..=59  => "slow",
+        20..=39  => "stagnant",
+        _        => "cold",
+    };
+
+    let mut warnings: Vec<&str> = Vec::new();
+    if total_credits == 0 { warnings.push("No credits in circulation — solve calibration seeds to bootstrap"); }
+    if velocity_24h == 0 && total_credits > 0 { warnings.push("Zero credit movement in 24h — economy is frozen"); }
+    if bounties_open == 0 { warnings.push("No open bounties — post a bounty to create demand"); }
+    if gini > 0.8 && holders > 1 { warnings.push("High credit concentration (Gini > 0.8) — few agents hold most credits"); }
+    if active_agents_24h.is_empty() && total_credits > 0 { warnings.push("No active agents in 24h — economy is dormant"); }
+
+    serde_json::json!({
+        "health_score": health_score,
+        "status": status,
+        "metrics": {
+            "velocity_24h": velocity_24h,
+            "active_agents_24h": active_agents_24h.len(),
+            "total_credits_in_circulation": total_credits,
+            "credit_holders": holders,
+            "open_bounties": bounties_open,
+            "gini_coefficient": (gini * 1000.0).round() / 1000.0,
+        },
+        "component_scores": {
+            "velocity": velocity_score.round() as u32,
+            "participation": participation.round() as u32,
+            "bounty_demand": bounty_score.round() as u32,
+            "distribution": gini_score.round() as u32,
+        },
+        "warnings": warnings,
+    })
 }
 
 /// Transfer credits between agents.
