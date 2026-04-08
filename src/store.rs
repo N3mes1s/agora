@@ -1142,6 +1142,60 @@ pub fn recover_stale_leases(room_id: &str) -> Vec<SandboxLease> {
     recovered
 }
 
+// ── Sandbox Sessions (server-side ownership tracking) ──────────
+
+/// Lightweight record tracking ownership of a remotely-created sandbox session.
+/// Stored in ~/.agora/sandbox_sessions/<id>.json so the HTTP server can enforce
+/// that only the token-holder who created a session can exec or destroy it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionRecord {
+    pub id: String,
+    pub agent_id: String,
+    pub provider: String,
+    pub created_at: u64,
+}
+
+fn sessions_dir() -> PathBuf {
+    agora_dir().join("sandbox_sessions")
+}
+
+pub fn save_session(session: &SessionRecord) {
+    let dir = sessions_dir();
+    ensure_dir(&dir);
+    let data = serde_json::to_string_pretty(session).unwrap_or_default();
+    let _ = fs::write(dir.join(format!("{}.json", session.id)), data);
+}
+
+pub fn load_session(session_id: &str) -> Option<SessionRecord> {
+    let path = sessions_dir().join(format!("{session_id}.json"));
+    let data = fs::read_to_string(&path).ok()?;
+    serde_json::from_str(&data).ok()
+}
+
+pub fn remove_session(session_id: &str) {
+    let _ = fs::remove_file(sessions_dir().join(format!("{session_id}.json")));
+}
+
+/// Return all sessions belonging to an agent (for the /api/sandbox/sessions endpoint).
+pub fn list_agent_sessions(agent_id: &str) -> Vec<SessionRecord> {
+    let dir = sessions_dir();
+    let mut sessions = Vec::new();
+    if let Ok(entries) = fs::read_dir(&dir) {
+        for entry in entries.flatten() {
+            if entry.path().extension().map_or(false, |e| e == "json") {
+                if let Ok(data) = fs::read_to_string(entry.path()) {
+                    if let Ok(s) = serde_json::from_str::<SessionRecord>(&data) {
+                        if s.agent_id == agent_id {
+                            sessions.push(s);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    sessions
+}
+
 // ── Role Leases ────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1592,6 +1646,68 @@ mod tests {
         let fresh = persisted.iter().find(|l| l.id == "fresh-sandbox").unwrap();
         assert_eq!(stale.status, LeaseStatus::Closed);
         assert_eq!(fresh.status, LeaseStatus::Active);
+
+        if let Some(old) = old_home { unsafe { env::set_var("HOME", old); } }
+        else { unsafe { env::remove_var("HOME"); } }
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn session_save_load_remove_roundtrip() {
+        let _guard = test_env_lock().lock().unwrap();
+        let home = test_home("session-roundtrip");
+        let agora = home.join(".agora");
+        let _ = fs::remove_dir_all(&home);
+        fs::create_dir_all(&agora).unwrap();
+        let old_home = env::var("HOME").ok();
+        unsafe { env::set_var("HOME", &home); }
+
+        let record = SessionRecord {
+            id: "sess-abc".to_string(),
+            agent_id: "agent-1".to_string(),
+            provider: "daytona".to_string(),
+            created_at: 1_000_000,
+        };
+        save_session(&record);
+
+        let loaded = load_session("sess-abc").expect("should load saved session");
+        assert_eq!(loaded.id, "sess-abc");
+        assert_eq!(loaded.agent_id, "agent-1");
+        assert_eq!(loaded.provider, "daytona");
+        assert_eq!(loaded.created_at, 1_000_000);
+
+        remove_session("sess-abc");
+        assert!(load_session("sess-abc").is_none());
+
+        if let Some(old) = old_home { unsafe { env::set_var("HOME", old); } }
+        else { unsafe { env::remove_var("HOME"); } }
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn session_list_filters_by_agent() {
+        let _guard = test_env_lock().lock().unwrap();
+        let home = test_home("session-list");
+        let agora = home.join(".agora");
+        let _ = fs::remove_dir_all(&home);
+        fs::create_dir_all(&agora).unwrap();
+        let old_home = env::var("HOME").ok();
+        unsafe { env::set_var("HOME", &home); }
+
+        save_session(&SessionRecord { id: "s1".to_string(), agent_id: "alice".to_string(), provider: "e2b".to_string(), created_at: 1 });
+        save_session(&SessionRecord { id: "s2".to_string(), agent_id: "bob".to_string(), provider: "e2b".to_string(), created_at: 2 });
+        save_session(&SessionRecord { id: "s3".to_string(), agent_id: "alice".to_string(), provider: "daytona".to_string(), created_at: 3 });
+
+        let alice_sessions = list_agent_sessions("alice");
+        assert_eq!(alice_sessions.len(), 2);
+        assert!(alice_sessions.iter().all(|s| s.agent_id == "alice"));
+
+        let bob_sessions = list_agent_sessions("bob");
+        assert_eq!(bob_sessions.len(), 1);
+        assert_eq!(bob_sessions[0].id, "s2");
+
+        let nobody = list_agent_sessions("nobody");
+        assert!(nobody.is_empty());
 
         if let Some(old) = old_home { unsafe { env::set_var("HOME", old); } }
         else { unsafe { env::remove_var("HOME"); } }

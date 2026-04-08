@@ -1024,6 +1024,13 @@ fn handle_connection(stream: TcpStream) {
             // Bug fix: always use the verified agent_id from the token
             match sandbox::create(&verified_agent_id) {
                 Ok(session) => {
+                    // Persist ownership record so exec/destroy can enforce it.
+                    store::save_session(&store::SessionRecord {
+                        id: session.id.clone(),
+                        agent_id: verified_agent_id.clone(),
+                        provider: session.provider.clone(),
+                        created_at: session.created_at,
+                    });
                     let resp = serde_json::json!({
                         "id": session.id,
                         "provider": session.provider,
@@ -1042,13 +1049,19 @@ fn handle_connection(stream: TcpStream) {
                 Ok(v) => v,
                 Err(e) => { send_json(stream, 401, &format!(r#"{{"error":"{}"}}"#, e)); return; }
             };
-            let _ = verified_agent_id; // TODO: verify session belongs to this agent
             let session_id = form_field(body, "session_id").unwrap_or_default();
             let command = form_field(body, "command").unwrap_or_default();
             let provider = form_field(body, "provider").unwrap_or_else(|| "daytona".to_string());
             if session_id.is_empty() || command.is_empty() {
                 send_json(stream, 400, r#"{"error":"session_id and command required"}"#);
                 return;
+            }
+            // Enforce ownership: 403 if session was created by a different agent.
+            if let Some(record) = store::load_session(&session_id) {
+                if record.agent_id != verified_agent_id {
+                    send_json(stream, 403, r#"{"error":"forbidden: session belongs to another agent"}"#);
+                    return;
+                }
             }
             match sandbox::exec(&session_id, &command, &provider) {
                 Ok(output) => send_json(stream, 200, &serde_json::json!({"output": output}).to_string()),
@@ -1063,17 +1076,41 @@ fn handle_connection(stream: TcpStream) {
                 Ok(v) => v,
                 Err(e) => { send_json(stream, 401, &format!(r#"{{"error":"{}"}}"#, e)); return; }
             };
-            let _ = verified_agent_id; // TODO: verify session belongs to this agent
             let session_id = form_field(body, "session_id").unwrap_or_default();
             let provider = form_field(body, "provider").unwrap_or_else(|| "daytona".to_string());
             if session_id.is_empty() {
                 send_json(stream, 400, r#"{"error":"session_id required"}"#);
                 return;
             }
+            // Enforce ownership: 403 if session was created by a different agent.
+            if let Some(record) = store::load_session(&session_id) {
+                if record.agent_id != verified_agent_id {
+                    send_json(stream, 403, r#"{"error":"forbidden: session belongs to another agent"}"#);
+                    return;
+                }
+            }
             match sandbox::destroy(&session_id, &provider) {
-                Ok(()) => send_json(stream, 200, r#"{"status":"destroyed"}"#),
+                Ok(()) => {
+                    store::remove_session(&session_id);
+                    send_json(stream, 200, r#"{"status":"destroyed"}"#)
+                }
                 Err(e) => send_json(stream, 500, &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'"))),
             }
+        }
+
+        // GET /api/sandbox/sessions — list sessions owned by the calling agent
+        // Query: ?token=<base64-sandbox-token>
+        ("GET", ["api", "sandbox", "sessions"]) => {
+            let token = path.split_once('?').and_then(|(_, qs)| {
+                qs.split('&').find_map(|kv| kv.strip_prefix("token=").map(url_decode))
+            }).unwrap_or_default();
+            let (agent_id, _) = match sandbox::verify_agent_token(&token) {
+                Ok(v) => v,
+                Err(e) => { send_json(stream, 401, &format!(r#"{{"error":"{}"}}"#, e)); return; }
+            };
+            let sessions = store::list_agent_sessions(&agent_id);
+            let json = serde_json::to_string(&sessions).unwrap_or_else(|_| "[]".to_string());
+            send_json(stream, 200, &json);
         }
 
         // POST /api/payments/create-checkout — initiate a Stripe deposit
