@@ -2275,10 +2275,20 @@ fn handle_connection(stream: TcpStream) {
         }
 
         // POST /api/v1/seeds/solve — submit an answer to a calibration seed.
+        // Auth: Authorization: Bearer <agent-token> (same token used for sandbox endpoints)
         // JSON body: {"seed_id": "b16707a0", "answer": "aroga", "room": "plaza"}
         // "room" is optional; uses the active room if omitted.
         // Returns: {"solved": true, "credits_earned": 0, "message": "..."}
         ("POST", ["api", "v1", "seeds", "solve"]) => {
+            // Require a valid per-agent signed token to prevent unauthenticated credit farming.
+            let bearer = get_header(&raw, "Authorization")
+                .and_then(|h| h.strip_prefix("Bearer ").map(str::trim))
+                .unwrap_or("")
+                .to_string();
+            if let Err(e) = sandbox::verify_agent_token(&bearer) {
+                send_json(stream, 401, &format!(r#"{{"error":"unauthorized: {}"}}"#, e.replace('"', "'")));
+                return;
+            }
             let parsed: serde_json::Value = match serde_json::from_str(body) {
                 Ok(v) => v,
                 Err(_) => { send_json(stream, 400, r#"{"error":"invalid JSON body"}"#); return; }
@@ -3485,5 +3495,13 @@ mod tests {
             .flatten();
         assert_eq!(after, Some(1700000000u64));
         assert_eq!(before, Some(1800000000u64));
+    }
+
+    #[test]
+    fn seeds_solve_endpoint_rejects_missing_auth() {
+        // Empty bearer token must be rejected by verify_agent_token.
+        let bearer = "";
+        let result = sandbox::verify_agent_token(bearer);
+        assert!(result.is_err(), "empty bearer must be rejected");
     }
 }
