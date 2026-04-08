@@ -2837,20 +2837,25 @@ pub fn task_get(task_id: &str, room_label: Option<&str>) -> Result<store::Task, 
 
 /// Claim an open task.
 pub fn task_claim(task_id: &str, room_label: Option<&str>) -> Result<String, String> {
-    let room = resolve_room(room_label)?;
     let me = store::get_agent_id();
+    task_claim_as(&me, task_id, room_label)
+}
+
+/// Claim an open task on behalf of a verified agent.
+pub fn task_claim_as(agent_id: &str, task_id: &str, room_label: Option<&str>) -> Result<String, String> {
+    let room = resolve_room(room_label)?;
     let mut tasks = store::load_tasks(&room.room_id);
     let task = tasks.iter_mut().find(|t| t.id.starts_with(task_id) && t.status == "open")
         .ok_or_else(|| format!("No open task matching '{task_id}'"))?;
     task.status = "claimed".to_string();
-    task.claimed_by = Some(me.clone());
+    task.claimed_by = Some(agent_id.to_string());
     task.updated_at = now();
     let title = task.title.clone();
     let tid = task.id.clone();
     store::save_tasks(&room.room_id, &tasks);
 
     let room_key = crypto::derive_room_key(&room.secret, &room.room_id);
-    let env = make_envelope(&format!("[task] Claimed by {me}: {title}"), None);
+    let env = make_envelope_from(agent_id, &format!("[task] Claimed by {agent_id}: {title}"), None);
     let encrypted = encrypt_envelope(&env, &room_key, &room.room_id);
     transport::publish(&room.room_id, &encrypted);
     store::save_message(&room.room_id, &env);
@@ -2859,8 +2864,13 @@ pub fn task_claim(task_id: &str, room_label: Option<&str>) -> Result<String, Str
 
 /// Mark a task as done.
 pub fn task_done(task_id: &str, notes: Option<&str>, room_label: Option<&str>) -> Result<String, String> {
-    let room = resolve_room(room_label)?;
     let me = store::get_agent_id();
+    task_done_as(&me, task_id, notes, room_label)
+}
+
+/// Mark a task as done on behalf of a verified agent.
+pub fn task_done_as(agent_id: &str, task_id: &str, notes: Option<&str>, room_label: Option<&str>) -> Result<String, String> {
+    let room = resolve_room(room_label)?;
     let mut tasks = store::load_tasks(&room.room_id);
     let task = tasks.iter_mut().find(|t| t.id.starts_with(task_id))
         .ok_or_else(|| format!("No task matching '{task_id}'"))?;
@@ -2874,7 +2884,7 @@ pub fn task_done(task_id: &str, notes: Option<&str>, room_label: Option<&str>) -
 
     let note_str = notes.map(|n| format!(" — {n}")).unwrap_or_default();
     let room_key = crypto::derive_room_key(&room.secret, &room.room_id);
-    let env = make_envelope(&format!("[task] Done by {me}: {title}{note_str}"), None);
+    let env = make_envelope_from(agent_id, &format!("[task] Done by {agent_id}: {title}{note_str}"), None);
     let encrypted = encrypt_envelope(&env, &room_key, &room.room_id);
     transport::publish(&room.room_id, &encrypted);
     store::save_message(&room.room_id, &env);
@@ -2882,7 +2892,7 @@ pub fn task_done(task_id: &str, notes: Option<&str>, room_label: Option<&str>) -
     publish_task_receipt(
         &room,
         &task_snapshot,
-        &me,
+        agent_id,
         "done",
         task_snapshot.notes.as_deref(),
         task_snapshot.updated_at,
@@ -2892,8 +2902,13 @@ pub fn task_done(task_id: &str, notes: Option<&str>, room_label: Option<&str>) -
 
 /// Record partial progress on a task without marking it done.
 pub fn task_checkpoint(task_id: &str, notes: Option<&str>, room_label: Option<&str>) -> Result<String, String> {
-    let room = resolve_room(room_label)?;
     let me = store::get_agent_id();
+    task_checkpoint_as(&me, task_id, notes, room_label)
+}
+
+/// Record partial progress on a task on behalf of a verified agent.
+pub fn task_checkpoint_as(agent_id: &str, task_id: &str, notes: Option<&str>, room_label: Option<&str>) -> Result<String, String> {
+    let room = resolve_room(room_label)?;
     let mut tasks = store::load_tasks(&room.room_id);
     let task = tasks
         .iter_mut()
@@ -2901,12 +2916,12 @@ pub fn task_checkpoint(task_id: &str, notes: Option<&str>, room_label: Option<&s
         .ok_or_else(|| format!("No active task matching '{task_id}'"))?;
 
     if let Some(claimed_by) = task.claimed_by.as_deref() {
-        if claimed_by != me {
+        if claimed_by != agent_id {
             return Err(format!("Task '{}' is currently claimed by '{}'.", task.id, claimed_by));
         }
     } else {
         task.status = "claimed".to_string();
-        task.claimed_by = Some(me.clone());
+        task.claimed_by = Some(agent_id.to_string());
     }
 
     task.updated_at = now();
@@ -2924,7 +2939,7 @@ pub fn task_checkpoint(task_id: &str, notes: Option<&str>, room_label: Option<&s
         .map(|note| format!(" — {note}"))
         .unwrap_or_default();
     let room_key = crypto::derive_room_key(&room.secret, &room.room_id);
-    let env = make_envelope(&format!("[task] Checkpoint by {me}: {title}{note_str}"), None);
+    let env = make_envelope_from(agent_id, &format!("[task] Checkpoint by {agent_id}: {title}{note_str}"), None);
     let encrypted = encrypt_envelope(&env, &room_key, &room.room_id);
     transport::publish(&room.room_id, &encrypted);
     store::save_message(&room.room_id, &env);
@@ -2932,7 +2947,7 @@ pub fn task_checkpoint(task_id: &str, notes: Option<&str>, room_label: Option<&s
     publish_task_receipt(
         &room,
         &task_snapshot,
-        &me,
+        agent_id,
         "checkpoint",
         checkpoint_notes.as_deref(),
         task_snapshot.updated_at,
@@ -4146,7 +4161,7 @@ mod tests {
         seed_plaza_rate_limit_state, send_watch_heartbeat,
         should_display_message, signing_message_bytes, soma_churn_decay, soma_correct,
         bounty_submit, bounty_verify, stale_claim_weight, task_add, task_add_as, task_add_with_oracle,
-        task_checkpoint, task_done, unpin,
+        task_checkpoint, task_checkpoint_as, task_claim_as, task_done, task_done_as, unpin,
         verified_solana_deposit_from_tx, SignedWirePayload, VerifiedSolanaDeposit,
         SIGNED_WIRE_VERSION, BASE64, DISCOVERY_POSITIVE_HALF_LIFE_SECS,
         PLAZA_RATE_LIMIT_WINDOW_SECS, SOLANA_TOKEN_PROGRAM, SOLANA_TREASURY_WALLET,
@@ -5073,6 +5088,36 @@ mod tests {
             .or_else(|| messages.iter().find(|m| m["text"].as_str().unwrap_or("").contains("Ship API auth")))
             .expect("task message saved");
         assert_eq!(msg["from"].as_str(), Some("api-agent"));
+    }
+
+    #[test]
+    fn task_lifecycle_as_uses_verified_agent_identity() {
+        let _guard = store::test_env_lock().lock().unwrap();
+        let (_home, room) = setup_plaza_room("server-host", Role::Admin);
+
+        let task_id = task_add_as("creator-agent", "Secure PATCH writes", Some("plaza")).unwrap();
+        task_claim_as("worker-agent", &task_id, Some("plaza")).unwrap();
+        task_checkpoint_as("worker-agent", &task_id, Some("midway"), Some("plaza")).unwrap();
+        task_done_as("worker-agent", &task_id, Some("done"), Some("plaza")).unwrap();
+
+        let tasks = store::load_tasks(&room.room_id);
+        let task = tasks.iter().find(|t| t.id == task_id).expect("task saved");
+        assert_eq!(task.claimed_by.as_deref(), Some("worker-agent"));
+        assert_eq!(task.status, "done");
+
+        let messages = store::load_messages(&room.room_id, 3600);
+        assert!(messages.iter().any(|m| {
+            m["from"].as_str() == Some("worker-agent")
+                && m["text"].as_str().unwrap_or("").contains("[task] Claimed by worker-agent")
+        }));
+        assert!(messages.iter().any(|m| {
+            m["from"].as_str() == Some("worker-agent")
+                && m["text"].as_str().unwrap_or("").contains("[task] Checkpoint by worker-agent")
+        }));
+        assert!(messages.iter().any(|m| {
+            m["from"].as_str() == Some("worker-agent")
+                && m["text"].as_str().unwrap_or("").contains("[task] Done by worker-agent")
+        }));
     }
 }
 

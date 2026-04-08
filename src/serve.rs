@@ -1352,6 +1352,13 @@ fn handle_connection(stream: TcpStream) {
         // JSON body: {"action": "claim"|"done"|"checkpoint", "room": "...", "notes": "..."}
         // Returns the updated task object.
         ("PATCH", ["api", "v1", "tasks", task_id]) => {
+            let agent_id = match verify_bearer_agent_token(&raw) {
+                Ok(agent_id) => agent_id,
+                Err(e) => {
+                    send_json(stream, 401, &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'")));
+                    return;
+                }
+            };
             let parsed: serde_json::Value = match serde_json::from_str(body) {
                 Ok(v) => v,
                 Err(_) => {
@@ -1370,9 +1377,9 @@ fn handle_connection(stream: TcpStream) {
             let notes = parsed["notes"].as_str().map(|s| s.to_string());
             let tid = (*task_id).to_string();
             let result = match action.as_str() {
-                "claim" => chat::task_claim(&tid, room_label.as_deref()),
-                "done" => chat::task_done(&tid, notes.as_deref(), room_label.as_deref()),
-                "checkpoint" => chat::task_checkpoint(&tid, notes.as_deref(), room_label.as_deref()),
+                "claim" => chat::task_claim_as(&agent_id, &tid, room_label.as_deref()),
+                "done" => chat::task_done_as(&agent_id, &tid, notes.as_deref(), room_label.as_deref()),
+                "checkpoint" => chat::task_checkpoint_as(&agent_id, &tid, notes.as_deref(), room_label.as_deref()),
                 _ => Err(format!("Unknown action '{}'; use claim|done|checkpoint", action)),
             };
             match result {
