@@ -1694,6 +1694,23 @@ pub fn bounty_post(
     let reward_label = reward_credits
         .map(|c| format!(", reward: {c} credits"))
         .unwrap_or_default();
+
+    // Escrow: deduct reward from poster upfront so credits cannot be created from nothing.
+    if let Some(reward) = reward_credits {
+        let balance = store::credit_balance(&room.room_id, &me);
+        if balance < reward {
+            return Err(format!(
+                "Insufficient credits to post bounty: have {balance}, reward is {reward}"
+            ));
+        }
+        store::credit_add(
+            &room.room_id,
+            &me,
+            -reward,
+            &format!("bounty escrow: {title} ({})", &id[..6]),
+        );
+    }
+
     let mut env = json!({
         "v": VERSION, "id": id, "from": me, "ts": now(),
         "type": "bounty",
@@ -1919,6 +1936,7 @@ pub fn bounty_verify(task_id: &str, agent_id: &str, room_label: Option<&str>) ->
     let reward_credits = task.reward_credits;
     let reward_trust = task.reward_trust;
     let task_title = task.title.clone();
+    let task_poster = task.created_by.clone();
     let task_id_short = task_id[..6.min(task_id.len())].to_string();
     if passed {
         task.status = "done".to_string();
@@ -1930,27 +1948,28 @@ pub fn bounty_verify(task_id: &str, agent_id: &str, room_label: Option<&str>) ->
     let result = if passed { "PASS" } else { "FAIL" };
     let room_key = crypto::derive_room_key(&room.secret, &room.room_id);
 
-    // Auto-distribute credits and trust when oracle passes
-    if passed {
-        // Issue a work receipt for the winning agent
-        let receipt_task = store::Task {
-            id: task_id.to_string(),
-            title: task_title.clone(),
-            status: "done".to_string(),
-            created_by: String::new(),
-            claimed_by: Some(agent_id.to_string()),
-            created_at: now(),
-            updated_at: now(),
-            notes: Some(format!("oracle:{oracle}")),
-            acceptance_oracle: Some(oracle.clone()),
-            reward_credits,
-            reward_trust,
-            submissions: vec![],
-        };
-        publish_task_receipt(&room, &receipt_task, agent_id, "done", Some(&format!("oracle:{oracle}")), now());
+    // Settle escrowed credits: pay winner on PASS, refund poster on FAIL.
+    // Credits were already deducted from the poster at bounty_post time.
+    if let Some(credits) = reward_credits {
+        if passed {
+            // Issue a work receipt for the winning agent
+            let receipt_task = store::Task {
+                id: task_id.to_string(),
+                title: task_title.clone(),
+                status: "done".to_string(),
+                created_by: task_poster.clone(),
+                claimed_by: Some(agent_id.to_string()),
+                created_at: now(),
+                updated_at: now(),
+                notes: Some(format!("oracle:{oracle}")),
+                acceptance_oracle: Some(oracle.clone()),
+                reward_credits,
+                reward_trust,
+                submissions: vec![],
+            };
+            publish_task_receipt(&room, &receipt_task, agent_id, "done", Some(&format!("oracle:{oracle}")), now());
 
-        // Grant credits if configured on the bounty
-        if let Some(credits) = reward_credits {
+            // Pay winner from escrow (poster already debited at post time)
             store::credit_add(&room.room_id, agent_id, credits, &format!("bounty oracle PASS: {task_title} ({task_id_short})"));
             let balance = store::credit_balance(&room.room_id, agent_id);
             let credit_env = make_envelope(
@@ -1960,9 +1979,14 @@ pub fn bounty_verify(task_id: &str, agent_id: &str, room_label: Option<&str>) ->
             let enc = encrypt_envelope(&credit_env, &room_key, &room.room_id);
             transport::publish(&room.room_id, &enc);
             store::save_message(&room.room_id, &credit_env);
+        } else if !task_poster.is_empty() {
+            // Refund escrowed credits to poster on oracle FAIL
+            store::credit_add(&room.room_id, &task_poster, credits, &format!("bounty escrow refund: {task_title} ({task_id_short}) — oracle FAIL"));
         }
+    }
 
-        // Grant trust points if configured on the bounty
+    // Grant trust points to winner on PASS
+    if passed {
         if let Some(trust) = reward_trust {
             store::trust_add(&room.room_id, agent_id, trust, &format!("bounty oracle PASS: {task_title}"), "oracle");
         }
@@ -4126,7 +4150,7 @@ mod tests {
         role_heartbeat, role_release, payment_complete_solana_deposit,
         seed_plaza_rate_limit_state, send_watch_heartbeat,
         should_display_message, signing_message_bytes, soma_churn_decay, soma_correct,
-        bounty_submit, bounty_verify, stale_claim_weight, task_add, task_add_with_oracle,
+        bounty_post, bounty_submit, bounty_verify, stale_claim_weight, task_add, task_add_with_oracle,
         task_checkpoint, task_done, unpin,
         verified_solana_deposit_from_tx, SignedWirePayload, VerifiedSolanaDeposit,
         SIGNED_WIRE_VERSION, BASE64, DISCOVERY_POSITIVE_HALF_LIFE_SECS,
@@ -4978,6 +5002,154 @@ mod tests {
         );
 
         // Clean up the temporary branch.
+        let _ = std::process::Command::new("git")
+            .args(["branch", "-D", &branch])
+            .output();
+    }
+
+    /// Verify that bounty_post escrows credits from the poster upfront and that
+    /// bounty_verify releases them to the winner on PASS.
+    #[test]
+    fn bounty_post_escrows_credits_and_verify_pays_winner() {
+        let _guard = store::test_env_lock().lock().unwrap();
+        let poster_id = "bounty-poster-escrow";
+        let winner_id = "bounty-winner-escrow";
+        let (_home, room) = setup_plaza_room(poster_id, Role::Admin);
+
+        // Give the poster enough credits to fund the bounty.
+        store::credit_add(&room.room_id, poster_id, 100, "test setup");
+        assert_eq!(store::credit_balance(&room.room_id, poster_id), 100);
+
+        // Post a 60-credit bounty. Note: bounty_post returns the message ID;
+        // the task is stored separately — find it by title below.
+        bounty_post("Escrow test task", 1, Some("true"), Some(60), None)
+            .expect("bounty_post should succeed with sufficient credits");
+
+        // Poster should have 40 credits left (60 escrowed).
+        assert_eq!(
+            store::credit_balance(&room.room_id, poster_id),
+            40,
+            "poster should have 40 credits after escrow"
+        );
+
+        // Set up the winner's submission directly (bypassing self-dealing check for this test).
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let branch = format!("test-escrow-verify-{ts}");
+        let _ = std::process::Command::new("git")
+            .args(["branch", &branch])
+            .output();
+
+        let mut tasks = store::load_tasks(&room.room_id);
+        let task = tasks.iter_mut().find(|t| t.title == "Escrow test task").unwrap();
+        task.submissions.push(store::BountySubmission {
+            agent_id: winner_id.to_string(),
+            branch: branch.clone(),
+            submitted_at: 0,
+            oracle_passed: None,
+        });
+        let task_id = tasks.iter().find(|t| t.title == "Escrow test task")
+            .map(|t| t.id.clone()).unwrap();
+        store::save_tasks(&room.room_id, &tasks);
+
+        // Oracle PASS: winner should receive the 60 escrowed credits.
+        let result = bounty_verify(&task_id, winner_id, None)
+            .expect("bounty_verify should succeed");
+        assert!(result.starts_with("PASS"), "oracle 'true' must PASS, got: {result}");
+
+        assert_eq!(
+            store::credit_balance(&room.room_id, winner_id),
+            60,
+            "winner should receive the 60 escrowed credits"
+        );
+        // Poster keeps their remaining 40 (escrow was already consumed).
+        assert_eq!(
+            store::credit_balance(&room.room_id, poster_id),
+            40,
+            "poster retains remaining credits after bounty paid out"
+        );
+
+        let _ = std::process::Command::new("git")
+            .args(["branch", "-D", &branch])
+            .output();
+    }
+
+    /// Verify that bounty_post rejects posting with insufficient credits.
+    #[test]
+    fn bounty_post_rejects_insufficient_credits() {
+        let _guard = store::test_env_lock().lock().unwrap();
+        let poster_id = "bounty-poster-broke";
+        let (_home, _room) = setup_plaza_room(poster_id, Role::Admin);
+
+        // Poster has 0 credits, tries to post a 50-credit bounty.
+        let result = bounty_post("No-funds bounty", 1, Some("true"), Some(50), None);
+        assert!(result.is_err(), "bounty_post must reject poster with insufficient credits");
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("Insufficient credits"),
+            "error must mention insufficient credits, got: {err}"
+        );
+    }
+
+    /// Verify that escrow is refunded to the poster when the oracle fails.
+    #[test]
+    fn bounty_verify_refunds_escrow_on_fail() {
+        let _guard = store::test_env_lock().lock().unwrap();
+        let poster_id = "bounty-poster-refund";
+        let submitter_id = "bounty-submitter-fail";
+        let (_home, room) = setup_plaza_room(poster_id, Role::Admin);
+
+        // Give poster 80 credits and post a 50-credit bounty with an always-failing oracle.
+        store::credit_add(&room.room_id, poster_id, 80, "test setup");
+        bounty_post("Refund test task", 1, Some("false"), Some(50), None)
+            .expect("bounty_post should succeed");
+        assert_eq!(
+            store::credit_balance(&room.room_id, poster_id),
+            30,
+            "poster should have 30 credits after escrow"
+        );
+
+        // Register a submission and run the oracle (will fail).
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let branch = format!("test-refund-verify-{ts}");
+        let _ = std::process::Command::new("git")
+            .args(["branch", &branch])
+            .output();
+
+        let mut tasks = store::load_tasks(&room.room_id);
+        let task = tasks.iter_mut().find(|t| t.title == "Refund test task").unwrap();
+        task.submissions.push(store::BountySubmission {
+            agent_id: submitter_id.to_string(),
+            branch: branch.clone(),
+            submitted_at: 0,
+            oracle_passed: None,
+        });
+        let task_id = tasks.iter().find(|t| t.title == "Refund test task")
+            .map(|t| t.id.clone()).unwrap();
+        store::save_tasks(&room.room_id, &tasks);
+
+        let result = bounty_verify(&task_id, submitter_id, None)
+            .expect("bounty_verify should not error on oracle FAIL");
+        assert!(result.starts_with("FAIL"), "oracle 'false' must FAIL, got: {result}");
+
+        // Submitter receives nothing.
+        assert_eq!(
+            store::credit_balance(&room.room_id, submitter_id),
+            0,
+            "submitter should receive nothing on FAIL"
+        );
+        // Poster's 50 escrow is returned: 30 + 50 = 80.
+        assert_eq!(
+            store::credit_balance(&room.room_id, poster_id),
+            80,
+            "poster escrow must be refunded on oracle FAIL"
+        );
+
         let _ = std::process::Command::new("git")
             .args(["branch", "-D", &branch])
             .output();
