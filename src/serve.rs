@@ -74,6 +74,10 @@ fn thread_href(room_label: &str, message_id: &str) -> String {
     format!("/{room_label}/thread/{message_id}")
 }
 
+fn readonly_mode() -> bool {
+    std::env::var("AGORA_READONLY").is_ok()
+}
+
 // ── Message rendering ────────────────────────────────────────────
 
 fn reaction_badges(room_id: &str, msg_id: &str) -> String {
@@ -323,7 +327,7 @@ fn render_room_page(room_label: &str) -> String {
         .map(|t| format!(r#"<div class="stats">Topic: {}</div>"#, html_escape(t)))
         .unwrap_or_default();
 
-    let readonly = std::env::var("AGORA_READONLY").is_ok();
+    let readonly = readonly_mode();
 
     format!(
         r#"<!DOCTYPE html>
@@ -801,8 +805,11 @@ fn render_leaderboard_page(rows: &[serde_json::Value]) -> String {
 fn json_status(code: u16) -> &'static str {
     match code {
         200 => "200 OK",
+        201 => "201 Created",
+        204 => "204 No Content",
         400 => "400 Bad Request",
         401 => "401 Unauthorized",
+        403 => "403 Forbidden",
         404 => "404 Not Found",
         _ => "500 Internal Server Error",
     }
@@ -1071,6 +1078,15 @@ fn handle_connection(stream: TcpStream) {
 
         // POST /:room/send — send a message
         ("POST", [room_label, "send"]) => {
+            if readonly_mode() {
+                send_response(
+                    stream,
+                    "403 Forbidden",
+                    "text/plain; charset=utf-8",
+                    "Agora is running in read-only mode.",
+                );
+                return;
+            }
             if let Some(msg) = form_field(body, "message") {
                 let msg = msg.trim().to_string();
                 if !msg.is_empty() {
@@ -1083,6 +1099,10 @@ fn handle_connection(stream: TcpStream) {
 
         // POST /:room/react — add emoji reaction (called by web UI via fetch)
         ("POST", [room_label, "react"]) => {
+            if readonly_mode() {
+                send_json(stream, 403, r#"{"error":"Agora is running in read-only mode."}"#);
+                return;
+            }
             if let (Some(msg_id), Some(emoji)) = (
                 form_field(body, "message_id"),
                 form_field(body, "emoji"),
@@ -1716,8 +1736,25 @@ mod tests {
     #[test]
     fn test_json_status_preserves_401_status() {
         assert_eq!(json_status(401), "401 Unauthorized");
+        assert_eq!(json_status(403), "403 Forbidden");
         assert_eq!(json_status(404), "404 Not Found");
         assert_eq!(json_status(500), "500 Internal Server Error");
+    }
+
+    #[test]
+    fn test_readonly_mode_uses_env_flag() {
+        let _guard = crate::store::test_env_lock().lock().unwrap();
+        unsafe {
+            std::env::remove_var("AGORA_READONLY");
+        }
+        assert!(!readonly_mode());
+        unsafe {
+            std::env::set_var("AGORA_READONLY", "1");
+        }
+        assert!(readonly_mode());
+        unsafe {
+            std::env::remove_var("AGORA_READONLY");
+        }
     }
 
     #[test]
