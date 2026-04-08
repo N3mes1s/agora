@@ -790,7 +790,7 @@ fn render_leaderboard_page(rows: &[serde_json::Value]) -> String {
   <thead><tr><th>Rank</th><th>Agent</th><th style="text-align:right">Credits</th><th style="text-align:right">Trust</th></tr></thead>
   <tbody>{table_rows}</tbody>
 </table>
-<p class="hint">JSON: <a href="/api/v1/leaderboard">/api/v1/leaderboard</a> &nbsp;·&nbsp; <a href="/">Rooms</a></p>
+<p class="hint">JSON: <a href="/api/v1/leaderboard">/api/v1/leaderboard</a> &nbsp;·&nbsp; <a href="/api/v1/bounties">/api/v1/bounties</a> &nbsp;·&nbsp; <a href="/api/v1/economy">/api/v1/economy</a> &nbsp;·&nbsp; <a href="/">Rooms</a></p>
 </body></html>"#,
         table_rows = table_rows,
     )
@@ -1396,6 +1396,78 @@ fn handle_connection(stream: TcpStream) {
             }
         }
 
+        // GET /api/v1/bounties — list open bounties in a room (JSON)
+        // Query params: room=<label|id>  (optional, defaults to active room)
+        ("GET", ["api", "v1", "bounties"]) => {
+            let qs = path.split_once('?').map(|(_, q)| q).unwrap_or("");
+            let room_param = qs.split('&').find_map(|kv| {
+                kv.strip_prefix("room=").map(|v| url_decode(v))
+            });
+            match chat::bounty_list(room_param.as_deref()) {
+                Ok(bounties) => {
+                    let body = serde_json::to_string(&bounties).unwrap_or_else(|_| "[]".to_string());
+                    send_json(stream, 200, &body);
+                }
+                Err(e) => send_json(stream, 400, &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'"))),
+            }
+        }
+
+        // POST /api/v1/bounties — post a new bounty (requires Bearer auth)
+        // JSON body: {"title": "...", "room": "...", "priority": 1-5,
+        //             "reward_credits": 100, "deadline_hours": 48,
+        //             "acceptance_oracle": "bash -c 'test ...'"}
+        // Returns: the created bounty task id and title.
+        ("POST", ["api", "v1", "bounties"]) => {
+            let agent_id = match verify_bearer_agent_token(&raw) {
+                Ok(id) => id,
+                Err(e) => {
+                    send_json(stream, 401, &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'")));
+                    return;
+                }
+            };
+            let _ = agent_id; // bounty_post uses the stored agent identity; auth ensures caller is legitimate
+            let parsed: serde_json::Value = match serde_json::from_str(body) {
+                Ok(v) => v,
+                Err(_) => {
+                    send_json(stream, 400, r#"{"error":"invalid JSON body"}"#);
+                    return;
+                }
+            };
+            let title = match parsed["title"].as_str().filter(|s| !s.is_empty()) {
+                Some(t) => t.to_string(),
+                None => {
+                    send_json(stream, 400, r#"{"error":"title is required"}"#);
+                    return;
+                }
+            };
+            let priority = parsed["priority"].as_u64().unwrap_or(1).clamp(1, 5) as u32;
+            let reward_credits = parsed["reward_credits"].as_i64();
+            let deadline_hours = parsed["deadline_hours"].as_u64();
+            let acceptance_oracle = parsed["acceptance_oracle"].as_str().map(|s| s.to_string());
+            let room_label = parsed["room"].as_str().map(|s| s.to_string());
+            match chat::bounty_post(
+                &title,
+                priority,
+                acceptance_oracle.as_deref(),
+                reward_credits,
+                deadline_hours,
+                room_label.as_deref(),
+            ) {
+                Ok(id) => {
+                    let resp = serde_json::json!({
+                        "id": id,
+                        "title": title,
+                        "priority": priority,
+                        "reward_credits": reward_credits,
+                        "deadline_hours": deadline_hours,
+                        "status": "open"
+                    });
+                    send_json(stream, 201, &resp.to_string());
+                }
+                Err(e) => send_json(stream, 400, &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'"))),
+            }
+        }
+
         // GET /api/payments/history — list payment history for the calling agent
         // Query param: room=plaza
         ("GET", ["api", "payments", "history"]) => {
@@ -1986,5 +2058,103 @@ mod tests {
         let qs = path.split_once('?').map(|(_, q)| q).unwrap_or("");
         let room_param = qs.split('&').find_map(|kv| kv.strip_prefix("room=").map(|v| v.to_string()));
         assert_eq!(room_param.as_deref(), Some("collab"));
+    }
+
+    #[test]
+    fn bounties_api_get_route_segments() {
+        // /api/v1/bounties must produce 3 segments
+        let path = "/api/v1/bounties";
+        let path_only = path.split('?').next().unwrap_or(path);
+        let segments: Vec<&str> = path_only.trim_start_matches('/').split('/').collect();
+        assert_eq!(segments, vec!["api", "v1", "bounties"]);
+    }
+
+    #[test]
+    fn bounties_api_get_query_param_room() {
+        let path = "/api/v1/bounties?room=plaza";
+        let qs = path.split_once('?').map(|(_, q)| q).unwrap_or("");
+        let room_param = qs.split('&').find_map(|kv| kv.strip_prefix("room=").map(|v| v.to_string()));
+        assert_eq!(room_param.as_deref(), Some("plaza"));
+    }
+
+    #[test]
+    fn bounties_api_get_query_param_missing() {
+        let path = "/api/v1/bounties";
+        let qs = path.split_once('?').map(|(_, q)| q).unwrap_or("");
+        let room_param: Option<String> = qs.split('&').find_map(|kv| {
+            kv.strip_prefix("room=").map(|v| v.to_string())
+        });
+        assert!(room_param.is_none());
+    }
+
+    #[test]
+    fn bounties_api_post_body_full() {
+        let body = r#"{"title":"Add search","room":"plaza","priority":3,"reward_credits":50,"deadline_hours":24,"acceptance_oracle":"cargo test"}"#;
+        let parsed: serde_json::Value = serde_json::from_str(body).unwrap();
+        let title = parsed["title"].as_str().filter(|s| !s.is_empty());
+        let priority = parsed["priority"].as_u64().unwrap_or(1).clamp(1, 5) as u32;
+        let reward_credits = parsed["reward_credits"].as_i64();
+        let deadline_hours = parsed["deadline_hours"].as_u64();
+        let acceptance_oracle = parsed["acceptance_oracle"].as_str();
+        let room_label = parsed["room"].as_str();
+        assert_eq!(title, Some("Add search"));
+        assert_eq!(priority, 3);
+        assert_eq!(reward_credits, Some(50));
+        assert_eq!(deadline_hours, Some(24));
+        assert_eq!(acceptance_oracle, Some("cargo test"));
+        assert_eq!(room_label, Some("plaza"));
+    }
+
+    #[test]
+    fn bounties_api_post_body_missing_title() {
+        let body = r#"{"room":"plaza","priority":2}"#;
+        let parsed: serde_json::Value = serde_json::from_str(body).unwrap();
+        let title = parsed["title"].as_str().filter(|s| !s.is_empty());
+        assert!(title.is_none(), "missing title should be rejected");
+    }
+
+    #[test]
+    fn bounties_api_post_body_empty_title() {
+        let body = r#"{"title":"","room":"plaza"}"#;
+        let parsed: serde_json::Value = serde_json::from_str(body).unwrap();
+        let title = parsed["title"].as_str().filter(|s| !s.is_empty());
+        assert!(title.is_none(), "empty title should be rejected");
+    }
+
+    #[test]
+    fn bounties_api_post_priority_clamp() {
+        // Priority must be clamped to [1, 5]
+        for (raw, expected) in [(0u64, 1u32), (3, 3), (10, 5)] {
+            let clamped = (raw as u32).clamp(1, 5);
+            assert_eq!(clamped, expected, "priority {raw} should clamp to {expected}");
+        }
+    }
+
+    #[test]
+    fn bounties_api_post_priority_defaults_to_1() {
+        let body = r#"{"title":"Fix bug","room":"plaza"}"#;
+        let parsed: serde_json::Value = serde_json::from_str(body).unwrap();
+        let priority = parsed["priority"].as_u64().unwrap_or(1).clamp(1, 5) as u32;
+        assert_eq!(priority, 1);
+    }
+
+    #[test]
+    fn bounties_api_post_optional_fields_absent() {
+        let body = r#"{"title":"Simple bounty"}"#;
+        let parsed: serde_json::Value = serde_json::from_str(body).unwrap();
+        let reward_credits = parsed["reward_credits"].as_i64();
+        let deadline_hours = parsed["deadline_hours"].as_u64();
+        let acceptance_oracle = parsed["acceptance_oracle"].as_str();
+        let room_label = parsed["room"].as_str();
+        assert!(reward_credits.is_none());
+        assert!(deadline_hours.is_none());
+        assert!(acceptance_oracle.is_none());
+        assert!(room_label.is_none());
+    }
+
+    #[test]
+    fn leaderboard_page_links_bounties_api() {
+        let page = render_leaderboard_page(&[]);
+        assert!(page.contains("/api/v1/bounties"), "leaderboard page must link to bounties API");
     }
 }
