@@ -2807,6 +2807,15 @@ pub fn task_add(title: &str, room_label: Option<&str>) -> Result<String, String>
     Ok(id)
 }
 
+/// Fetch a single task by ID prefix.
+pub fn task_get(task_id: &str, room_label: Option<&str>) -> Result<store::Task, String> {
+    let tasks = task_list(room_label)?;
+    tasks
+        .into_iter()
+        .find(|t| t.id.starts_with(task_id) || t.id == task_id)
+        .ok_or_else(|| format!("No task matching '{task_id}'"))
+}
+
 /// Claim an open task.
 pub fn task_claim(task_id: &str, room_label: Option<&str>) -> Result<String, String> {
     let room = resolve_room(room_label)?;
