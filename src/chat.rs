@@ -4187,7 +4187,8 @@ mod tests {
         role_heartbeat, role_release, payment_complete_solana_deposit,
         seed_plaza_rate_limit_state, send_watch_heartbeat,
         should_display_message, signing_message_bytes, soma_churn_decay, soma_correct,
-        bounty_post, bounty_submit, bounty_verify, stale_claim_weight, task_add, task_add_as,
+        bounty_post, bounty_submit, bounty_verify, bounties_list, credits_snapshot,
+        stale_claim_weight, task_add, task_add_as,
         task_add_with_oracle,
         task_checkpoint, task_done, unpin,
         verified_solana_deposit_from_tx, SignedWirePayload, VerifiedSolanaDeposit,
@@ -5257,6 +5258,81 @@ mod tests {
             .expect("task message saved");
         assert_eq!(msg["from"].as_str(), Some("api-agent"));
     }
+
+    // ── credits_snapshot tests ──────────────────────────────────
+
+    #[test]
+    fn credits_snapshot_returns_balance_and_history() {
+        let _guard = store::test_env_lock().lock().unwrap();
+        let agent_id = "credits-snap-agent";
+        let (_home, room) = setup_plaza_room(agent_id, Role::Admin);
+
+        store::credit_add(&room.room_id, agent_id, 100, "seed reward");
+        store::credit_add(&room.room_id, agent_id, -30,  "bounty escrow");
+        store::credit_add(&room.room_id, agent_id,  50, "bounty payout");
+
+        let snap = credits_snapshot(Some(agent_id), None).expect("credits_snapshot should succeed");
+        let agents = snap["agents"].as_array().expect("agents array");
+        assert_eq!(agents.len(), 1, "exactly one agent");
+        let a = &agents[0];
+        assert_eq!(a["agent_id"].as_str(), Some(agent_id));
+        assert_eq!(a["balance"].as_i64(), Some(120), "100 - 30 + 50 = 120");
+        let txns = a["transactions"].as_array().expect("transactions array");
+        assert_eq!(txns.len(), 3, "three ledger entries");
+    }
+
+    #[test]
+    fn credits_snapshot_unknown_agent_returns_empty() {
+        let _guard = store::test_env_lock().lock().unwrap();
+        let agent_id = "credits-snap-empty";
+        let (_home, _room) = setup_plaza_room(agent_id, Role::Admin);
+
+        let snap = credits_snapshot(Some("nobody"), None).expect("should not error");
+        let agents = snap["agents"].as_array().expect("agents array");
+        assert_eq!(agents.len(), 0, "unknown agent → empty list");
+    }
+
+    // ── bounties_list tests ─────────────────────────────────────
+
+    #[test]
+    fn bounties_list_returns_open_rewarded_tasks() {
+        let _guard = store::test_env_lock().lock().unwrap();
+        let agent_id = "bounties-list-agent";
+        let (_home, room) = setup_plaza_room(agent_id, Role::Admin);
+
+        // Seed enough credits and trust so bounty_post doesn't reject.
+        store::credit_add(&room.room_id, agent_id, 500, "test seed");
+        store::trust_add(&room.room_id, agent_id, 200, "test trust", "admin");
+
+        bounty_post("API endpoint test bounty", 1, None, Some(75), None)
+            .expect("bounty_post should succeed");
+
+        let result = bounties_list(None).expect("bounties_list should succeed");
+        assert_eq!(result["open_bounties"].as_u64(), Some(1));
+        let bounties = result["bounties"].as_array().expect("bounties array");
+        assert_eq!(bounties.len(), 1);
+        let b = &bounties[0];
+        assert_eq!(b["title"].as_str(), Some("API endpoint test bounty"));
+        assert_eq!(b["reward_credits"].as_i64(), Some(75));
+        assert_eq!(b["status"].as_str(), Some("open"));
+    }
+
+    #[test]
+    fn bounties_list_excludes_zero_reward_tasks() {
+        let _guard = store::test_env_lock().lock().unwrap();
+        let agent_id = "bounties-zero-reward";
+        let (_home, _room) = setup_plaza_room(agent_id, Role::Admin);
+
+        // Add task directly (no reward) — should not appear in bounties_list.
+        task_add("no-reward task", None).expect("task_add should succeed");
+
+        let result = bounties_list(None).expect("bounties_list should succeed");
+        let bounties = result["bounties"].as_array().expect("bounties array");
+        assert!(
+            bounties.iter().all(|b| b["title"].as_str() != Some("no-reward task")),
+            "zero-reward tasks must not appear in bounties_list"
+        );
+    }
 }
 
 /// Search messages by text, optionally filtered by sender.
@@ -5682,4 +5758,109 @@ pub fn credit_transfer(to_agent: &str, amount: i64, reason: Option<&str>, room_l
     transport::publish(&room.room_id, &encrypted);
     store::save_message(&room.room_id, &env);
     Ok((my_balance, their_balance))
+}
+
+/// GET /api/v1/credits — credit balance + ledger history for an agent in a room.
+///
+/// If `agent_id` is None, returns all agents in the room.
+/// If `room_label` is None, uses the active room.
+/// Returns a JSON object:
+///   { "room": "plaza", "agents": [ { "agent_id", "balance", "transactions": [...] } ] }
+pub fn credits_snapshot(agent_id: Option<&str>, room_label: Option<&str>) -> Result<serde_json::Value, String> {
+    let room = resolve_room(room_label)?;
+    let ledger = store::load_ledger(&room.room_id);
+    let aliases = store::load_aliases();
+
+    // Collect unique agent IDs in the room's ledger (credit entries only).
+    let mut agents: Vec<String> = {
+        let mut seen = std::collections::HashSet::new();
+        ledger.iter()
+            .filter(|e| e.ledger.is_empty() || e.ledger == "credit")
+            .map(|e| e.agent_id.clone())
+            .filter(|id| seen.insert(id.clone()))
+            .collect()
+    };
+
+    // Filter to specific agent if requested.
+    if let Some(filter) = agent_id {
+        agents.retain(|id| id == filter || id.starts_with(filter));
+        if agents.is_empty() {
+            // Return empty result rather than error — agent may just have no transactions.
+            return Ok(serde_json::json!({
+                "room": room.label,
+                "room_id": room.room_id,
+                "agents": []
+            }));
+        }
+    }
+
+    let agent_rows: Vec<serde_json::Value> = agents.into_iter().map(|id| {
+        let transactions: Vec<serde_json::Value> = ledger.iter()
+            .filter(|e| e.agent_id == id && (e.ledger.is_empty() || e.ledger == "credit"))
+            .map(|e| serde_json::json!({
+                "amount": e.amount,
+                "reason": e.reason,
+                "ts": e.ts,
+            }))
+            .collect();
+        let balance: i64 = transactions.iter().map(|t| t["amount"].as_i64().unwrap_or(0)).sum();
+        let display = aliases.get(&id)
+            .cloned()
+            .unwrap_or_else(|| format!("{}…{}", &id[..4.min(id.len())], &id[id.len().saturating_sub(4)..]));
+        serde_json::json!({
+            "agent_id": id,
+            "display": display,
+            "balance": balance,
+            "usd_value": format!("${:.4}", balance as f64 / 1000.0),
+            "transactions": transactions,
+        })
+    }).collect();
+
+    Ok(serde_json::json!({
+        "room": room.label,
+        "room_id": room.room_id,
+        "agents": agent_rows,
+    }))
+}
+
+/// GET /api/v1/bounties — list open bounties with reward info.
+///
+/// Returns tasks that have status=open and reward_credits > 0.
+/// If `room_label` is None, uses the active room.
+pub fn bounties_list(room_label: Option<&str>) -> Result<serde_json::Value, String> {
+    let room = resolve_room(room_label)?;
+    let tasks = store::load_tasks(&room.room_id);
+
+    let open_bounties: Vec<serde_json::Value> = tasks.into_iter()
+        .filter(|t| t.status == "open" && t.reward_credits.unwrap_or(0) > 0)
+        .map(|t| {
+            let reward_cr = t.reward_credits.unwrap_or(0);
+            serde_json::json!({
+                "id": t.id,
+                "title": t.title,
+                "status": t.status,
+                "created_by": t.created_by,
+                "created_at": t.created_at,
+                "reward_credits": reward_cr,
+                "reward_usd": format!("${:.4}", reward_cr as f64 / 1000.0),
+                "reward_trust": t.reward_trust.unwrap_or(0),
+                "has_oracle": t.acceptance_oracle.is_some(),
+                "submission_count": t.submissions.len(),
+                "notes": t.notes,
+            })
+        })
+        .collect();
+
+    let total_credits: i64 = open_bounties.iter()
+        .map(|b| b["reward_credits"].as_i64().unwrap_or(0))
+        .sum();
+
+    Ok(serde_json::json!({
+        "room": room.label,
+        "room_id": room.room_id,
+        "open_bounties": open_bounties.len(),
+        "total_credits_offered": total_credits,
+        "total_usd_offered": format!("${:.4}", total_credits as f64 / 1000.0),
+        "bounties": open_bounties,
+    }))
 }

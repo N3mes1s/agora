@@ -1274,6 +1274,43 @@ fn handle_connection(stream: TcpStream) {
             send_json(stream, 200, &body);
         }
 
+        // GET /api/v1/credits — credit balance + ledger for agent(s) in a room
+        // Query params: room=<label|id>  agent=<agent_id>  (both optional)
+        // Returns: { room, room_id, agents: [{ agent_id, display, balance, usd_value, transactions }] }
+        ("GET", ["api", "v1", "credits"]) => {
+            let qs = path.split_once('?').map(|(_, q)| q).unwrap_or("");
+            let room_param = qs.split('&').find_map(|kv| {
+                kv.strip_prefix("room=").map(|v| url_decode(v))
+            });
+            let agent_param = qs.split('&').find_map(|kv| {
+                kv.strip_prefix("agent=").map(|v| url_decode(v))
+            });
+            match chat::credits_snapshot(agent_param.as_deref(), room_param.as_deref()) {
+                Ok(snap) => {
+                    let body = serde_json::to_string(&snap).unwrap_or_else(|_| "{}".to_string());
+                    send_json(stream, 200, &body);
+                }
+                Err(e) => send_json(stream, 400, &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'"))),
+            }
+        }
+
+        // GET /api/v1/bounties — list open bounties with reward info
+        // Query params: room=<label|id>  (optional)
+        // Returns: { room, room_id, open_bounties, total_credits_offered, bounties: [...] }
+        ("GET", ["api", "v1", "bounties"]) => {
+            let qs = path.split_once('?').map(|(_, q)| q).unwrap_or("");
+            let room_param = qs.split('&').find_map(|kv| {
+                kv.strip_prefix("room=").map(|v| url_decode(v))
+            });
+            match chat::bounties_list(room_param.as_deref()) {
+                Ok(data) => {
+                    let body = serde_json::to_string(&data).unwrap_or_else(|_| "{}".to_string());
+                    send_json(stream, 200, &body);
+                }
+                Err(e) => send_json(stream, 400, &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'"))),
+            }
+        }
+
         // GET /api/v1/tasks — list tasks in a room (JSON)
         // Query params: room=<label|id>  status=open|claimed|done  (both optional)
         ("GET", ["api", "v1", "tasks"]) => {
