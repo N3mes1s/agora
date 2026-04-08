@@ -2827,7 +2827,7 @@ fn main() {
                             _ => " ",
                         };
                         let text = evt["text"].as_str().unwrap_or("");
-                        let short = &text[..60.min(text.len())];
+                        let short = text.char_indices().nth(60).map(|(i, _)| &text[..i]).unwrap_or(text);
                         let name = resolve_display_name(from);
                         println!("  {time} [{icon}] {name}: {short}");
                     }
