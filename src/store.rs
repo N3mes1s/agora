@@ -847,6 +847,9 @@ pub struct Task {
     /// Submitted branches: vec of (agent_id, branch_name)
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub submissions: Vec<BountySubmission>,
+    /// Unix timestamp after which the bounty auto-expires and credits are refunded
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<u64>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
