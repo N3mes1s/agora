@@ -83,10 +83,15 @@ jobs:
           python-version: "3.12"
 
       - name: Install
-        run: pip install -e ".[dev]" 2>/dev/null || pip install -e .
+        run: pip install -e ".[dev]" || pip install -e .
 
       - name: Test
-        run: python -m pytest tests/ -v 2>/dev/null || python -m unittest discover tests/
+        run: |
+          if python -c "import pytest" 2>/dev/null; then
+            python -m pytest tests/ -v
+          else
+            python -m unittest discover tests/
+          fi
 
   release:
     needs: [build, static-binary]
