@@ -4193,7 +4193,7 @@ mod tests {
         role_heartbeat, role_release, payment_complete_solana_deposit,
         seed_plaza_rate_limit_state, send_watch_heartbeat,
         should_display_message, signing_message_bytes, soma_churn_decay, soma_correct,
-        bounty_post, bounty_submit, bounty_verify, bounties_list, credits_snapshot,
+        bounty_post, bounty_submit, bounty_verify, bounty_fund_as, bounties_list, credits_snapshot,
         stale_claim_weight, task_add, task_add_as,
         task_add_with_oracle,
         task_checkpoint, task_done, unpin,
@@ -5393,6 +5393,75 @@ mod tests {
         // With 1000:1 ratio: Gini ≈ (1000-1)/(1000+1) / 2 ≈ 0.499.
         // Assert it's significantly higher than equal distribution (0.0).
         assert!(gini > 0.4, "expected Gini > 0.4 for 1000:1 distribution, got {gini}");
+    }
+
+    // ── bounty_fund tests ───────────────────────────────────────
+
+    #[test]
+    fn bounty_fund_increases_reward_and_tracks_contributor() {
+        let _guard = store::test_env_lock().lock().unwrap();
+        let poster = "fund-poster-agent";
+        let funder = "fund-contributor-agent";
+        let (_home, room) = setup_plaza_room(poster, Role::Admin);
+
+        // Give both agents credits and trust.
+        store::credit_add(&room.room_id, poster, 500, "seed");
+        store::credit_add(&room.room_id, funder, 200, "seed");
+        store::trust_add(&room.room_id, poster, 200, "test", "admin");
+
+        // Post a bounty with initial reward of 50.
+        let task_id = bounty_post("fund-test bounty", 3, None, Some(50), None)
+            .expect("bounty_post should succeed");
+
+        // Contributor funds 30 more.
+        let msg = bounty_fund_as(funder, &task_id[..6], 30, None)
+            .expect("bounty_fund_as should succeed");
+        assert!(msg.contains("30cr"), "message should mention amount");
+        assert!(msg.contains("80"), "pool should now be 80cr");
+
+        // Verify the task's reward was updated.
+        let tasks = store::load_tasks(&room.room_id);
+        let task = tasks.iter().find(|t| t.id.starts_with(&task_id[..6])).expect("task exists");
+        assert_eq!(task.reward_credits, Some(80), "reward should be 50+30=80");
+        assert_eq!(task.crowdfund_contributions.len(), 1, "one contributor");
+        assert_eq!(task.crowdfund_contributions[0].agent_id, funder);
+        assert_eq!(task.crowdfund_contributions[0].credits, 30);
+
+        // Funder's balance should be reduced.
+        let balance = store::credit_balance(&room.room_id, funder);
+        assert_eq!(balance, 170, "200 - 30 = 170");
+    }
+
+    #[test]
+    fn bounty_fund_rejects_insufficient_credits() {
+        let _guard = store::test_env_lock().lock().unwrap();
+        let poster = "fund-reject-poster";
+        let broke = "fund-broke-agent";
+        let (_home, room) = setup_plaza_room(poster, Role::Admin);
+
+        store::credit_add(&room.room_id, poster, 500, "seed");
+        store::trust_add(&room.room_id, poster, 200, "test", "admin");
+        // broke has only 5 credits
+        store::credit_add(&room.room_id, broke, 5, "seed");
+
+        let task_id = bounty_post("broke-test bounty", 3, None, Some(50), None)
+            .expect("bounty_post should succeed");
+
+        let err = bounty_fund_as(broke, &task_id[..6], 100, None)
+            .expect_err("should fail with insufficient credits");
+        assert!(err.contains("Insufficient"), "error should mention insufficient credits");
+    }
+
+    // ── velocity_trend tests ────────────────────────────────────
+
+    #[test]
+    fn velocity_trend_flat_when_no_prior_activity() {
+        let _guard = store::test_env_lock().lock().unwrap();
+        let (_home, _room) = setup_plaza_room("vel-trend-flat-agent", Role::Member);
+        // No credits at all → both windows zero → flat (no prior = 0, current = 0)
+        let h = super::economy_health();
+        assert_eq!(h["metrics"]["velocity_trend"].as_str(), Some("flat"));
+        assert_eq!(h["metrics"]["velocity_delta_pct"].as_f64(), Some(0.0));
     }
 }
 
