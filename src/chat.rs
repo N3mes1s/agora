@@ -3628,10 +3628,15 @@ const PUZZLES: &[(&str, &str, &str, &str)] = &[
     ),
 ];
 
-/// Credits awarded for solving calibration seeds by difficulty.
-fn seed_credit_reward(difficulty: &str) -> i64 {
-    let _ = difficulty;
-    0
+/// Credits awarded for solving calibration seeds.
+///
+/// Decaying reward based on how many seeds the agent has previously solved:
+///   0 prior → 10 credits, 1 prior → 8, 2 → 6, 3 → 4, 4 → 2, 5+ → 0
+/// Total lifetime cap: 30 credits from seeds.  Difficulty is ignored so that
+/// all puzzles grant the same proof-of-participation value.
+fn seed_credit_reward(prior_solves: usize) -> i64 {
+    let reward = 10i64 - 2 * prior_solves as i64;
+    reward.max(0)
 }
 
 fn sha256_hex(input: &str) -> String {
@@ -3667,9 +3672,10 @@ pub fn seed_gen(room_label: Option<&str>) -> Result<(String, String), String> {
     store::save_seeds(&room.room_id, &seeds);
 
     let room_key = crypto::derive_room_key(&room.secret, &room.room_id);
-    let credit_reward = seed_credit_reward(difficulty);
-    let reward_note = if credit_reward > 0 {
-        format!(", reward: {credit_reward} credits")
+    // Announce max possible reward (first-time solver earns 10 credits; decays with each solve).
+    let max_reward = seed_credit_reward(0);
+    let reward_note = if max_reward > 0 {
+        format!(", reward: up to {max_reward} credits (decays per solver)")
     } else {
         String::new()
     };
@@ -3692,28 +3698,31 @@ pub fn seed_verify(seed_id: &str, answer: &str, room_label: Option<&str>) -> Res
     let me = store::get_agent_id();
     let mut seeds = store::load_seeds(&room.room_id);
 
-    let seed = seeds
-        .iter_mut()
-        .find(|s| s.id.starts_with(seed_id))
+    let idx = seeds
+        .iter()
+        .position(|s| s.id.starts_with(seed_id))
         .ok_or_else(|| format!("No calibration seed matching '{seed_id}'"))?;
 
     let answer_clean = answer.trim().to_lowercase();
     let submitted_hash = sha256_hex(&answer_clean);
 
-    if submitted_hash != seed.answer_hash {
+    if submitted_hash != seeds[idx].answer_hash {
         return Ok(false);
     }
 
-    if seed.solved_by.contains(&me) {
-        return Err(format!("You have already solved seed '{}'.", &seed.id[..8]));
+    if seeds[idx].solved_by.contains(&me) {
+        return Err(format!("You have already solved seed '{}'.", &seeds[idx].id[..8]));
     }
 
-    seed.solved_by.push(me.clone());
-    let seed_snapshot = seed.clone();
+    // Count seeds already solved by this agent (before this one) to compute decaying reward.
+    let prior_solves = seeds.iter().filter(|s| s.solved_by.contains(&me)).count();
+
+    seeds[idx].solved_by.push(me.clone());
+    let seed_snapshot = seeds[idx].clone();
     store::save_seeds(&room.room_id, &seeds);
 
-    // Award credits based on difficulty (autonomous economy bootstrapping).
-    let credit_reward = seed_credit_reward(&seed_snapshot.difficulty);
+    // Award credits with decaying schedule (bootstrapping proof-of-participation).
+    let credit_reward = seed_credit_reward(prior_solves);
 
     // Synthesise a Task so we can reuse publish_task_receipt.
     let task = store::Task {
@@ -6262,26 +6271,30 @@ mod tests {
         assert!(err.contains("currently claimed by 'builder-agent'"));
     }
 
-    /// Medium seeds no longer mint credits.
+    /// First solve earns 10 credits.
     #[test]
-    fn seed_credit_reward_medium_is_zero() {
-        assert_eq!(super::seed_credit_reward("medium"), 0);
+    fn seed_credit_reward_first_solve_is_ten() {
+        assert_eq!(super::seed_credit_reward(0), 10);
     }
 
-    /// Hard seeds no longer mint credits.
+    /// Each subsequent solve decays by 2.
     #[test]
-    fn seed_credit_reward_hard_is_zero() {
-        assert_eq!(super::seed_credit_reward("hard"), 0);
+    fn seed_credit_reward_decays_by_two() {
+        assert_eq!(super::seed_credit_reward(1), 8);
+        assert_eq!(super::seed_credit_reward(2), 6);
+        assert_eq!(super::seed_credit_reward(3), 4);
+        assert_eq!(super::seed_credit_reward(4), 2);
     }
 
-    /// Easy seeds remain free (no reward).
+    /// After 5 solves the reward floors at zero (lifetime cap ~30 credits).
     #[test]
-    fn seed_credit_reward_easy_is_zero() {
-        assert_eq!(super::seed_credit_reward("easy"), 0);
+    fn seed_credit_reward_floors_at_zero() {
+        assert_eq!(super::seed_credit_reward(5), 0);
+        assert_eq!(super::seed_credit_reward(10), 0);
     }
 
     #[test]
-    fn seed_verify_issues_receipt_without_minting_credits() {
+    fn seed_verify_mints_credits_on_first_solve() {
         let _guard = store::test_env_lock().lock().unwrap();
         let solver_id = "seed-solver";
         let (_home, room) = setup_plaza_room(solver_id, Role::Admin);
@@ -6289,7 +6302,8 @@ mod tests {
         let (seed_id, _puzzle) = seed_gen(None).expect("seed generated");
         let solved = seed_verify(&seed_id, "aroga", None).expect("seed verify should succeed");
         assert!(solved, "seed answer should be accepted");
-        assert_eq!(store::credit_balance(&room.room_id, solver_id), 0);
+        // First-time solver earns 10 credits.
+        assert_eq!(store::credit_balance(&room.room_id, solver_id), 10);
 
         let receipts = store::load_work_receipts(&room.room_id);
         let receipt = receipts
@@ -6298,6 +6312,32 @@ mod tests {
             .expect("seed receipt saved");
         assert_eq!(receipt.agent_id, solver_id);
         assert_eq!(receipt.status, "done");
+    }
+
+    /// Solving multiple seeds earns decaying credits: 10+8+6+4+2 = 30 total.
+    #[test]
+    fn seed_verify_credits_decay_across_solves() {
+        let _guard = store::test_env_lock().lock().unwrap();
+        let solver_id = "seed-decay-solver";
+        let (_home, room) = setup_plaza_room(solver_id, Role::Admin);
+
+        // Puzzles rotate by index; answers in order.
+        let answers = ["aroga", "3", "65536", "55", "9"];
+        let mut total = 0i64;
+        for (i, answer) in answers.iter().enumerate() {
+            let (seed_id, _) = seed_gen(None).expect("seed generated");
+            let solved = seed_verify(&seed_id, answer, None).expect("verify ok");
+            assert!(solved, "answer {i} should be accepted");
+            let expected_reward = (10 - 2 * i as i64).max(0);
+            total += expected_reward;
+            assert_eq!(
+                store::credit_balance(&room.room_id, solver_id),
+                total,
+                "after solve {i} balance should be {total}"
+            );
+        }
+        // Total: 10+8+6+4+2 = 30
+        assert_eq!(total, 30);
     }
 
     /// Bounties with a deadline auto-expire: credits are refunded to the poster.
