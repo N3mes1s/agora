@@ -7,8 +7,8 @@
 //! - Room-specific symmetric keys derived from the shared secret
 //! - Zero-knowledge room membership proof (HMAC challenge-response)
 
-use ring::aead::{self, Aad, LessSafeKey, Nonce, UnboundKey, NONCE_LEN};
-use ring::hkdf::{self, Salt, HKDF_SHA256};
+use ring::aead::{self, Aad, LessSafeKey, NONCE_LEN, Nonce, UnboundKey};
+use ring::hkdf::{self, HKDF_SHA256, Salt};
 use ring::hmac;
 use ring::rand::{SecureRandom, SystemRandom};
 use ring::signature::{ED25519, Ed25519KeyPair, KeyPair, UnparsedPublicKey};
@@ -112,7 +112,8 @@ pub fn derive_msg_key(chain_key: &[u8; 32]) -> [u8; 32] {
 pub fn encrypt(plaintext: &[u8], key: &[u8; 32], aad: &[u8]) -> Result<Vec<u8>, CryptoError> {
     let rng = SystemRandom::new();
     let mut nonce_bytes = [0u8; NONCE_LEN];
-    rng.fill(&mut nonce_bytes).map_err(|_| CryptoError::RngFailed)?;
+    rng.fill(&mut nonce_bytes)
+        .map_err(|_| CryptoError::RngFailed)?;
 
     let unbound = UnboundKey::new(&aead::AES_256_GCM, key).map_err(|_| CryptoError::InvalidKey)?;
     let sealing_key = LessSafeKey::new(unbound);
@@ -139,7 +140,8 @@ pub fn decrypt(blob: &[u8], key: &[u8; 32], aad: &[u8]) -> Result<Vec<u8>, Crypt
     }
 
     let (nonce_bytes, ciphertext_with_tag) = blob.split_at(NONCE_LEN);
-    let nonce = Nonce::try_assume_unique_for_key(nonce_bytes).map_err(|_| CryptoError::DecryptionFailed)?;
+    let nonce =
+        Nonce::try_assume_unique_for_key(nonce_bytes).map_err(|_| CryptoError::DecryptionFailed)?;
 
     let unbound = UnboundKey::new(&aead::AES_256_GCM, key).map_err(|_| CryptoError::InvalidKey)?;
     let opening_key = LessSafeKey::new(unbound);
@@ -172,7 +174,8 @@ pub fn zkp_create_commitment(room_key: &[u8; 32]) -> Result<([u8; 32], [u8; 32])
 pub fn zkp_create_challenge() -> Result<[u8; 32], CryptoError> {
     let rng = SystemRandom::new();
     let mut challenge = [0u8; 32];
-    rng.fill(&mut challenge).map_err(|_| CryptoError::RngFailed)?;
+    rng.fill(&mut challenge)
+        .map_err(|_| CryptoError::RngFailed)?;
     Ok(challenge)
 }
 
@@ -238,9 +241,9 @@ pub fn generate_signing_keypair_from_seed(seed: &[u8; 32]) -> Result<Vec<u8>, Cr
         0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70,      // SEQUENCE { OID 1.3.101.112 }
         0x04, 0x22, 0x04, 0x20,                         // OCTET STRING(34) { OCTET STRING(32) }
     ];
-    pkcs8.extend_from_slice(seed);           // 32-byte private key seed
+    pkcs8.extend_from_slice(seed); // 32-byte private key seed
     pkcs8.extend_from_slice(&[0x81, 0x21, 0x00]); // [1] IMPLICIT BIT STRING(33), no unused bits
-    pkcs8.extend_from_slice(pubkey);          // 32-byte compressed Edwards point
+    pkcs8.extend_from_slice(pubkey); // 32-byte compressed Edwards point
 
     // Validate round-trip before returning.
     Ed25519KeyPair::from_pkcs8(&pkcs8).map_err(|_| CryptoError::InvalidKey)?;
@@ -511,7 +514,10 @@ mod tests {
         let seed_b = [0x02u8; 32];
         let pkcs8_a = generate_signing_keypair_from_seed(&seed_a).unwrap();
         let pkcs8_b = generate_signing_keypair_from_seed(&seed_b).unwrap();
-        assert_ne!(pkcs8_a, pkcs8_b, "different seeds must produce different keypairs");
+        assert_ne!(
+            pkcs8_a, pkcs8_b,
+            "different seeds must produce different keypairs"
+        );
     }
 
     #[test]
@@ -521,7 +527,10 @@ mod tests {
         let pubkey = signing_public_key(&pkcs8).unwrap();
         let msg = b"test message for signing";
         let sig = sign_message(&pkcs8, msg).unwrap();
-        assert!(verify_message_signature(&pubkey, msg, &sig), "seed-derived key must sign/verify");
+        assert!(
+            verify_message_signature(&pubkey, msg, &sig),
+            "seed-derived key must sign/verify"
+        );
     }
 
     #[test]
@@ -529,6 +538,9 @@ mod tests {
         let seed = [0x55u8; 32];
         let seed_pkcs8 = generate_signing_keypair_from_seed(&seed).unwrap();
         let random_pkcs8 = generate_signing_keypair_pkcs8().unwrap();
-        assert_ne!(seed_pkcs8, random_pkcs8, "seed-derived must differ from random");
+        assert_ne!(
+            seed_pkcs8, random_pkcs8,
+            "seed-derived must differ from random"
+        );
     }
 }

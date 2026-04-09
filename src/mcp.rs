@@ -15,7 +15,7 @@
 //! }
 //! ```
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::io::{self, BufRead, Write};
 
 use crate::{chat, store};
@@ -277,9 +277,7 @@ fn handle_tools_list() -> Result<Value, String> {
 }
 
 fn handle_tools_call(req: &Value) -> Result<Value, String> {
-    let tool_name = req["params"]["name"]
-        .as_str()
-        .ok_or("Missing tool name")?;
+    let tool_name = req["params"]["name"].as_str().ok_or("Missing tool name")?;
     let args = &req["params"]["arguments"];
 
     let result = match tool_name {
@@ -341,7 +339,8 @@ fn tool_read(args: &Value) -> Result<String, String> {
             .unwrap_or_default();
         let from = msg["from"].as_str().unwrap_or("?");
         let text = msg["text"].as_str().unwrap_or("");
-        let id = &msg["id"].as_str().unwrap_or("?")[..6.min(msg["id"].as_str().unwrap_or("?").len())];
+        let id =
+            &msg["id"].as_str().unwrap_or("?")[..6.min(msg["id"].as_str().unwrap_or("?").len())];
         out.push_str(&format!("[{dt}] [{id}] {from}: {text}\n"));
     }
     Ok(out)
@@ -357,7 +356,8 @@ fn tool_check(args: &Value) -> Result<String, String> {
     for msg in &msgs {
         let from = msg["from"].as_str().unwrap_or("?");
         let text = msg["text"].as_str().unwrap_or("");
-        let id = &msg["id"].as_str().unwrap_or("?")[..6.min(msg["id"].as_str().unwrap_or("?").len())];
+        let id =
+            &msg["id"].as_str().unwrap_or("?")[..6.min(msg["id"].as_str().unwrap_or("?").len())];
         out.push_str(&format!("[{id}] {from}: {text}\n"));
     }
     Ok(out)
@@ -420,21 +420,44 @@ fn tool_who(args: &Value) -> Result<String, String> {
     let online_only = args["online_only"].as_bool().unwrap_or(false);
     let members = chat::who(room, online_only)?;
     if members.is_empty() {
-        return Ok(if online_only { "No one online.".to_string() } else { "No members tracked.".to_string() });
+        return Ok(if online_only {
+            "No one online.".to_string()
+        } else {
+            "No members tracked.".to_string()
+        });
     }
     let me = store::get_agent_id();
     let now_ts = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
     let mut out = format!("{:<12} {:<8} {:<8} Last seen\n", "Agent", "Role", "Status");
     for m in &members {
         let role = format!("{:?}", m.role);
         let marker = if m.agent_id == me { " (you)" } else { "" };
-        let status = if m.last_seen > 0 && now_ts - m.last_seen < 300 { "online" } else if m.last_seen > 0 { "offline" } else { "unknown" };
+        let status = if m.last_seen > 0 && now_ts - m.last_seen < 300 {
+            "online"
+        } else if m.last_seen > 0 {
+            "offline"
+        } else {
+            "unknown"
+        };
         let seen = if m.last_seen > 0 {
             let ago = now_ts - m.last_seen;
-            if ago < 60 { format!("{ago}s ago") } else if ago < 3600 { format!("{}m ago", ago / 60) } else { format!("{}h ago", ago / 3600) }
-        } else { "never".to_string() };
-        out.push_str(&format!("{:<12} {:<8} {:<8} {seen}{marker}\n", m.agent_id, role, status));
+            if ago < 60 {
+                format!("{ago}s ago")
+            } else if ago < 3600 {
+                format!("{}m ago", ago / 60)
+            } else {
+                format!("{}h ago", ago / 3600)
+            }
+        } else {
+            "never".to_string()
+        };
+        out.push_str(&format!(
+            "{:<12} {:<8} {:<8} {seen}{marker}\n",
+            m.agent_id, role, status
+        ));
     }
     Ok(out)
 }
