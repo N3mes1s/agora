@@ -1145,6 +1145,39 @@ pub fn recover_stale_leases(room_id: &str) -> Vec<SandboxLease> {
     recovered
 }
 
+// ── Sandbox session ownership ──────────────────────────────────
+
+/// Persist the mapping session_id → agent_id so exec/destroy can verify ownership.
+pub fn save_sandbox_session_owner(session_id: &str, agent_id: &str) {
+    let path = agora_dir().join("sandbox_sessions.json");
+    let mut map: std::collections::HashMap<String, String> = if let Ok(data) = fs::read_to_string(&path) {
+        serde_json::from_str(&data).unwrap_or_default()
+    } else {
+        std::collections::HashMap::new()
+    };
+    map.insert(session_id.to_string(), agent_id.to_string());
+    let _ = fs::write(&path, serde_json::to_string(&map).unwrap());
+}
+
+/// Return the agent_id that created this session, or None if unknown.
+pub fn get_sandbox_session_owner(session_id: &str) -> Option<String> {
+    let path = agora_dir().join("sandbox_sessions.json");
+    let data = fs::read_to_string(&path).ok()?;
+    let map: std::collections::HashMap<String, String> = serde_json::from_str(&data).ok()?;
+    map.get(session_id).cloned()
+}
+
+/// Remove a session from the ownership registry after it is destroyed.
+pub fn remove_sandbox_session(session_id: &str) {
+    let path = agora_dir().join("sandbox_sessions.json");
+    if let Ok(data) = fs::read_to_string(&path) {
+        if let Ok(mut map) = serde_json::from_str::<std::collections::HashMap<String, String>>(&data) {
+            map.remove(session_id);
+            let _ = fs::write(&path, serde_json::to_string(&map).unwrap());
+        }
+    }
+}
+
 // ── Role Leases ────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1595,6 +1628,35 @@ mod tests {
         let fresh = persisted.iter().find(|l| l.id == "fresh-sandbox").unwrap();
         assert_eq!(stale.status, LeaseStatus::Closed);
         assert_eq!(fresh.status, LeaseStatus::Active);
+
+        if let Some(old) = old_home { unsafe { env::set_var("HOME", old); } }
+        else { unsafe { env::remove_var("HOME"); } }
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn sandbox_session_owner_round_trips() {
+        let _guard = test_env_lock().lock().unwrap();
+        let home = test_home("session-owner");
+        let agora = home.join(".agora");
+        let _ = fs::remove_dir_all(&home);
+        fs::create_dir_all(&agora).unwrap();
+        let old_home = env::var("HOME").ok();
+        unsafe { env::set_var("HOME", &home); }
+
+        // Save two sessions owned by different agents
+        save_sandbox_session_owner("sess-abc", "agent-alice");
+        save_sandbox_session_owner("sess-xyz", "agent-bob");
+
+        assert_eq!(get_sandbox_session_owner("sess-abc"), Some("agent-alice".to_string()));
+        assert_eq!(get_sandbox_session_owner("sess-xyz"), Some("agent-bob".to_string()));
+        assert_eq!(get_sandbox_session_owner("sess-unknown"), None);
+
+        // Remove one
+        remove_sandbox_session("sess-abc");
+        assert_eq!(get_sandbox_session_owner("sess-abc"), None);
+        // Other session unaffected
+        assert_eq!(get_sandbox_session_owner("sess-xyz"), Some("agent-bob".to_string()));
 
         if let Some(old) = old_home { unsafe { env::set_var("HOME", old); } }
         else { unsafe { env::remove_var("HOME"); } }

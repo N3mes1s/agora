@@ -3002,6 +3002,15 @@ pub fn task_done(task_id: &str, notes: Option<&str>, room_label: Option<&str>) -
     let mut tasks = store::load_tasks(&room.room_id);
     let task = tasks.iter_mut().find(|t| t.id.starts_with(task_id))
         .ok_or_else(|| format!("No task matching '{task_id}'"))?;
+    // Enforce ownership: only the claiming agent (or an unclaimed task owner) can mark done.
+    if let Some(claimed_by) = task.claimed_by.as_deref() {
+        if claimed_by != me {
+            return Err(format!(
+                "Task '{}' is claimed by '{}' — only they can mark it done.",
+                task.id, claimed_by
+            ));
+        }
+    }
     task.status = "done".to_string();
     task.updated_at = now();
     if let Some(n) = notes { task.notes = Some(n.to_string()); }

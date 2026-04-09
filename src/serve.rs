@@ -1110,6 +1110,8 @@ fn handle_connection(stream: TcpStream) {
             // Bug fix: always use the verified agent_id from the token
             match sandbox::create(&verified_agent_id) {
                 Ok(session) => {
+                    // Record ownership so exec/destroy can verify later.
+                    store::save_sandbox_session_owner(&session.id, &verified_agent_id);
                     let resp = serde_json::json!({
                         "id": session.id,
                         "provider": session.provider,
@@ -1128,13 +1130,26 @@ fn handle_connection(stream: TcpStream) {
                 Ok(v) => v,
                 Err(e) => { send_json(stream, 401, &format!(r#"{{"error":"{}"}}"#, e)); return; }
             };
-            let _ = verified_agent_id; // TODO: verify session belongs to this agent
             let session_id = form_field(body, "session_id").unwrap_or_default();
             let command = form_field(body, "command").unwrap_or_default();
             let provider = form_field(body, "provider").unwrap_or_else(|| "daytona".to_string());
             if session_id.is_empty() || command.is_empty() {
                 send_json(stream, 400, r#"{"error":"session_id and command required"}"#);
                 return;
+            }
+            // Verify the calling agent owns this session.
+            match store::get_sandbox_session_owner(&session_id) {
+                Some(owner) if owner != verified_agent_id => {
+                    send_json(stream, 403, r#"{"error":"not your sandbox session"}"#);
+                    return;
+                }
+                None => {
+                    // Session not in registry — may be from before ownership tracking.
+                    // Deny by default (fail-closed).
+                    send_json(stream, 403, r#"{"error":"sandbox session not found or ownership unknown"}"#);
+                    return;
+                }
+                _ => {} // owner == verified_agent_id — proceed
             }
             match sandbox::exec(&session_id, &command, &provider) {
                 Ok(output) => send_json(stream, 200, &serde_json::json!({"output": output}).to_string()),
@@ -1149,15 +1164,29 @@ fn handle_connection(stream: TcpStream) {
                 Ok(v) => v,
                 Err(e) => { send_json(stream, 401, &format!(r#"{{"error":"{}"}}"#, e)); return; }
             };
-            let _ = verified_agent_id; // TODO: verify session belongs to this agent
             let session_id = form_field(body, "session_id").unwrap_or_default();
             let provider = form_field(body, "provider").unwrap_or_else(|| "daytona".to_string());
             if session_id.is_empty() {
                 send_json(stream, 400, r#"{"error":"session_id required"}"#);
                 return;
             }
+            // Verify the calling agent owns this session.
+            match store::get_sandbox_session_owner(&session_id) {
+                Some(owner) if owner != verified_agent_id => {
+                    send_json(stream, 403, r#"{"error":"not your sandbox session"}"#);
+                    return;
+                }
+                None => {
+                    send_json(stream, 403, r#"{"error":"sandbox session not found or ownership unknown"}"#);
+                    return;
+                }
+                _ => {} // owner == verified_agent_id — proceed
+            }
             match sandbox::destroy(&session_id, &provider) {
-                Ok(()) => send_json(stream, 200, r#"{"status":"destroyed"}"#),
+                Ok(()) => {
+                    store::remove_sandbox_session(&session_id);
+                    send_json(stream, 200, r#"{"status":"destroyed"}"#)
+                }
                 Err(e) => send_json(stream, 500, &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'"))),
             }
         }
@@ -1359,6 +1388,10 @@ fn handle_connection(stream: TcpStream) {
         // JSON body: {"action": "claim"|"done"|"checkpoint", "room": "...", "notes": "..."}
         // Returns the updated task object.
         ("PATCH", ["api", "v1", "tasks", task_id]) => {
+            if let Err(e) = verify_bearer_agent_token(&raw) {
+                send_json(stream, 401, &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'")));
+                return;
+            }
             let parsed: serde_json::Value = match serde_json::from_str(body) {
                 Ok(v) => v,
                 Err(_) => {
@@ -1397,8 +1430,13 @@ fn handle_connection(stream: TcpStream) {
         }
 
         // GET /api/payments/history — list payment history for the calling agent
+        // Requires: Bearer agent token (payment data is sensitive).
         // Query param: room=plaza
         ("GET", ["api", "payments", "history"]) => {
+            if let Err(e) = verify_bearer_agent_token(&raw) {
+                send_json(stream, 401, &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'")));
+                return;
+            }
             let room = path.split_once('?').and_then(|(_, qs)| {
                 qs.split('&').find_map(|kv| {
                     let mut parts = kv.splitn(2, '=');
