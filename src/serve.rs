@@ -1771,6 +1771,56 @@ fn handle_connection(stream: TcpStream) {
             }
         }
 
+        // POST /api/v1/bounties/:id/contribute — contribute credits to an open bounty (crowdfunding)
+        // JSON body: {"amount": <credits>, "room": "..."}
+        // Returns: {"bounty_id": "...", "contributed": <amount>, "pool": <new_total>}
+        // Requires Bearer auth.
+        ("POST", ["api", "v1", "bounties", task_id, "contribute"]) => {
+            let _caller = match verify_bearer_agent_token(&raw) {
+                Ok(id) => id,
+                Err(e) => {
+                    send_json(
+                        stream,
+                        401,
+                        &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'")),
+                    );
+                    return;
+                }
+            };
+            let tid = task_id.to_string();
+            let parsed: serde_json::Value = match serde_json::from_str(body) {
+                Ok(v) => v,
+                Err(_) => {
+                    send_json(stream, 400, r#"{"error":"invalid JSON body"}"#);
+                    return;
+                }
+            };
+            let amount = match parsed["amount"].as_i64().filter(|&n| n > 0) {
+                Some(n) => n,
+                None => {
+                    send_json(
+                        stream,
+                        400,
+                        r#"{"error":"amount (positive integer) is required"}"#,
+                    );
+                    return;
+                }
+            };
+            let room_label = parsed["room"].as_str().map(|s| s.to_string());
+            match chat::bounty_contribute(&tid, amount, room_label.as_deref()) {
+                Ok(pool) => {
+                    let resp =
+                        serde_json::json!({"bounty_id": tid, "contributed": amount, "pool": pool});
+                    send_json(stream, 200, &resp.to_string());
+                }
+                Err(e) => send_json(
+                    stream,
+                    400,
+                    &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'")),
+                ),
+            }
+        }
+
         // GET /api/v1/tasks — list tasks in a room (JSON)
         // Query params: room=<label|id>  status=open|claimed|done  (both optional)
         ("GET", ["api", "v1", "tasks"]) => {
@@ -4384,5 +4434,51 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_str(body).unwrap();
         let to = parsed["to"].as_str().filter(|s| !s.is_empty());
         assert!(to.is_none());
+    }
+
+    // ── Bounty Contribute API tests ───────────────────────────────────────
+
+    #[test]
+    fn bounty_contribute_route_segments() {
+        let path = "/api/v1/bounties/abc123def456/contribute";
+        let segments: Vec<&str> = path.trim_start_matches('/').split('/').collect();
+        assert_eq!(
+            segments,
+            vec!["api", "v1", "bounties", "abc123def456", "contribute"]
+        );
+        assert_eq!(segments[3], "abc123def456"); // bounty_id
+        assert_eq!(segments[4], "contribute");
+    }
+
+    #[test]
+    fn bounty_contribute_body_parsing() {
+        let body = r#"{"amount": 50, "room": "plaza"}"#;
+        let parsed: serde_json::Value = serde_json::from_str(body).unwrap();
+        assert_eq!(parsed["amount"].as_i64(), Some(50));
+        assert_eq!(parsed["room"].as_str(), Some("plaza"));
+    }
+
+    #[test]
+    fn bounty_contribute_negative_amount_rejected() {
+        let body = r#"{"amount": -10, "room": "plaza"}"#;
+        let parsed: serde_json::Value = serde_json::from_str(body).unwrap();
+        let amount = parsed["amount"].as_i64().filter(|&n| n > 0);
+        assert!(amount.is_none(), "negative amount must be rejected");
+    }
+
+    #[test]
+    fn bounty_contribute_zero_amount_rejected() {
+        let body = r#"{"amount": 0}"#;
+        let parsed: serde_json::Value = serde_json::from_str(body).unwrap();
+        let amount = parsed["amount"].as_i64().filter(|&n| n > 0);
+        assert!(amount.is_none(), "zero amount must be rejected");
+    }
+
+    #[test]
+    fn bounty_contribute_missing_amount_rejected() {
+        let body = r#"{"room": "plaza"}"#;
+        let parsed: serde_json::Value = serde_json::from_str(body).unwrap();
+        let amount = parsed["amount"].as_i64().filter(|&n| n > 0);
+        assert!(amount.is_none(), "missing amount must be rejected");
     }
 }
