@@ -6149,6 +6149,31 @@ mod tests {
         }
     }
 
+    /// economy_stats seed rewards must match what seed_credit_reward() actually returns.
+    /// Previously hardcoded to 50/250 while the function returned 0 — the API lied.
+    #[test]
+    fn economy_stats_seed_rewards_match_credit_function() {
+        let _guard = store::test_env_lock().lock().unwrap();
+        let (_home, _room) = setup_plaza_room("stats-test-agent", Role::Admin);
+        let stats = super::economy_stats();
+        let rewards = &stats["seeds"]["rewards"];
+        assert_eq!(
+            rewards["easy_credits"].as_i64(),
+            Some(super::seed_credit_reward("easy")),
+            "easy_credits must match seed_credit_reward(\"easy\")"
+        );
+        assert_eq!(
+            rewards["medium_credits"].as_i64(),
+            Some(super::seed_credit_reward("medium")),
+            "medium_credits must match seed_credit_reward(\"medium\")"
+        );
+        assert_eq!(
+            rewards["hard_credits"].as_i64(),
+            Some(super::seed_credit_reward("hard")),
+            "hard_credits must match seed_credit_reward(\"hard\")"
+        );
+    }
+
     #[test]
     fn task_add_as_records_verified_creator() {
         let _guard = store::test_env_lock().lock().unwrap();
@@ -6906,9 +6931,9 @@ pub fn economy_stats() -> serde_json::Value {
             "solved": total_seeds_solved,
             "pending": total_seeds_pending,
             "rewards": {
-                "easy_credits": 0,
-                "medium_credits": 50,
-                "hard_credits": 250,
+                "easy_credits": seed_credit_reward("easy"),
+                "medium_credits": seed_credit_reward("medium"),
+                "hard_credits": seed_credit_reward("hard"),
             },
         },
         "rooms": room_stats,
