@@ -2929,10 +2929,10 @@ fn publish_task_receipt(
     let room_key = crypto::derive_room_key(&room.secret, &room.room_id);
     let receipt = build_work_receipt(room, task, agent_id, status, notes, created_at);
     store::upsert_work_receipt(&room.room_id, &receipt);
-    let verb = if status == "checkpoint" {
-        "checkpointed"
-    } else {
-        "completed"
+    let verb = match status {
+        "checkpoint" => "checkpointed",
+        "rejected" => "rejected",
+        _ => "completed",
     };
     let receipt_env = json!({
         "v": VERSION,
@@ -3128,6 +3128,69 @@ pub fn task_checkpoint_as(
         agent_id,
         "checkpoint",
         checkpoint_notes.as_deref(),
+        task_snapshot.updated_at,
+    );
+    Ok(tid)
+}
+
+/// Reject a task and, if currently claimed by the rejecting agent, return it to the open pool.
+pub fn task_reject(task_id: &str, notes: Option<&str>, room_label: Option<&str>) -> Result<String, String> {
+    let me = store::get_agent_id();
+    task_reject_as(&me, task_id, notes, room_label)
+}
+
+/// Reject a task on behalf of a verified agent.
+pub fn task_reject_as(
+    agent_id: &str,
+    task_id: &str,
+    notes: Option<&str>,
+    room_label: Option<&str>,
+) -> Result<String, String> {
+    let room = resolve_room(room_label)?;
+    let mut tasks = store::load_tasks(&room.room_id);
+    let task = tasks
+        .iter_mut()
+        .find(|t| t.id.starts_with(task_id) && t.status != "done")
+        .ok_or_else(|| format!("No active task matching '{task_id}'"))?;
+
+    if let Some(claimed_by) = task.claimed_by.as_deref() {
+        if claimed_by != agent_id {
+            return Err(format!("Task '{}' is currently claimed by '{}'.", task.id, claimed_by));
+        }
+        task.status = "open".to_string();
+        task.claimed_by = None;
+    }
+
+    task.updated_at = now();
+    if let Some(note) = notes {
+        task.notes = Some(note.to_string());
+    }
+    let rejection_notes = notes.map(|note| note.to_string()).or_else(|| task.notes.clone());
+    let task_snapshot = task.clone();
+    let title = task_snapshot.title.clone();
+    let tid = task_snapshot.id.clone();
+    store::save_tasks(&room.room_id, &tasks);
+
+    let note_str = rejection_notes
+        .as_deref()
+        .map(|note| format!(" — {note}"))
+        .unwrap_or_default();
+    let room_key = crypto::derive_room_key(&room.secret, &room.room_id);
+    let env = make_envelope_from(
+        agent_id,
+        &format!("[task] Rejected by {agent_id}: {title}{note_str}"),
+        None,
+    );
+    let encrypted = encrypt_envelope(&env, &room_key, &room.room_id);
+    transport::publish(&room.room_id, &encrypted);
+    store::save_message(&room.room_id, &env);
+
+    publish_task_receipt(
+        &room,
+        &task_snapshot,
+        agent_id,
+        "rejected",
+        rejection_notes.as_deref(),
         task_snapshot.updated_at,
     );
     Ok(tid)
@@ -4346,7 +4409,7 @@ mod tests {
         should_display_message, signing_message_bytes, soma_churn_decay, soma_correct,
         bounty_expire_check, bounty_post, bounty_submit, bounty_verify, stale_claim_weight,
         task_add, task_add_as, task_add_with_oracle, task_checkpoint_as, task_claim_as,
-        task_done_as,
+        task_done_as, task_reject_as,
         task_checkpoint, task_done, unpin,
         verified_solana_deposit_from_tx, SignedWirePayload, VerifiedSolanaDeposit,
         SIGNED_WIRE_VERSION, BASE64, DISCOVERY_POSITIVE_HALF_LIFE_SECS,
@@ -5555,6 +5618,51 @@ mod tests {
                 .all(|m| m["from"].as_str() == Some("api-agent")),
             "task lifecycle messages should use verified caller identity"
         );
+    }
+
+    #[test]
+    fn task_reject_as_reopens_claimed_task_for_verified_agent() {
+        let _guard = store::test_env_lock().lock().unwrap();
+        let (_home, room) = setup_plaza_room("server-host", Role::Admin);
+
+        let task_id = task_add_as("api-agent", "Review shady task", None).unwrap();
+        task_claim_as("api-agent", &task_id, None).unwrap();
+        let rejected = task_reject_as("api-agent", &task_id, Some("scope is abusive"), None).unwrap();
+        assert_eq!(rejected, task_id);
+
+        let tasks = store::load_tasks(&room.room_id);
+        let task = tasks.iter().find(|t| t.id == task_id).expect("task saved");
+        assert_eq!(task.status, "open");
+        assert_eq!(task.claimed_by, None);
+        assert_eq!(task.notes.as_deref(), Some("scope is abusive"));
+
+        let receipts = store::load_work_receipts(&room.room_id);
+        let receipt = receipts
+            .iter()
+            .find(|r| r.task_id == task_id && r.status == "rejected")
+            .expect("rejection receipt saved");
+        assert_eq!(receipt.agent_id, "api-agent");
+        assert_eq!(receipt.notes.as_deref(), Some("scope is abusive"));
+
+        let messages = store::load_messages(&room.room_id, 3600);
+        let reject_msg = messages
+            .iter()
+            .find(|m| m["text"].as_str().unwrap_or("").contains("Rejected by api-agent"))
+            .expect("reject message saved");
+        assert_eq!(reject_msg["from"].as_str(), Some("api-agent"));
+    }
+
+    #[test]
+    fn task_reject_as_refuses_other_agents_claim() {
+        let _guard = store::test_env_lock().lock().unwrap();
+        let (_home, _room) = setup_plaza_room("server-host", Role::Admin);
+
+        let task_id = task_add_as("creator", "Review shady task", None).unwrap();
+        task_claim_as("builder-agent", &task_id, None).unwrap();
+
+        let err = task_reject_as("other-agent", &task_id, Some("not mine"), None)
+            .expect_err("other agents must not reject a claimed task they do not hold");
+        assert!(err.contains("currently claimed by 'builder-agent'"));
     }
 
     /// Medium seeds now reward 50 credits (10x from the old 5).

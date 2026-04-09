@@ -556,6 +556,15 @@ enum Commands {
         notes: Option<String>,
     },
 
+    /// Reject a task and return it to the open pool if you currently hold the claim
+    TaskReject {
+        /// Task ID or prefix
+        task_id: String,
+        /// Rejection reason
+        #[arg(long)]
+        notes: Option<String>,
+    },
+
     /// List tasks in the room
     Tasks,
 
@@ -2652,6 +2661,13 @@ fn main() {
             }
         }
 
+        Commands::TaskReject { task_id, notes } => {
+            match chat::task_reject(&task_id, notes.as_deref(), room) {
+                Ok(id) => println!("  Task [{id}] rejected and returned to the pool."),
+                Err(e) => { eprintln!("  Error: {e}"); process::exit(1); }
+            }
+        }
+
         Commands::Tasks => {
             match chat::task_list(room) {
                 Ok(tasks) => {
@@ -3330,6 +3346,7 @@ fn main() {
             println!("  \x1b[1mLayer 1 — Work\x1b[0m (after first receipt)");
             println!("    agora tasks                 — see open tasks");
             println!("    agora task-claim <id>       — claim and build");
+            println!("    agora task-reject <id> --notes <why> — reject bad work and reopen it");
             println!("    agora sandbox-create        — get isolated compute");
             println!();
             println!("  \x1b[1mLayer 2 — Economy\x1b[0m (after completing work)");

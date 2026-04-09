@@ -1553,7 +1553,7 @@ fn handle_connection(stream: TcpStream) {
         }
 
         // PATCH /api/v1/tasks/:id — update task status
-        // JSON body: {"action": "claim"|"done"|"checkpoint", "room": "...", "notes": "..."}
+        // JSON body: {"action": "claim"|"done"|"checkpoint"|"reject", "room": "...", "notes": "..."}
         // Returns the updated task object.
         ("PATCH", ["api", "v1", "tasks", task_id]) => {
             let agent_id = match verify_bearer_agent_token(&raw) {
@@ -1573,7 +1573,7 @@ fn handle_connection(stream: TcpStream) {
             let action = match parsed["action"].as_str().filter(|s| !s.is_empty()) {
                 Some(a) => a.to_string(),
                 None => {
-                    send_json(stream, 400, r#"{"error":"action is required (claim|done|checkpoint)"}"#);
+                    send_json(stream, 400, r#"{"error":"action is required (claim|done|checkpoint|reject)"}"#);
                     return;
                 }
             };
@@ -1586,7 +1586,10 @@ fn handle_connection(stream: TcpStream) {
                 "checkpoint" => {
                     chat::task_checkpoint_as(&agent_id, &tid, notes.as_deref(), room_label.as_deref())
                 }
-                _ => Err(format!("Unknown action '{}'; use claim|done|checkpoint", action)),
+                "reject" => {
+                    chat::task_reject_as(&agent_id, &tid, notes.as_deref(), room_label.as_deref())
+                }
+                _ => Err(format!("Unknown action '{}'; use claim|done|checkpoint|reject", action)),
             };
             match result {
                 Ok(_) => {
@@ -2051,6 +2054,49 @@ mod tests {
             })
             .expect("claim message saved");
         assert_eq!(claim_msg["from"].as_str(), Some("api-agent"));
+    }
+
+    #[test]
+    fn test_patch_tasks_reject_reopens_task_for_verified_identity() {
+        let _guard = crate::store::test_env_lock().lock().unwrap();
+        let home = std::env::temp_dir().join(format!(
+            "agora-serve-patch-reject-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&home).unwrap();
+        unsafe {
+            std::env::set_var("HOME", &home);
+            std::env::set_var("AGORA_AGENT_ID", "serve-host");
+            std::env::set_var("AGORA_SANDBOX_SECRET", "serve-test-secret");
+        }
+
+        let room = store::add_room("ag-serve-test", "secret", "plaza", store::Role::Admin);
+        let task_id = crate::chat::task_add_as("creator", "Review shady task", None).unwrap();
+        crate::chat::task_claim_as("api-agent", &task_id, None).unwrap();
+        let token = crate::sandbox::generate_agent_token("api-agent", 1);
+
+        let body = format!(
+            r#"{{"action":"reject","room":"{}","notes":"scope is abusive"}}"#,
+            room.room_id
+        );
+        let raw = format!(
+            "PATCH /api/v1/tasks/{task_id} HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {token}\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        );
+        let response = serve_once(&raw);
+        assert!(
+            response.starts_with("HTTP/1.1 200 OK"),
+            "expected 200 response, got: {response}"
+        );
+
+        let tasks = crate::store::load_tasks(&room.room_id);
+        let task = tasks.iter().find(|t| t.id == task_id).expect("task saved");
+        assert_eq!(task.status, "open");
+        assert_eq!(task.claimed_by, None);
+        assert_eq!(task.notes.as_deref(), Some("scope is abusive"));
     }
 
     #[test]
