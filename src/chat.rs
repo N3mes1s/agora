@@ -1731,6 +1731,9 @@ pub fn bounty_post(
         .unwrap_or_default();
 
     if let Some(reward) = reward_credits {
+        if reward <= 0 {
+            return Err(format!("Bounty reward must be positive, got {reward}"));
+        }
         let balance = store::credit_balance(&room.room_id, &me);
         if balance < reward {
             return Err(format!(
@@ -1843,6 +1846,21 @@ pub fn bounty_submit(task_id: &str, branch: &str, room_label: Option<&str>) -> R
     let task = tasks.iter_mut()
         .find(|t| t.id.starts_with(task_id))
         .ok_or_else(|| format!("No task matching '{task_id}'"))?;
+
+    // Reject submissions to non-open bounties (expired, done, claimed).
+    // Accepting submissions after expiry could allow gaming the refund+reward flow.
+    if task.status != "open" {
+        return Err(format!(
+            "Bounty '{task_id}' is '{}' — only open bounties accept submissions",
+            task.status
+        ));
+    }
+    // Also reject if the deadline has already passed (belt-and-suspenders with expire_check).
+    if let Some(exp) = task.expires_at {
+        if now() >= exp {
+            return Err(format!("Bounty '{task_id}' deadline has passed — no longer accepting submissions"));
+        }
+    }
 
     // Prevent bounty poster from submitting to their own bounty (anti-self-dealing)
     if task.created_by == me {
@@ -1964,6 +1982,15 @@ pub fn bounty_verify(task_id: &str, agent_id: &str, room_label: Option<&str>) ->
     let task = tasks.iter_mut()
         .find(|t| t.id.starts_with(task_id))
         .ok_or_else(|| format!("No task matching '{task_id}'"))?;
+    // Guard against double-spend: only open bounties can be verified.
+    // A task that is "done" (already paid) or "expired" (credits refunded to poster)
+    // must not be re-verified, as that would award credits a second time from thin air.
+    if task.status != "open" {
+        return Err(format!(
+            "Bounty '{task_id}' is '{}' — only open bounties can be verified",
+            task.status
+        ));
+    }
     let oracle = task.acceptance_oracle.clone()
         .ok_or_else(|| "Task has no acceptance_oracle configured".to_string())?;
     let sub = task.submissions.iter_mut()
@@ -5930,7 +5957,8 @@ pub fn economy_stats() -> serde_json::Value {
 
         room_stats.push(serde_json::json!({
             "room": room.label,
-            "room_id": room.room_id,
+            // room_id intentionally omitted — it is a private channel identifier
+            // that could be used to spam-publish to the ntfy.sh channel.
             "credits_in_circulation": room_credits,
             "trust_issued": room_trust,
             "open_bounties": room_open.len(),

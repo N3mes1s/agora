@@ -1359,6 +1359,10 @@ fn handle_connection(stream: TcpStream) {
         // JSON body: {"action": "claim"|"done"|"checkpoint", "room": "...", "notes": "..."}
         // Returns the updated task object.
         ("PATCH", ["api", "v1", "tasks", task_id]) => {
+            if verify_bearer_agent_token(&raw).is_err() {
+                send_json(stream, 401, r#"{"error":"Bearer token required"}"#);
+                return;
+            }
             let parsed: serde_json::Value = match serde_json::from_str(body) {
                 Ok(v) => v,
                 Err(_) => {
