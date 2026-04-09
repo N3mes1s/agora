@@ -987,6 +987,27 @@ pub struct PaymentRecord {
     pub updated_at: u64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SandboxAuditRecord {
+    pub id: String,
+    pub ts: u64,
+    pub agent_id: String,
+    #[serde(default)]
+    pub room_id: Option<String>,
+    pub action: String,
+    #[serde(default)]
+    pub session_id: Option<String>,
+    #[serde(default)]
+    pub provider: Option<String>,
+    #[serde(default)]
+    pub command_hash: Option<String>,
+    #[serde(default)]
+    pub command_len: Option<usize>,
+    pub outcome: String,
+    #[serde(default)]
+    pub detail: Option<String>,
+}
+
 pub fn load_payments() -> Vec<PaymentRecord> {
     let path = agora_dir().join("payments.json");
     if let Ok(data) = fs::read_to_string(&path) {
@@ -1010,6 +1031,31 @@ pub fn find_payment_by_reference(reference: &str) -> Option<PaymentRecord> {
     load_payments()
         .into_iter()
         .find(|p| p.stripe_id.as_deref() == Some(reference))
+}
+
+pub fn load_sandbox_audit() -> Vec<SandboxAuditRecord> {
+    let path = agora_dir().join("sandbox_audit.jsonl");
+    let Ok(data) = fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    data.lines()
+        .filter_map(|line| serde_json::from_str::<SandboxAuditRecord>(line).ok())
+        .collect()
+}
+
+pub fn append_sandbox_audit(record: &SandboxAuditRecord) {
+    use std::io::Write;
+
+    let dir = agora_dir();
+    ensure_dir(&dir);
+    let path = dir.join("sandbox_audit.jsonl");
+    let Ok(mut file) = fs::OpenOptions::new().create(true).append(true).open(path) else {
+        return;
+    };
+    let Ok(line) = serde_json::to_string(record) else {
+        return;
+    };
+    let _ = writeln!(file, "{line}");
 }
 
 // ── Calibration Seeds ──────────────────────────────────────────
@@ -1530,6 +1576,48 @@ mod tests {
         let dollars_in_cents = 1000i64;
         let credits = dollars_in_cents * CREDITS_PER_USD_CENT;
         assert_eq!(credits, 10000);
+    }
+
+    #[test]
+    fn sandbox_audit_round_trips() {
+        let _guard = test_env_lock().lock().unwrap();
+        let home = test_home("sandbox-audit");
+        let agora = home.join(".agora");
+        let _ = fs::remove_dir_all(&home);
+        fs::create_dir_all(&agora).unwrap();
+
+        let old_home = env::var("HOME").ok();
+        unsafe { env::set_var("HOME", &home); }
+
+        let record = SandboxAuditRecord {
+            id: "audit-1".to_string(),
+            ts: 1700000000,
+            agent_id: "agent-abc".to_string(),
+            room_id: Some("room-1".to_string()),
+            action: "exec".to_string(),
+            session_id: Some("session-1".to_string()),
+            provider: Some("daytona".to_string()),
+            command_hash: Some("deadbeef".to_string()),
+            command_len: Some(12),
+            outcome: "success".to_string(),
+            detail: None,
+        };
+
+        append_sandbox_audit(&record);
+        let loaded = load_sandbox_audit();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].id, "audit-1");
+        assert_eq!(loaded[0].agent_id, "agent-abc");
+        assert_eq!(loaded[0].room_id.as_deref(), Some("room-1"));
+        assert_eq!(loaded[0].action, "exec");
+        assert_eq!(loaded[0].command_len, Some(12));
+
+        if let Some(old) = old_home {
+            unsafe { env::set_var("HOME", old); }
+        } else {
+            unsafe { env::remove_var("HOME"); }
+        }
+        let _ = fs::remove_dir_all(&home);
     }
 
     #[test]

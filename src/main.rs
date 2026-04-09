@@ -360,6 +360,9 @@ enum Commands {
         session_id: String,
     },
 
+    /// Show your sandbox audit trail
+    SandboxAudit,
+
     /// List available sandbox providers
     SandboxProviders,
 
@@ -2249,6 +2252,51 @@ fn main() {
                     println!("  Sandbox destroyed.");
                 }
                 Err(e) => { eprintln!("  Error: {e}"); process::exit(1); }
+            }
+        }
+
+        Commands::SandboxAudit => {
+            let me = store::get_agent_id();
+            let room_filter = room
+                .and_then(|label| store::find_room(label).map(|entry| entry.room_id));
+            let records: Vec<_> = store::load_sandbox_audit()
+                .into_iter()
+                .filter(|record| record.agent_id == me)
+                .filter(|record| {
+                    room_filter
+                        .as_deref()
+                        .map(|room_id| record.room_id.as_deref() == Some(room_id))
+                        .unwrap_or(true)
+                })
+                .collect();
+            if records.is_empty() {
+                println!("  No sandbox audit events.");
+                return;
+            }
+            for record in records {
+                let room_tag = record.room_id.as_deref().unwrap_or("-");
+                let session = record.session_id.as_deref().unwrap_or("-");
+                let provider = record.provider.as_deref().unwrap_or("-");
+                let command = match (record.command_hash.as_deref(), record.command_len) {
+                    (Some(hash), Some(len)) => format!(" cmd={hash}/{len}b"),
+                    _ => String::new(),
+                };
+                let detail = record
+                    .detail
+                    .as_deref()
+                    .map(|s| format!(" — {s}"))
+                    .unwrap_or_default();
+                println!(
+                    "  [{}] {} room={} session={} provider={} outcome={}{}{}",
+                    ts(record.ts),
+                    record.action,
+                    room_tag,
+                    session,
+                    provider,
+                    record.outcome,
+                    command,
+                    detail
+                );
             }
         }
 

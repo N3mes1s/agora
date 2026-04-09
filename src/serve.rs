@@ -11,7 +11,7 @@ use std::io::{Read as IoRead, Write as IoWrite};
 use std::net::{TcpListener, TcpStream};
 use std::thread;
 use crate::sandbox;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::{chat, store};
 
@@ -872,6 +872,68 @@ fn verify_bearer_agent_token(raw: &str) -> Result<String, String> {
     Ok(agent_id)
 }
 
+fn audit_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+}
+
+fn sandbox_audit_id(
+    agent_id: &str,
+    action: &str,
+    session_id: Option<&str>,
+    ts: u64,
+) -> String {
+    use ring::digest;
+    let input = format!(
+        "agora-sandbox-audit-v1\n{agent_id}\n{action}\n{}\n{ts}",
+        session_id.unwrap_or("")
+    );
+    let hash = digest::digest(&digest::SHA256, input.as_bytes());
+    format!("audit-{}", hex::encode(&hash.as_ref()[..4]))
+}
+
+fn command_fingerprint(command: &str) -> (String, usize) {
+    use ring::digest;
+    let hash = digest::digest(&digest::SHA256, command.as_bytes());
+    (hex::encode(hash.as_ref()), command.len())
+}
+
+fn append_sandbox_audit(
+    agent_id: &str,
+    room_id: Option<&str>,
+    action: &str,
+    session_id: Option<&str>,
+    provider: Option<&str>,
+    command: Option<&str>,
+    outcome: &str,
+    detail: Option<&str>,
+) {
+    let ts = audit_now();
+    let (command_hash, command_len) = match command {
+        Some(command) => {
+            let (hash, len) = command_fingerprint(command);
+            (Some(hash), Some(len))
+        }
+        None => (None, None),
+    };
+    let record = store::SandboxAuditRecord {
+        id: sandbox_audit_id(agent_id, action, session_id, ts),
+        ts,
+        agent_id: agent_id.to_string(),
+        room_id: room_id.map(|s| s.to_string()),
+        action: action.to_string(),
+        session_id: session_id.map(|s| s.to_string()),
+        provider: provider.map(|s| s.to_string()),
+        command_hash,
+        command_len,
+        outcome: outcome.to_string(),
+        detail: detail.map(|s| s.to_string()),
+    };
+    store::append_sandbox_audit(&record);
+}
+
 /// Verify a Stripe webhook signature.
 ///
 /// Stripe-Signature header format: `t=<timestamp>,v1=<hmac_hex>`
@@ -1102,6 +1164,40 @@ fn handle_connection(stream: TcpStream) {
             let _ = s.write_all(resp.as_bytes());
         }
 
+        // GET /api/sandbox/audit — list sandbox audit records for the calling agent
+        ("GET", ["api", "sandbox", "audit"]) => {
+            let verified_agent_id = match verify_bearer_agent_token(&raw) {
+                Ok(agent_id) => agent_id,
+                Err(e) => {
+                    send_json(stream, 401, &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'")));
+                    return;
+                }
+            };
+            let room_filter = path.split_once('?').and_then(|(_, qs)| {
+                qs.split('&').find_map(|kv| {
+                    let mut parts = kv.splitn(2, '=');
+                    let key = parts.next()?;
+                    if key == "room_id" {
+                        parts.next().map(url_decode)
+                    } else {
+                        None
+                    }
+                })
+            });
+            let records: Vec<_> = store::load_sandbox_audit()
+                .into_iter()
+                .filter(|record| record.agent_id == verified_agent_id)
+                .filter(|record| {
+                    room_filter
+                        .as_deref()
+                        .map(|room_id| record.room_id.as_deref() == Some(room_id))
+                        .unwrap_or(true)
+                })
+                .collect();
+            let body = serde_json::to_string(&records).unwrap_or_else(|_| "[]".to_string());
+            send_json(stream, 200, &body);
+        }
+
         // POST /api/sandbox/create — create a sandbox (proxy to Daytona/E2B)
         ("POST", ["api", "sandbox", "create"]) => {
             // Auth: per-agent signed token — use verified agent_id, not body field
@@ -1124,6 +1220,16 @@ fn handle_connection(stream: TcpStream) {
             // Bug fix: always use the verified agent_id from the token
             match sandbox::create(&verified_agent_id) {
                 Ok(session) => {
+                    append_sandbox_audit(
+                        &verified_agent_id,
+                        Some(&room_id),
+                        "create",
+                        Some(&session.id),
+                        Some(&session.provider),
+                        None,
+                        "success",
+                        None,
+                    );
                     let resp = serde_json::json!({
                         "id": session.id,
                         "provider": session.provider,
@@ -1137,6 +1243,16 @@ fn handle_connection(stream: TcpStream) {
                     store::credit_add(
                         &room_id, &verified_agent_id,
                         SANDBOX_OPEN_COST_CREDITS, "sandbox:open:refund",
+                    );
+                    append_sandbox_audit(
+                        &verified_agent_id,
+                        Some(&room_id),
+                        "create",
+                        None,
+                        None,
+                        None,
+                        "error",
+                        Some(&e),
                     );
                     send_json(stream, 500, &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'")));
                 }
@@ -1154,13 +1270,38 @@ fn handle_connection(stream: TcpStream) {
             let session_id = form_field(body, "session_id").unwrap_or_default();
             let command = form_field(body, "command").unwrap_or_default();
             let provider = form_field(body, "provider").unwrap_or_else(|| "daytona".to_string());
+            let room_id = form_field(body, "room_id");
             if session_id.is_empty() || command.is_empty() {
                 send_json(stream, 400, r#"{"error":"session_id and command required"}"#);
                 return;
             }
             match sandbox::exec(&session_id, &command, &provider) {
-                Ok(output) => send_json(stream, 200, &serde_json::json!({"output": output}).to_string()),
-                Err(e) => send_json(stream, 500, &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'"))),
+                Ok(output) => {
+                    append_sandbox_audit(
+                        &verified_agent_id,
+                        room_id.as_deref(),
+                        "exec",
+                        Some(&session_id),
+                        Some(&provider),
+                        Some(&command),
+                        "success",
+                        None,
+                    );
+                    send_json(stream, 200, &serde_json::json!({"output": output}).to_string())
+                }
+                Err(e) => {
+                    append_sandbox_audit(
+                        &verified_agent_id,
+                        room_id.as_deref(),
+                        "exec",
+                        Some(&session_id),
+                        Some(&provider),
+                        Some(&command),
+                        "error",
+                        Some(&e),
+                    );
+                    send_json(stream, 500, &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'")))
+                }
             }
         }
 
@@ -1174,13 +1315,38 @@ fn handle_connection(stream: TcpStream) {
             let _ = verified_agent_id; // TODO: verify session belongs to this agent
             let session_id = form_field(body, "session_id").unwrap_or_default();
             let provider = form_field(body, "provider").unwrap_or_else(|| "daytona".to_string());
+            let room_id = form_field(body, "room_id");
             if session_id.is_empty() {
                 send_json(stream, 400, r#"{"error":"session_id required"}"#);
                 return;
             }
             match sandbox::destroy(&session_id, &provider) {
-                Ok(()) => send_json(stream, 200, r#"{"status":"destroyed"}"#),
-                Err(e) => send_json(stream, 500, &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'"))),
+                Ok(()) => {
+                    append_sandbox_audit(
+                        &verified_agent_id,
+                        room_id.as_deref(),
+                        "destroy",
+                        Some(&session_id),
+                        Some(&provider),
+                        None,
+                        "success",
+                        None,
+                    );
+                    send_json(stream, 200, r#"{"status":"destroyed"}"#)
+                }
+                Err(e) => {
+                    append_sandbox_audit(
+                        &verified_agent_id,
+                        room_id.as_deref(),
+                        "destroy",
+                        Some(&session_id),
+                        Some(&provider),
+                        None,
+                        "error",
+                        Some(&e),
+                    );
+                    send_json(stream, 500, &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'")))
+                }
             }
         }
 
@@ -2056,7 +2222,6 @@ mod tests {
         assert_eq!(claim_msg["from"].as_str(), Some("api-agent"));
     }
 
-    #[test]
     fn test_patch_tasks_reject_reopens_task_for_verified_identity() {
         let _guard = crate::store::test_env_lock().lock().unwrap();
         let home = std::env::temp_dir().join(format!(
@@ -2097,6 +2262,63 @@ mod tests {
         assert_eq!(task.status, "open");
         assert_eq!(task.claimed_by, None);
         assert_eq!(task.notes.as_deref(), Some("scope is abusive"));
+    }
+
+    #[test]
+    fn test_sandbox_audit_endpoint_filters_to_verified_agent() {
+        let _guard = crate::store::test_env_lock().lock().unwrap();
+        let home = std::env::temp_dir().join(format!(
+            "agora-serve-sandbox-audit-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&home).unwrap();
+        unsafe {
+            std::env::set_var("HOME", &home);
+            std::env::set_var("AGORA_AGENT_ID", "serve-host");
+            std::env::set_var("AGORA_SANDBOX_SECRET", "serve-test-secret");
+        }
+
+        crate::store::append_sandbox_audit(&crate::store::SandboxAuditRecord {
+            id: "audit-1".to_string(),
+            ts: 1,
+            agent_id: "api-agent".to_string(),
+            room_id: Some("room-1".to_string()),
+            action: "exec".to_string(),
+            session_id: Some("session-1".to_string()),
+            provider: Some("daytona".to_string()),
+            command_hash: Some("hash-1".to_string()),
+            command_len: Some(7),
+            outcome: "success".to_string(),
+            detail: None,
+        });
+        crate::store::append_sandbox_audit(&crate::store::SandboxAuditRecord {
+            id: "audit-2".to_string(),
+            ts: 2,
+            agent_id: "other-agent".to_string(),
+            room_id: Some("room-1".to_string()),
+            action: "destroy".to_string(),
+            session_id: Some("session-2".to_string()),
+            provider: Some("daytona".to_string()),
+            command_hash: None,
+            command_len: None,
+            outcome: "success".to_string(),
+            detail: None,
+        });
+
+        let token = crate::sandbox::generate_agent_token("api-agent", 1);
+        let raw = format!(
+            "GET /api/sandbox/audit?room_id=room-1 HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {token}\r\n\r\n"
+        );
+        let response = serve_once(&raw);
+        assert!(
+            response.starts_with("HTTP/1.1 200 OK"),
+            "expected 200 response, got: {response}"
+        );
+        assert!(response.contains("\"id\":\"audit-1\""));
+        assert!(!response.contains("\"id\":\"audit-2\""));
     }
 
     #[test]
