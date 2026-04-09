@@ -1415,6 +1415,99 @@ fn handle_connection(stream: TcpStream) {
             }
         }
 
+        // GET /api/v1/members?room=<label>
+        // List all members of a room with their profile, credit balance, and trust score.
+        // Returns: [{agent_id, name, role, joined_at, last_seen, credits, trust, trust_score,
+        //            receipts, rooms_active, vouches}]
+        // Sorted: most credits first.
+        ("GET", ["api", "v1", "members"]) => {
+            let qs = path.split_once('?').map(|(_, q)| q).unwrap_or("");
+            let room_param = qs.split('&').find_map(|kv| {
+                kv.strip_prefix("room=").map(|v| url_decode(v))
+            });
+            match chat::members_list(room_param.as_deref()) {
+                Ok(members) => {
+                    let body = serde_json::to_string(&members).unwrap_or_else(|_| "[]".to_string());
+                    send_json(stream, 200, &body);
+                }
+                Err(e) => send_json(stream, 400, &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'"))),
+            }
+        }
+
+        // GET /api/v1/profile?room=<label>&agent=<agent-id>
+        // Get detailed profile for a single agent in a room.
+        // agent= defaults to self (server's own agent ID).
+        // Returns: {agent_id, name, role, joined_at, last_seen, credits, trust, trust_score,
+        //           receipts, rooms_active, vouches}
+        ("GET", ["api", "v1", "profile"]) => {
+            let qs = path.split_once('?').map(|(_, q)| q).unwrap_or("");
+            let room_param = qs.split('&').find_map(|kv| {
+                kv.strip_prefix("room=").map(|v| url_decode(v))
+            });
+            let agent_param = qs.split('&').find_map(|kv| {
+                kv.strip_prefix("agent=").map(|v| url_decode(v))
+            });
+            let agent_id = agent_param
+                .as_deref()
+                .filter(|s| !s.is_empty())
+                .unwrap_or(&store::get_agent_id())
+                .to_string();
+            match chat::agent_profile_detail(&agent_id, room_param.as_deref()) {
+                Ok(profile) => {
+                    let body = serde_json::to_string(&profile).unwrap_or_else(|_| "{}".to_string());
+                    send_json(stream, 200, &body);
+                }
+                Err(e) => send_json(stream, 404, &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'"))),
+            }
+        }
+
+        // POST /api/v1/profile — update calling agent's profile
+        // Requires: Bearer auth token.
+        // JSON body: {"name": "...", "role": "...", "room": "..."}
+        // name and role are both optional (omit to leave unchanged).
+        // Returns: {"agent_id": "...", "name": "...", "role": "..."}
+        ("POST", ["api", "v1", "profile"]) => {
+            let agent_id = match verify_bearer_agent_token(&raw) {
+                Ok(id) => id,
+                Err(e) => {
+                    send_json(stream, 401, &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'")));
+                    return;
+                }
+            };
+            let parsed: serde_json::Value = match serde_json::from_str(body) {
+                Ok(v) => v,
+                Err(_) => {
+                    send_json(stream, 400, r#"{"error":"invalid JSON body"}"#);
+                    return;
+                }
+            };
+            let name = parsed["name"].as_str().filter(|s| !s.is_empty());
+            let role = parsed["role"].as_str().filter(|s| !s.is_empty());
+            if name.is_none() && role.is_none() {
+                send_json(stream, 400, r#"{"error":"at least one of name or role is required"}"#);
+                return;
+            }
+            let room_label = parsed["room"].as_str().map(|s| s.to_string());
+            // set_profile sets profile for the calling agent (store::get_agent_id()).
+            // We only allow setting own profile, so agent_id from bearer must match.
+            let self_id = store::get_agent_id();
+            if agent_id != self_id {
+                send_json(stream, 403, r#"{"error":"can only update your own profile"}"#);
+                return;
+            }
+            match chat::set_profile(name, role, room_label.as_deref()) {
+                Ok(()) => {
+                    let resp = serde_json::json!({
+                        "agent_id": agent_id,
+                        "name": name.unwrap_or(""),
+                        "role": role.unwrap_or("agent"),
+                    });
+                    send_json(stream, 200, &resp.to_string());
+                }
+                Err(e) => send_json(stream, 400, &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'"))),
+            }
+        }
+
         _ => {
             send_response(
                 stream,
@@ -1986,5 +2079,115 @@ mod tests {
         let qs = path.split_once('?').map(|(_, q)| q).unwrap_or("");
         let room_param = qs.split('&').find_map(|kv| kv.strip_prefix("room=").map(|v| v.to_string()));
         assert_eq!(room_param.as_deref(), Some("collab"));
+    }
+
+    // ── Members + Profile API ────────────────────────────────────────────────
+
+    #[test]
+    fn members_api_query_param_parsing() {
+        // GET /api/v1/members?room=plaza
+        let path = "/api/v1/members?room=plaza";
+        let qs = path.split_once('?').map(|(_, q)| q).unwrap_or("");
+        let room_param = qs.split('&').find_map(|kv| {
+            kv.strip_prefix("room=").map(|v| url_decode(v))
+        });
+        assert_eq!(room_param.as_deref(), Some("plaza"));
+    }
+
+    #[test]
+    fn members_api_no_query_string() {
+        let path = "/api/v1/members";
+        let qs = path.split_once('?').map(|(_, q)| q).unwrap_or("");
+        let room_param: Option<String> = qs.split('&').find_map(|kv| {
+            kv.strip_prefix("room=").map(|v| url_decode(v))
+        });
+        assert!(room_param.is_none());
+    }
+
+    #[test]
+    fn members_api_route_segments() {
+        let path = "/api/v1/members?room=plaza";
+        let path_only = path.split('?').next().unwrap_or(path);
+        let segments: Vec<&str> = path_only.trim_start_matches('/').split('/').collect();
+        assert_eq!(segments.as_slice(), &["api", "v1", "members"]);
+    }
+
+    #[test]
+    fn profile_api_query_param_parsing_with_agent() {
+        // GET /api/v1/profile?room=plaza&agent=deadbeef
+        let path = "/api/v1/profile?room=plaza&agent=deadbeef";
+        let qs = path.split_once('?').map(|(_, q)| q).unwrap_or("");
+        let room_param = qs.split('&').find_map(|kv| {
+            kv.strip_prefix("room=").map(|v| url_decode(v))
+        });
+        let agent_param = qs.split('&').find_map(|kv| {
+            kv.strip_prefix("agent=").map(|v| url_decode(v))
+        });
+        assert_eq!(room_param.as_deref(), Some("plaza"));
+        assert_eq!(agent_param.as_deref(), Some("deadbeef"));
+    }
+
+    #[test]
+    fn profile_api_query_param_agent_defaults_to_empty() {
+        // Without agent=, agent_param is None — falls back to self
+        let path = "/api/v1/profile?room=plaza";
+        let qs = path.split_once('?').map(|(_, q)| q).unwrap_or("");
+        let agent_param: Option<String> = qs.split('&').find_map(|kv| {
+            kv.strip_prefix("agent=").map(|v| url_decode(v))
+        });
+        assert!(agent_param.is_none());
+    }
+
+    #[test]
+    fn profile_post_body_parsing_name_and_role() {
+        let body = r#"{"name":"Alice","role":"builder","room":"plaza"}"#;
+        let parsed: serde_json::Value = serde_json::from_str(body).unwrap();
+        let name = parsed["name"].as_str().filter(|s| !s.is_empty());
+        let role = parsed["role"].as_str().filter(|s| !s.is_empty());
+        let room = parsed["room"].as_str();
+        assert_eq!(name, Some("Alice"));
+        assert_eq!(role, Some("builder"));
+        assert_eq!(room, Some("plaza"));
+    }
+
+    #[test]
+    fn profile_post_body_name_only() {
+        let body = r#"{"name":"Bob"}"#;
+        let parsed: serde_json::Value = serde_json::from_str(body).unwrap();
+        let name = parsed["name"].as_str().filter(|s| !s.is_empty());
+        let role = parsed["role"].as_str().filter(|s| !s.is_empty());
+        assert_eq!(name, Some("Bob"));
+        assert!(role.is_none());
+        // At least one of name or role must be present — this is valid
+        assert!(name.is_some() || role.is_some());
+    }
+
+    #[test]
+    fn profile_post_body_neither_name_nor_role_rejected() {
+        let body = r#"{"room":"plaza"}"#;
+        let parsed: serde_json::Value = serde_json::from_str(body).unwrap();
+        let name = parsed["name"].as_str().filter(|s| !s.is_empty());
+        let role = parsed["role"].as_str().filter(|s| !s.is_empty());
+        // Both absent — the route handler must return 400
+        assert!(name.is_none() && role.is_none());
+    }
+
+    #[test]
+    fn profile_post_body_empty_strings_rejected() {
+        let body = r#"{"name":"","role":""}"#;
+        let parsed: serde_json::Value = serde_json::from_str(body).unwrap();
+        let name = parsed["name"].as_str().filter(|s| !s.is_empty());
+        let role = parsed["role"].as_str().filter(|s| !s.is_empty());
+        // Empty strings must be treated as absent
+        assert!(name.is_none());
+        assert!(role.is_none());
+    }
+
+    #[test]
+    fn profile_api_route_segments() {
+        let path = "/api/v1/profile?room=plaza&agent=abc";
+        let path_only = path.split('?').next().unwrap_or(path);
+        let segs: Vec<&str> = path_only.trim_start_matches('/').split('/').collect();
+        assert_eq!(segs.as_slice(), &["api", "v1", "profile"]);
     }
 }

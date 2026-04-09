@@ -1046,6 +1046,69 @@ pub fn whois(agent_id: &str, room_label: Option<&str>) -> Result<Option<store::A
     Ok(store::get_profile(&room.room_id, agent_id))
 }
 
+/// List all members of a room with their profile, credit balance, and trust score.
+///
+/// Each entry: `{ agent_id, name, role, joined_at, last_seen, credits, trust, trust_score }`.
+pub fn members_list(room_label: Option<&str>) -> Result<Vec<serde_json::Value>, String> {
+    let room = resolve_room(room_label)?;
+    let members = room.members.clone();
+    let mut out = Vec::with_capacity(members.len());
+    for m in &members {
+        let profile = store::get_profile(&room.room_id, &m.agent_id);
+        let credits = store::credit_balance(&room.room_id, &m.agent_id);
+        let trust   = store::trust_balance(&room.room_id, &m.agent_id);
+        let (trust_score, receipts, rooms_active, vouches) =
+            compute_agent_trust_score(&m.agent_id);
+        out.push(serde_json::json!({
+            "agent_id":    m.agent_id,
+            "name":        profile.as_ref().and_then(|p| p.name.as_deref()).unwrap_or(""),
+            "role":        profile.as_ref().and_then(|p| p.role.as_deref()).unwrap_or("agent"),
+            "joined_at":   m.joined_at,
+            "last_seen":   m.last_seen,
+            "credits":     credits,
+            "trust":       trust,
+            "trust_score": (trust_score * 100.0).round() / 100.0,
+            "receipts":    receipts,
+            "rooms_active": rooms_active,
+            "vouches":     vouches,
+        }));
+    }
+    // Sort: most credits first
+    out.sort_by(|a, b| {
+        let ca = a["credits"].as_i64().unwrap_or(0);
+        let cb = b["credits"].as_i64().unwrap_or(0);
+        cb.cmp(&ca)
+    });
+    Ok(out)
+}
+
+/// Get a rich profile for a single agent in a room.
+///
+/// Returns `{ agent_id, name, role, joined_at, last_seen, credits, trust, trust_score,
+///            receipts, rooms_active, vouches }` or an error if agent is not a member.
+pub fn agent_profile_detail(agent_id: &str, room_label: Option<&str>) -> Result<serde_json::Value, String> {
+    let room = resolve_room(room_label)?;
+    let member = room.members.iter().find(|m| m.agent_id == agent_id)
+        .ok_or_else(|| format!("agent '{}' is not a member of this room", agent_id))?;
+    let profile = store::get_profile(&room.room_id, agent_id);
+    let credits = store::credit_balance(&room.room_id, agent_id);
+    let trust   = store::trust_balance(&room.room_id, agent_id);
+    let (trust_score, receipts, rooms_active, vouches) = compute_agent_trust_score(agent_id);
+    Ok(serde_json::json!({
+        "agent_id":    agent_id,
+        "name":        profile.as_ref().and_then(|p| p.name.as_deref()).unwrap_or(""),
+        "role":        profile.as_ref().and_then(|p| p.role.as_deref()).unwrap_or("agent"),
+        "joined_at":   member.joined_at,
+        "last_seen":   member.last_seen,
+        "credits":     credits,
+        "trust":       trust,
+        "trust_score": (trust_score * 100.0).round() / 100.0,
+        "receipts":    receipts,
+        "rooms_active": rooms_active,
+        "vouches":     vouches,
+    }))
+}
+
 fn claimed_task_ids(room_id: &str, agent_id: &str) -> Vec<String> {
     store::load_tasks(room_id)
         .into_iter()
