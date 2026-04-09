@@ -1556,6 +1556,13 @@ fn handle_connection(stream: TcpStream) {
         // JSON body: {"action": "claim"|"done"|"checkpoint", "room": "...", "notes": "..."}
         // Returns the updated task object.
         ("PATCH", ["api", "v1", "tasks", task_id]) => {
+            let agent_id = match verify_bearer_agent_token(&raw) {
+                Ok(agent_id) => agent_id,
+                Err(e) => {
+                    send_json(stream, 401, &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'")));
+                    return;
+                }
+            };
             let parsed: serde_json::Value = match serde_json::from_str(body) {
                 Ok(v) => v,
                 Err(_) => {
@@ -1574,9 +1581,11 @@ fn handle_connection(stream: TcpStream) {
             let notes = parsed["notes"].as_str().map(|s| s.to_string());
             let tid = (*task_id).to_string();
             let result = match action.as_str() {
-                "claim" => chat::task_claim(&tid, room_label.as_deref()),
-                "done" => chat::task_done(&tid, notes.as_deref(), room_label.as_deref()),
-                "checkpoint" => chat::task_checkpoint(&tid, notes.as_deref(), room_label.as_deref()),
+                "claim" => chat::task_claim_as(&agent_id, &tid, room_label.as_deref()),
+                "done" => chat::task_done_as(&agent_id, &tid, notes.as_deref(), room_label.as_deref()),
+                "checkpoint" => {
+                    chat::task_checkpoint_as(&agent_id, &tid, notes.as_deref(), room_label.as_deref())
+                }
                 _ => Err(format!("Unknown action '{}'; use claim|done|checkpoint", action)),
             };
             match result {
@@ -1649,6 +1658,25 @@ pub fn start(port: u16) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{Read, Write};
+
+    fn serve_once(raw: &str) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            handle_connection(stream);
+        });
+
+        let mut client = TcpStream::connect(addr).unwrap();
+        client.write_all(raw.as_bytes()).unwrap();
+        client.shutdown(std::net::Shutdown::Write).unwrap();
+
+        let mut response = String::new();
+        client.read_to_string(&mut response).unwrap();
+        server.join().unwrap();
+        response
+    }
 
     #[test]
     fn test_html_escape() {
@@ -1942,6 +1970,87 @@ mod tests {
         let raw = format!("POST /api/v1/tasks HTTP/1.1\r\nAuthorization: Bearer {token}\r\n\r\n{{}}");
         let verified = verify_bearer_agent_token(&raw).expect("token should verify");
         assert_eq!(verified, "api-agent");
+    }
+
+    #[test]
+    fn test_patch_tasks_requires_bearer_auth() {
+        let _guard = crate::store::test_env_lock().lock().unwrap();
+        let home = std::env::temp_dir().join(format!(
+            "agora-serve-patch-auth-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&home).unwrap();
+        unsafe {
+            std::env::set_var("HOME", &home);
+            std::env::set_var("AGORA_AGENT_ID", "serve-host");
+            std::env::set_var("AGORA_SANDBOX_SECRET", "serve-test-secret");
+        }
+
+        let room = store::add_room("ag-serve-test", "secret", "plaza", store::Role::Admin);
+        let task_id = crate::chat::task_add_as("creator", "Ship API auth", None).unwrap();
+
+        let body = format!(r#"{{"action":"claim","room":"{}"}}"#, room.room_id);
+        let raw = format!(
+            "PATCH /api/v1/tasks/{task_id} HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        );
+        let response = serve_once(&raw);
+        assert!(
+            response.starts_with("HTTP/1.1 401 Unauthorized"),
+            "expected 401 response, got: {response}"
+        );
+    }
+
+    #[test]
+    fn test_patch_tasks_uses_verified_bearer_identity() {
+        let _guard = crate::store::test_env_lock().lock().unwrap();
+        let home = std::env::temp_dir().join(format!(
+            "agora-serve-patch-identity-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&home).unwrap();
+        unsafe {
+            std::env::set_var("HOME", &home);
+            std::env::set_var("AGORA_AGENT_ID", "serve-host");
+            std::env::set_var("AGORA_SANDBOX_SECRET", "serve-test-secret");
+        }
+
+        let room = store::add_room("ag-serve-test", "secret", "plaza", store::Role::Admin);
+        let task_id = crate::chat::task_add_as("creator", "Ship API auth", None).unwrap();
+        let token = crate::sandbox::generate_agent_token("api-agent", 1);
+
+        let body = format!(r#"{{"action":"claim","room":"{}"}}"#, room.room_id);
+        let raw = format!(
+            "PATCH /api/v1/tasks/{task_id} HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {token}\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        );
+        let response = serve_once(&raw);
+        assert!(
+            response.starts_with("HTTP/1.1 200 OK"),
+            "expected 200 response, got: {response}"
+        );
+
+        let tasks = crate::store::load_tasks(&room.room_id);
+        let task = tasks.iter().find(|t| t.id == task_id).expect("task saved");
+        assert_eq!(task.claimed_by.as_deref(), Some("api-agent"));
+
+        let messages = crate::store::load_messages(&room.room_id, 3600);
+        let claim_msg = messages
+            .iter()
+            .find(|m| {
+                m["text"]
+                    .as_str()
+                    .unwrap_or("")
+                    .contains("Claimed by api-agent")
+            })
+            .expect("claim message saved");
+        assert_eq!(claim_msg["from"].as_str(), Some("api-agent"));
     }
 
     #[test]
