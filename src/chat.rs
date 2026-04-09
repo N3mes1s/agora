@@ -1300,6 +1300,9 @@ pub fn bet_create(question: &str, room_label: Option<&str>) -> Result<String, St
 pub fn bet_stake(bet_id: &str, side: bool, amount: i64, room_label: Option<&str>) -> Result<(), String> {
     let room = resolve_room(room_label)?;
     let me = store::get_agent_id();
+
+    // Hold credit_lock for balance check + debit to prevent TOCTOU double-spend.
+    let _guard = store::credit_lock().lock().unwrap();
     let balance = store::credit_balance(&room.room_id, &me);
     if balance < amount { return Err(format!("Insufficient credits: have {balance}, need {amount}")); }
 
@@ -1725,12 +1728,23 @@ pub fn bounty_post(
     let reward_label = reward_credits
         .map(|c| format!(", reward: {c} credits"))
         .unwrap_or_default();
+    if let Some(h) = deadline_hours {
+        if h == 0 {
+            return Err("Deadline must be at least 1 hour (0 would expire immediately)".to_string());
+        }
+    }
     let expires_at = deadline_hours.map(|h| now() + h * 3600);
     let deadline_label = deadline_hours
         .map(|h| format!(", deadline: {h}h"))
         .unwrap_or_default();
 
     if let Some(reward) = reward_credits {
+        if reward <= 0 {
+            return Err(format!("Bounty reward must be positive, got {reward}"));
+        }
+        // Hold credit_lock for the entire check-and-deduct to prevent TOCTOU races
+        // when multiple threads concurrently post bounties with the same account.
+        let _guard = store::credit_lock().lock().unwrap();
         let balance = store::credit_balance(&room.room_id, &me);
         if balance < reward {
             return Err(format!(
@@ -2476,10 +2490,15 @@ fn urlencoded(s: &str) -> String {
 /// Complete a deposit payment after Stripe webhook confirmation.
 /// Called by the webhook handler in serve.rs on `checkout.session.completed`.
 /// Mints credits to the agent's ledger and marks the payment completed.
+///
+/// Protected by credit_lock to prevent double-crediting if Stripe delivers
+/// the same webhook event to two concurrent threads simultaneously.
 pub fn payment_complete_deposit(
     stripe_session_id: &str,
     room_id: &str,
 ) -> Result<(), String> {
+    let _guard = store::credit_lock().lock().unwrap();
+
     let mut payments = store::load_payments();
     let record = payments
         .iter_mut()
@@ -5419,8 +5438,8 @@ mod tests {
         store::credit_add(&room.room_id, poster_id, 100, "test setup");
         seed_agent_trust(&room.room_id, poster_id);
 
-        // Post a bounty with a deadline 1 second in the future.
-        let id = bounty_post("Deadline test bounty", 3, None, Some(40), Some(0 /* 0h = already expired */), None)
+        // Post a bounty with a 1-hour deadline (minimum allowed; we'll override expires_at below).
+        let id = bounty_post("Deadline test bounty", 3, None, Some(40), Some(1), None)
             .expect("bounty_post should succeed");
         let _ = id;
 
@@ -5976,6 +5995,8 @@ pub fn credit_transfer(to_agent: &str, amount: i64, reason: Option<&str>, room_l
     let room = resolve_room(room_label)?;
     let me = store::get_agent_id();
     if me == to_agent { return Err("Cannot transfer to yourself.".to_string()); }
+    // Hold credit_lock for balance check + debit to prevent TOCTOU double-spend.
+    let _guard = store::credit_lock().lock().unwrap();
     let balance = store::credit_balance(&room.room_id, &me);
     if balance < amount { return Err(format!("Insufficient credits: have {balance}, need {amount}")); }
     let reason_str = reason.unwrap_or("transfer");

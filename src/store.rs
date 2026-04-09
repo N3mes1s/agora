@@ -11,7 +11,6 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
-#[cfg(test)]
 use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -179,6 +178,21 @@ pub fn trust_signing_key(agent_id: &str, signing_pubkey: &str) {
     let mut keys = load_trusted_signing_keys();
     keys.insert(agent_id.to_string(), signing_pubkey.to_string());
     save_trusted_signing_keys(&keys);
+}
+
+/// Global mutex that serializes all credit-modifying operations.
+///
+/// The HTTP server spawns one thread per connection, creating a TOCTOU window:
+///   Thread A: balance = load() → 100 → ok to deduct 60
+///   Thread B: balance = load() → 100 → ok to deduct 60  ← sees stale balance
+///   Thread A: save(-60) → 40
+///   Thread B: save(-60) → -20                           ← double-spend!
+///
+/// All callers that (a) read a balance and (b) conditionally write a debit
+/// must hold this lock for the duration of the check-and-act.
+pub fn credit_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
 }
 
 #[cfg(test)]
