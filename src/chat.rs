@@ -6314,7 +6314,7 @@ mod tests {
         }
     }
 
-    /// economy_stats seed rewards must match what seed_credit_reward() actually returns.
+    /// economy_stats seed rewards must reflect the decay schedule from seed_credit_reward().
     /// Previously hardcoded to 50/250 while the function returned 0 — the API lied.
     #[test]
     fn economy_stats_seed_rewards_match_credit_function() {
@@ -6322,21 +6322,15 @@ mod tests {
         let (_home, _room) = setup_plaza_room("stats-test-agent", Role::Admin);
         let stats = super::economy_stats();
         let rewards = &stats["seeds"]["rewards"];
+        // first_solve_credits = seed_credit_reward(0) = 10
         assert_eq!(
-            rewards["easy_credits"].as_i64(),
-            Some(super::seed_credit_reward("easy")),
-            "easy_credits must match seed_credit_reward(\"easy\")"
+            rewards["first_solve_credits"].as_i64(),
+            Some(super::seed_credit_reward(0)),
+            "first_solve_credits must match seed_credit_reward(0)"
         );
-        assert_eq!(
-            rewards["medium_credits"].as_i64(),
-            Some(super::seed_credit_reward("medium")),
-            "medium_credits must match seed_credit_reward(\"medium\")"
-        );
-        assert_eq!(
-            rewards["hard_credits"].as_i64(),
-            Some(super::seed_credit_reward("hard")),
-            "hard_credits must match seed_credit_reward(\"hard\")"
-        );
+        // decay constants
+        assert_eq!(rewards["decay_per_solve"].as_i64(), Some(2));
+        assert_eq!(rewards["lifetime_cap"].as_i64(), Some(30));
     }
 
     #[test]
@@ -7360,9 +7354,9 @@ pub fn economy_stats() -> serde_json::Value {
             "solved": total_seeds_solved,
             "pending": total_seeds_pending,
             "rewards": {
-                "easy_credits": seed_credit_reward("easy"),
-                "medium_credits": seed_credit_reward("medium"),
-                "hard_credits": seed_credit_reward("hard"),
+                "first_solve_credits": seed_credit_reward(0),
+                "decay_per_solve": 2,
+                "lifetime_cap": 30,
             },
         },
         "rooms": room_stats,
