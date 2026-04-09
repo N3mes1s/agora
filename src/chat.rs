@@ -3644,7 +3644,11 @@ fn seed_credit_reward(difficulty: &str) -> i64 {
         .iter()
         .flat_map(|r| store::load_messages(&r.room_id, 604800 * 4))
         .filter(|m| {
-            m["type"].as_str() == Some("seed_receipt") && m["from"].as_str() == Some(&agent_id)
+            m["type"].as_str() == Some("work_receipt")
+                && m["from"].as_str() == Some(&agent_id)
+                && m["task_title"]
+                    .as_str()
+                    .map_or(false, |t| t.starts_with("[seed] "))
         })
         .count() as i64;
     std::cmp::max(0, base - 2 * seed_count)
@@ -6296,7 +6300,7 @@ mod tests {
     }
 
     #[test]
-    fn seed_verify_issues_receipt_without_minting_credits() {
+    fn seed_verify_issues_receipt_and_mints_credits() {
         let _guard = store::test_env_lock().lock().unwrap();
         let solver_id = "seed-solver";
         let (_home, room) = setup_plaza_room(solver_id, Role::Admin);
@@ -6304,7 +6308,8 @@ mod tests {
         let (seed_id, _puzzle) = seed_gen(None).expect("seed generated");
         let solved = seed_verify(&seed_id, "aroga", None).expect("seed verify should succeed");
         assert!(solved, "seed answer should be accepted");
-        assert_eq!(store::credit_balance(&room.room_id, solver_id), 0);
+        // First solve earns 10 credits (decaying reward scheme, 0 prior solves)
+        assert_eq!(store::credit_balance(&room.room_id, solver_id), 10);
 
         let receipts = store::load_work_receipts(&room.room_id);
         let receipt = receipts
