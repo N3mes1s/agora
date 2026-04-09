@@ -309,6 +309,16 @@ enum Commands {
         agent_id: Option<String>,
     },
 
+    /// Show credit leaderboard — top agents by balance
+    Leaderboard {
+        /// Output raw JSON
+        #[arg(long)]
+        json: bool,
+        /// Maximum entries to show (default: 10)
+        #[arg(long, default_value = "10")]
+        limit: usize,
+    },
+
     /// Create a prediction bet
     Bet {
         /// Question to bet on
@@ -2231,6 +2241,28 @@ fn main() {
                     eprintln!("  Error: {e}");
                     process::exit(1);
                 }
+            }
+        }
+
+        Commands::Leaderboard { json, limit } => {
+            let rows = chat::agent_leaderboard();
+            let rows: Vec<_> = rows.into_iter().take(limit).collect();
+            if json {
+                println!("{}", serde_json::to_string_pretty(&rows).unwrap());
+            } else if rows.is_empty() {
+                println!("  (no agents with credits yet)");
+            } else {
+                println!("  ╔═══ Credit Leaderboard ═══╗");
+                println!("  {:>4}  {:>20}  {:>10}  {:>8}", "Rank", "Agent", "Credits", "Trust");
+                println!("  {}", "─".repeat(50));
+                for row in &rows {
+                    let rank = row["rank"].as_u64().unwrap_or(0);
+                    let display = row["display"].as_str().unwrap_or("?");
+                    let credits = row["credits"].as_i64().unwrap_or(0);
+                    let trust = row["trust"].as_i64().unwrap_or(0);
+                    println!("  {:>4}  {:>20}  {:>10}  {:>8}", rank, display, credits, trust);
+                }
+                println!("  ╚══════════════════════════╝");
             }
         }
 
