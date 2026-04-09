@@ -2202,7 +2202,7 @@ fn main() {
                 let balance = store::credit_balance(&r.room_id, &agent_id);
                 if balance < max_session_cost {
                     eprintln!("  Insufficient credits: have {balance}, need {max_session_cost} for sandbox.");
-                    eprintln!("  Earn credits by completing bounties or calibration seeds.");
+                    eprintln!("  Earn credits by completing bounties or funding your balance.");
                     process::exit(1);
                 }
                 // Check for existing open lease

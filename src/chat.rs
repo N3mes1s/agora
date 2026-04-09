@@ -3282,16 +3282,8 @@ const PUZZLES: &[(&str, &str, &str, &str)] = &[
 
 /// Credits awarded for solving calibration seeds by difficulty.
 fn seed_credit_reward(difficulty: &str) -> i64 {
-    match difficulty {
-        "easy" => 0,
-        // Bootstrap-viable rewards: enough to fund at least one medium bounty submission.
-        // Previous values (medium=5, hard=25) were too small to sustain any economic activity.
-        // At 1000 credits = $1.00, medium=50cr ($0.05) and hard=250cr ($0.25) are still cheap
-        // proof-of-work but allow the economy to actually function.
-        "medium" => 50,
-        "hard" => 250,
-        _ => 0,
-    }
+    let _ = difficulty;
+    0
 }
 
 fn sha256_hex(input: &str) -> String {
@@ -4405,7 +4397,7 @@ mod tests {
         infer_soma_subject_path, ingest_auxiliary_event, list_role_leases, list_work_receipts,
         make_envelope, make_invite_redemption, pin, pins, resolve_room, role_claim,
         role_heartbeat, role_release, payment_complete_solana_deposit,
-        seed_plaza_rate_limit_state, send_watch_heartbeat,
+        seed_gen, seed_plaza_rate_limit_state, seed_verify, send_watch_heartbeat,
         should_display_message, signing_message_bytes, soma_churn_decay, soma_correct,
         bounty_expire_check, bounty_post, bounty_submit, bounty_verify, stale_claim_weight,
         task_add, task_add_as, task_add_with_oracle, task_checkpoint_as, task_claim_as,
@@ -5665,22 +5657,42 @@ mod tests {
         assert!(err.contains("currently claimed by 'builder-agent'"));
     }
 
-    /// Medium seeds now reward 50 credits (10x from the old 5).
+    /// Medium seeds no longer mint credits.
     #[test]
-    fn seed_credit_reward_medium_is_fifty() {
-        assert_eq!(super::seed_credit_reward("medium"), 50);
+    fn seed_credit_reward_medium_is_zero() {
+        assert_eq!(super::seed_credit_reward("medium"), 0);
     }
 
-    /// Hard seeds now reward 250 credits (10x from the old 25).
+    /// Hard seeds no longer mint credits.
     #[test]
-    fn seed_credit_reward_hard_is_two_fifty() {
-        assert_eq!(super::seed_credit_reward("hard"), 250);
+    fn seed_credit_reward_hard_is_zero() {
+        assert_eq!(super::seed_credit_reward("hard"), 0);
     }
 
     /// Easy seeds remain free (no reward).
     #[test]
     fn seed_credit_reward_easy_is_zero() {
         assert_eq!(super::seed_credit_reward("easy"), 0);
+    }
+
+    #[test]
+    fn seed_verify_issues_receipt_without_minting_credits() {
+        let _guard = store::test_env_lock().lock().unwrap();
+        let solver_id = "seed-solver";
+        let (_home, room) = setup_plaza_room(solver_id, Role::Admin);
+
+        let (seed_id, _puzzle) = seed_gen(None).expect("seed generated");
+        let solved = seed_verify(&seed_id, "aroga", None).expect("seed verify should succeed");
+        assert!(solved, "seed answer should be accepted");
+        assert_eq!(store::credit_balance(&room.room_id, solver_id), 0);
+
+        let receipts = store::load_work_receipts(&room.room_id);
+        let receipt = receipts
+            .iter()
+            .find(|r| r.task_id == seed_id)
+            .expect("seed receipt saved");
+        assert_eq!(receipt.agent_id, solver_id);
+        assert_eq!(receipt.status, "done");
     }
 
     /// Bounties with a deadline auto-expire: credits are refunded to the poster.
