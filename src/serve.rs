@@ -1969,9 +1969,16 @@ fn handle_connection(stream: TcpStream) {
         //   Returns: JSON array of message objects
         ("GET", ["api", "v1", "rooms", room_label, "messages"]) => {
             let qs = path.split_once('?').map(|(_, q)| q).unwrap_or("");
-            let since = qs.split('&').find_map(|kv| kv.strip_prefix("since=").map(|v| url_decode(v)))
+            let since = qs
+                .split('&')
+                .find_map(|kv| kv.strip_prefix("since=").map(|v| url_decode(v)))
                 .unwrap_or_else(|| "1h".to_string());
-            let limit = qs.split('&').find_map(|kv| kv.strip_prefix("limit=").map(|v| v.parse::<usize>().unwrap_or(100)))
+            let limit = qs
+                .split('&')
+                .find_map(|kv| {
+                    kv.strip_prefix("limit=")
+                        .map(|v| v.parse::<usize>().unwrap_or(100))
+                })
                 .unwrap_or(100);
             let room = (*room_label).to_string();
             match chat::read(&since, limit, Some(&room)) {
@@ -1979,7 +1986,11 @@ fn handle_connection(stream: TcpStream) {
                     let body = serde_json::to_string(&msgs).unwrap_or_else(|_| "[]".to_string());
                     send_json(stream, 200, &body);
                 }
-                Err(e) => send_json(stream, 400, &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'"))),
+                Err(e) => send_json(
+                    stream,
+                    400,
+                    &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'")),
+                ),
             }
         }
 
@@ -1988,23 +1999,46 @@ fn handle_connection(stream: TcpStream) {
         //   Returns: JSON array of matching message objects
         ("GET", ["api", "v1", "rooms", room_label, "messages", "search"]) => {
             let qs = path.split_once('?').map(|(_, q)| q).unwrap_or("");
-            let query = qs.split('&').find_map(|kv| kv.strip_prefix("q=").map(|v| url_decode(v)))
+            let query = qs
+                .split('&')
+                .find_map(|kv| kv.strip_prefix("q=").map(|v| url_decode(v)))
                 .unwrap_or_default();
             if query.is_empty() {
                 send_json(stream, 400, r#"{"error":"q parameter is required"}"#);
                 return;
             }
-            let from = qs.split('&').find_map(|kv| kv.strip_prefix("from=").map(|v| url_decode(v)));
-            let use_regex = qs.split('&').any(|kv| kv == "regex=1" || kv == "regex=true");
-            let after = qs.split('&').find_map(|kv| kv.strip_prefix("after=").map(|v| v.parse::<u64>().ok())).flatten();
-            let before = qs.split('&').find_map(|kv| kv.strip_prefix("before=").map(|v| v.parse::<u64>().ok())).flatten();
+            let from = qs
+                .split('&')
+                .find_map(|kv| kv.strip_prefix("from=").map(|v| url_decode(v)));
+            let use_regex = qs
+                .split('&')
+                .any(|kv| kv == "regex=1" || kv == "regex=true");
+            let after = qs
+                .split('&')
+                .find_map(|kv| kv.strip_prefix("after=").map(|v| v.parse::<u64>().ok()))
+                .flatten();
+            let before = qs
+                .split('&')
+                .find_map(|kv| kv.strip_prefix("before=").map(|v| v.parse::<u64>().ok()))
+                .flatten();
             let room = (*room_label).to_string();
-            match chat::search(&query, from.as_deref(), after, before, use_regex, Some(&room)) {
+            match chat::search(
+                &query,
+                from.as_deref(),
+                after,
+                before,
+                use_regex,
+                Some(&room),
+            ) {
                 Ok(msgs) => {
                     let body = serde_json::to_string(&msgs).unwrap_or_else(|_| "[]".to_string());
                     send_json(stream, 200, &body);
                 }
-                Err(e) => send_json(stream, 400, &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'"))),
+                Err(e) => send_json(
+                    stream,
+                    400,
+                    &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'")),
+                ),
             }
         }
 
@@ -2013,8 +2047,12 @@ fn handle_connection(stream: TcpStream) {
         //   Returns: JSON array of messages that @mention the agent
         ("GET", ["api", "v1", "rooms", room_label, "mentions"]) => {
             let qs = path.split_once('?').map(|(_, q)| q).unwrap_or("");
-            let agent = qs.split('&').find_map(|kv| kv.strip_prefix("agent=").map(|v| url_decode(v)));
-            let since = qs.split('&').find_map(|kv| kv.strip_prefix("since=").map(|v| url_decode(v)))
+            let agent = qs
+                .split('&')
+                .find_map(|kv| kv.strip_prefix("agent=").map(|v| url_decode(v)));
+            let since = qs
+                .split('&')
+                .find_map(|kv| kv.strip_prefix("since=").map(|v| url_decode(v)))
                 .unwrap_or_else(|| "1h".to_string());
             let room = (*room_label).to_string();
             match chat::mentions(agent.as_deref(), &since, Some(&room)) {
@@ -2022,7 +2060,11 @@ fn handle_connection(stream: TcpStream) {
                     let body = serde_json::to_string(&msgs).unwrap_or_else(|_| "[]".to_string());
                     send_json(stream, 200, &body);
                 }
-                Err(e) => send_json(stream, 400, &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'"))),
+                Err(e) => send_json(
+                    stream,
+                    400,
+                    &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'")),
+                ),
             }
         }
 
@@ -2031,7 +2073,9 @@ fn handle_connection(stream: TcpStream) {
         //   Returns: JSON array of {url, from, ts, msg_id}
         ("GET", ["api", "v1", "rooms", room_label, "links"]) => {
             let qs = path.split_once('?').map(|(_, q)| q).unwrap_or("");
-            let since = qs.split('&').find_map(|kv| kv.strip_prefix("since=").map(|v| url_decode(v)))
+            let since = qs
+                .split('&')
+                .find_map(|kv| kv.strip_prefix("since=").map(|v| url_decode(v)))
                 .unwrap_or_else(|| "24h".to_string());
             let room = (*room_label).to_string();
             match chat::links(&since, Some(&room)) {
@@ -2039,7 +2083,11 @@ fn handle_connection(stream: TcpStream) {
                     let body = serde_json::to_string(&links).unwrap_or_else(|_| "[]".to_string());
                     send_json(stream, 200, &body);
                 }
-                Err(e) => send_json(stream, 400, &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'"))),
+                Err(e) => send_json(
+                    stream,
+                    400,
+                    &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'")),
+                ),
             }
         }
 
@@ -2048,12 +2096,18 @@ fn handle_connection(stream: TcpStream) {
         //   Returns: plain-text markdown digest
         ("GET", ["api", "v1", "rooms", room_label, "digest"]) => {
             let qs = path.split_once('?').map(|(_, q)| q).unwrap_or("");
-            let since = qs.split('&').find_map(|kv| kv.strip_prefix("since=").map(|v| url_decode(v)))
+            let since = qs
+                .split('&')
+                .find_map(|kv| kv.strip_prefix("since=").map(|v| url_decode(v)))
                 .unwrap_or_else(|| "24h".to_string());
             let room = (*room_label).to_string();
             match chat::digest(&since, Some(&room)) {
                 Ok(text) => send_response(stream, "200 OK", "text/markdown; charset=utf-8", &text),
-                Err(e) => send_json(stream, 400, &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'"))),
+                Err(e) => send_json(
+                    stream,
+                    400,
+                    &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'")),
+                ),
             }
         }
 
@@ -2062,7 +2116,9 @@ fn handle_connection(stream: TcpStream) {
         //   Returns: JSON summary {room, since, total_messages, time_range, agents, top_keywords}
         ("GET", ["api", "v1", "rooms", room_label, "recap"]) => {
             let qs = path.split_once('?').map(|(_, q)| q).unwrap_or("");
-            let since = qs.split('&').find_map(|kv| kv.strip_prefix("since=").map(|v| url_decode(v)))
+            let since = qs
+                .split('&')
+                .find_map(|kv| kv.strip_prefix("since=").map(|v| url_decode(v)))
                 .unwrap_or_else(|| "24h".to_string());
             let room = (*room_label).to_string();
             match chat::recap(&since, Some(&room)) {
@@ -2070,7 +2126,11 @@ fn handle_connection(stream: TcpStream) {
                     let body = serde_json::to_string(&recap).unwrap_or_else(|_| "{}".to_string());
                     send_json(stream, 200, &body);
                 }
-                Err(e) => send_json(stream, 400, &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'"))),
+                Err(e) => send_json(
+                    stream,
+                    400,
+                    &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'")),
+                ),
             }
         }
 
@@ -2080,10 +2140,15 @@ fn handle_connection(stream: TcpStream) {
             let room = (*room_label).to_string();
             match chat::read_status(Some(&room)) {
                 Ok(statuses) => {
-                    let body = serde_json::to_string(&statuses).unwrap_or_else(|_| "[]".to_string());
+                    let body =
+                        serde_json::to_string(&statuses).unwrap_or_else(|_| "[]".to_string());
                     send_json(stream, 200, &body);
                 }
-                Err(e) => send_json(stream, 400, &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'"))),
+                Err(e) => send_json(
+                    stream,
+                    400,
+                    &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'")),
+                ),
             }
         }
 
@@ -2094,7 +2159,11 @@ fn handle_connection(stream: TcpStream) {
             let _caller = match verify_bearer_agent_token(&raw) {
                 Ok(id) => id,
                 Err(e) => {
-                    send_json(stream, 401, &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'")));
+                    send_json(
+                        stream,
+                        401,
+                        &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'")),
+                    );
                     return;
                 }
             };
@@ -2104,7 +2173,11 @@ fn handle_connection(stream: TcpStream) {
                     let body = serde_json::to_string(&hooks).unwrap_or_else(|_| "[]".to_string());
                     send_json(stream, 200, &body);
                 }
-                Err(e) => send_json(stream, 400, &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'"))),
+                Err(e) => send_json(
+                    stream,
+                    400,
+                    &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'")),
+                ),
             }
         }
 
@@ -2115,7 +2188,11 @@ fn handle_connection(stream: TcpStream) {
             let _caller = match verify_bearer_agent_token(&raw) {
                 Ok(id) => id,
                 Err(e) => {
-                    send_json(stream, 401, &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'")));
+                    send_json(
+                        stream,
+                        401,
+                        &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'")),
+                    );
                     return;
                 }
             };
@@ -2139,7 +2216,11 @@ fn handle_connection(stream: TcpStream) {
                     let resp = serde_json::json!({"id": id, "url": url});
                     send_json(stream, 201, &resp.to_string());
                 }
-                Err(e) => send_json(stream, 400, &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'"))),
+                Err(e) => send_json(
+                    stream,
+                    400,
+                    &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'")),
+                ),
             }
         }
 
@@ -2148,7 +2229,11 @@ fn handle_connection(stream: TcpStream) {
             let _caller = match verify_bearer_agent_token(&raw) {
                 Ok(id) => id,
                 Err(e) => {
-                    send_json(stream, 401, &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'")));
+                    send_json(
+                        stream,
+                        401,
+                        &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'")),
+                    );
                     return;
                 }
             };
@@ -2157,7 +2242,327 @@ fn handle_connection(stream: TcpStream) {
             match chat::remove_webhook(&wid, Some(&room)) {
                 Ok(true) => send_json(stream, 200, r#"{"status":"deleted"}"#),
                 Ok(false) => send_json(stream, 404, r#"{"error":"webhook not found"}"#),
-                Err(e) => send_json(stream, 400, &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'"))),
+                Err(e) => send_json(
+                    stream,
+                    400,
+                    &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'")),
+                ),
+            }
+        }
+
+        // GET /api/v1/roles — list active role leases in a room
+        // Query param: room=<label|id>  (optional)
+        ("GET", ["api", "v1", "roles"]) => {
+            let qs = path.split_once('?').map(|(_, q)| q).unwrap_or("");
+            let room_param = qs
+                .split('&')
+                .find_map(|kv| kv.strip_prefix("room=").map(|v| url_decode(v)));
+            match chat::list_role_leases(room_param.as_deref()) {
+                Ok(leases) => {
+                    let body = serde_json::to_string(&leases).unwrap_or_else(|_| "[]".to_string());
+                    send_json(stream, 200, &body);
+                }
+                Err(e) => send_json(
+                    stream,
+                    400,
+                    &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'")),
+                ),
+            }
+        }
+
+        // POST /api/v1/roles — claim (or renew) a role lease
+        // JSON body: {"role": "...", "room": "...", "summary": "...", "ttl": 300}
+        // Returns the RoleLease object. Requires Bearer auth.
+        ("POST", ["api", "v1", "roles"]) => {
+            let agent_id = match verify_bearer_agent_token(&raw) {
+                Ok(id) => id,
+                Err(e) => {
+                    send_json(
+                        stream,
+                        401,
+                        &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'")),
+                    );
+                    return;
+                }
+            };
+            let _ = agent_id; // identity verified; role_claim uses stored agent id
+            let parsed: serde_json::Value = match serde_json::from_str(body) {
+                Ok(v) => v,
+                Err(_) => {
+                    send_json(stream, 400, r#"{"error":"invalid JSON body"}"#);
+                    return;
+                }
+            };
+            let role = match parsed["role"].as_str().filter(|s| !s.is_empty()) {
+                Some(r) => r.to_string(),
+                None => {
+                    send_json(stream, 400, r#"{"error":"role is required"}"#);
+                    return;
+                }
+            };
+            let room_label = parsed["room"].as_str().map(|s| s.to_string());
+            let summary = parsed["summary"].as_str().map(|s| s.to_string());
+            let ttl = parsed["ttl"].as_u64().unwrap_or(300);
+            match chat::role_claim(&role, summary.as_deref(), ttl, room_label.as_deref()) {
+                Ok(lease) => {
+                    let body = serde_json::to_string(&lease).unwrap_or_else(|_| "{}".to_string());
+                    send_json(stream, 201, &body);
+                }
+                Err(e) => send_json(
+                    stream,
+                    400,
+                    &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'")),
+                ),
+            }
+        }
+
+        // POST /api/v1/roles/:role/heartbeat — renew an existing role lease
+        // JSON body: {"room": "...", "summary": "...", "ttl": 300}  (all optional)
+        // Returns the updated RoleLease. Requires Bearer auth.
+        ("POST", ["api", "v1", "roles", role, "heartbeat"]) => {
+            let agent_id = match verify_bearer_agent_token(&raw) {
+                Ok(id) => id,
+                Err(e) => {
+                    send_json(
+                        stream,
+                        401,
+                        &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'")),
+                    );
+                    return;
+                }
+            };
+            let _ = agent_id;
+            let parsed: serde_json::Value =
+                serde_json::from_str(body).unwrap_or(serde_json::json!({}));
+            let room_label = parsed["room"].as_str().map(|s| s.to_string());
+            let summary = parsed["summary"].as_str().map(|s| s.to_string());
+            let ttl = parsed["ttl"].as_u64().unwrap_or(300);
+            let role_str = (*role).to_string();
+            match chat::role_heartbeat(&role_str, summary.as_deref(), ttl, room_label.as_deref()) {
+                Ok(lease) => {
+                    let body = serde_json::to_string(&lease).unwrap_or_else(|_| "{}".to_string());
+                    send_json(stream, 200, &body);
+                }
+                Err(e) => send_json(
+                    stream,
+                    400,
+                    &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'")),
+                ),
+            }
+        }
+
+        // DELETE /api/v1/roles/:role — release a role lease
+        // Query param: room=<label|id>  (optional). Requires Bearer auth.
+        ("DELETE", ["api", "v1", "roles", role]) => {
+            let agent_id = match verify_bearer_agent_token(&raw) {
+                Ok(id) => id,
+                Err(e) => {
+                    send_json(
+                        stream,
+                        401,
+                        &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'")),
+                    );
+                    return;
+                }
+            };
+            let _ = agent_id;
+            let qs = path.split_once('?').map(|(_, q)| q).unwrap_or("");
+            let room_param = qs
+                .split('&')
+                .find_map(|kv| kv.strip_prefix("room=").map(|v| url_decode(v)));
+            let role_str = (*role).to_string();
+            match chat::role_release(&role_str, room_param.as_deref()) {
+                Ok(()) => send_json(stream, 200, r#"{"status":"released"}"#),
+                Err(e) => send_json(
+                    stream,
+                    400,
+                    &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'")),
+                ),
+            }
+        }
+
+        // GET /api/v1/credits — check credit + trust balance for self or another agent
+        // Query params: room=<label|id>  agent=<id>  (both optional; defaults to self)
+        ("GET", ["api", "v1", "credits"]) => {
+            let qs = path.split_once('?').map(|(_, q)| q).unwrap_or("");
+            let room_param = qs
+                .split('&')
+                .find_map(|kv| kv.strip_prefix("room=").map(|v| url_decode(v)));
+            let agent_param = qs
+                .split('&')
+                .find_map(|kv| kv.strip_prefix("agent=").map(|v| url_decode(v)));
+            match chat::credit_balance_check(agent_param.as_deref(), room_param.as_deref()) {
+                Ok((credits, trust)) => {
+                    let body = serde_json::json!({"credits": credits, "trust": trust});
+                    send_json(stream, 200, &body.to_string());
+                }
+                Err(e) => send_json(
+                    stream,
+                    400,
+                    &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'")),
+                ),
+            }
+        }
+
+        // POST /api/v1/credits/grant — admin-only credit grant to another agent
+        // JSON body: {"agent_id": "...", "amount": 100, "reason": "...", "room": "..."}
+        // Returns: {"balance": <new_balance>}. Requires Bearer auth (admin only).
+        ("POST", ["api", "v1", "credits", "grant"]) => {
+            let agent_id = match verify_bearer_agent_token(&raw) {
+                Ok(id) => id,
+                Err(e) => {
+                    send_json(
+                        stream,
+                        401,
+                        &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'")),
+                    );
+                    return;
+                }
+            };
+            let _ = agent_id;
+            let parsed: serde_json::Value = match serde_json::from_str(body) {
+                Ok(v) => v,
+                Err(_) => {
+                    send_json(stream, 400, r#"{"error":"invalid JSON body"}"#);
+                    return;
+                }
+            };
+            let target = match parsed["agent_id"].as_str().filter(|s| !s.is_empty()) {
+                Some(a) => a.to_string(),
+                None => {
+                    send_json(stream, 400, r#"{"error":"agent_id is required"}"#);
+                    return;
+                }
+            };
+            let amount = match parsed["amount"].as_i64().filter(|&n| n != 0) {
+                Some(n) => n,
+                None => {
+                    send_json(
+                        stream,
+                        400,
+                        r#"{"error":"amount (non-zero integer) is required"}"#,
+                    );
+                    return;
+                }
+            };
+            let reason = parsed["reason"].as_str().unwrap_or("API grant").to_string();
+            let room_label = parsed["room"].as_str().map(|s| s.to_string());
+            match chat::credit_grant(&target, amount, &reason, room_label.as_deref()) {
+                Ok(balance) => {
+                    let resp = serde_json::json!({"agent_id": target, "amount": amount, "balance": balance});
+                    send_json(stream, 200, &resp.to_string());
+                }
+                Err(e) => send_json(
+                    stream,
+                    400,
+                    &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'")),
+                ),
+            }
+        }
+
+        // POST /api/v1/credits/spend — spend credits from the calling agent's balance
+        // JSON body: {"amount": 50, "reason": "...", "room": "..."}
+        // Returns: {"balance": <new_balance>}. Requires Bearer auth.
+        ("POST", ["api", "v1", "credits", "spend"]) => {
+            let agent_id = match verify_bearer_agent_token(&raw) {
+                Ok(id) => id,
+                Err(e) => {
+                    send_json(
+                        stream,
+                        401,
+                        &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'")),
+                    );
+                    return;
+                }
+            };
+            let _ = agent_id;
+            let parsed: serde_json::Value = match serde_json::from_str(body) {
+                Ok(v) => v,
+                Err(_) => {
+                    send_json(stream, 400, r#"{"error":"invalid JSON body"}"#);
+                    return;
+                }
+            };
+            let amount = match parsed["amount"].as_i64().filter(|&n| n > 0) {
+                Some(n) => n,
+                None => {
+                    send_json(
+                        stream,
+                        400,
+                        r#"{"error":"amount (positive integer) is required"}"#,
+                    );
+                    return;
+                }
+            };
+            let reason = parsed["reason"].as_str().unwrap_or("API spend").to_string();
+            let room_label = parsed["room"].as_str().map(|s| s.to_string());
+            match chat::credit_spend(amount, &reason, room_label.as_deref()) {
+                Ok(balance) => {
+                    let resp = serde_json::json!({"amount": amount, "balance": balance});
+                    send_json(stream, 200, &resp.to_string());
+                }
+                Err(e) => send_json(
+                    stream,
+                    400,
+                    &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'")),
+                ),
+            }
+        }
+
+        // POST /api/v1/credits/transfer — transfer credits to another agent
+        // JSON body: {"to": "<agent_id>", "amount": 50, "reason": "...", "room": "..."}
+        // Returns: {"from_balance": <n>, "to_balance": <n>}. Requires Bearer auth.
+        ("POST", ["api", "v1", "credits", "transfer"]) => {
+            let agent_id = match verify_bearer_agent_token(&raw) {
+                Ok(id) => id,
+                Err(e) => {
+                    send_json(
+                        stream,
+                        401,
+                        &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'")),
+                    );
+                    return;
+                }
+            };
+            let _ = agent_id;
+            let parsed: serde_json::Value = match serde_json::from_str(body) {
+                Ok(v) => v,
+                Err(_) => {
+                    send_json(stream, 400, r#"{"error":"invalid JSON body"}"#);
+                    return;
+                }
+            };
+            let to_agent = match parsed["to"].as_str().filter(|s| !s.is_empty()) {
+                Some(a) => a.to_string(),
+                None => {
+                    send_json(stream, 400, r#"{"error":"to (agent_id) is required"}"#);
+                    return;
+                }
+            };
+            let amount = match parsed["amount"].as_i64().filter(|&n| n > 0) {
+                Some(n) => n,
+                None => {
+                    send_json(
+                        stream,
+                        400,
+                        r#"{"error":"amount (positive integer) is required"}"#,
+                    );
+                    return;
+                }
+            };
+            let reason = parsed["reason"].as_str().map(|s| s.to_string());
+            let room_label = parsed["room"].as_str().map(|s| s.to_string());
+            match chat::credit_transfer(&to_agent, amount, reason.as_deref(), room_label.as_deref())
+            {
+                Ok((from_bal, to_bal)) => {
+                    let resp = serde_json::json!({"to": to_agent, "amount": amount, "from_balance": from_bal, "to_balance": to_bal});
+                    send_json(stream, 200, &resp.to_string());
+                }
+                Err(e) => send_json(
+                    stream,
+                    400,
+                    &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'")),
+                ),
             }
         }
 
@@ -2987,6 +3392,27 @@ mod tests {
         assert_eq!(room_param.as_deref(), Some("plaza"));
     }
 
+    // ── Roles API tests ───────────────────────────────────────────
+
+    #[test]
+    fn roles_api_get_route_segments() {
+        // GET /api/v1/roles should produce 3 segments
+        let path = "/api/v1/roles";
+        let path_only = path.split('?').next().unwrap_or(path);
+        let segments: Vec<&str> = path_only.trim_start_matches('/').split('/').collect();
+        assert_eq!(segments, vec!["api", "v1", "roles"]);
+    }
+
+    #[test]
+    fn roles_api_get_with_room_query() {
+        let path = "/api/v1/roles?room=plaza";
+        let qs = path.split_once('?').map(|(_, q)| q).unwrap_or("");
+        let room_param = qs
+            .split('&')
+            .find_map(|kv| kv.strip_prefix("room=").map(|v| url_decode(v)));
+        assert_eq!(room_param.as_deref(), Some("plaza"));
+    }
+
     #[test]
     fn bounties_api_post_body_parsing() {
         // Validate JSON body for POST /api/v1/bounties
@@ -3077,6 +3503,91 @@ mod tests {
     }
 
     #[test]
+    fn roles_api_post_body_parsing_full() {
+        let body = r#"{"role":"backend","room":"collab","summary":"building REST API","ttl":600}"#;
+        let parsed: serde_json::Value = serde_json::from_str(body).unwrap();
+        assert_eq!(parsed["role"].as_str(), Some("backend"));
+        assert_eq!(parsed["room"].as_str(), Some("collab"));
+        assert_eq!(parsed["summary"].as_str(), Some("building REST API"));
+        assert_eq!(parsed["ttl"].as_u64(), Some(600));
+    }
+
+    #[test]
+    fn roles_api_post_body_defaults_ttl() {
+        // When ttl is absent, route defaults to 300
+        let body = r#"{"role":"security"}"#;
+        let parsed: serde_json::Value = serde_json::from_str(body).unwrap();
+        let ttl = parsed["ttl"].as_u64().unwrap_or(300);
+        assert_eq!(ttl, 300);
+    }
+
+    #[test]
+    fn roles_api_post_body_missing_role() {
+        let body = r#"{"room":"collab"}"#;
+        let parsed: serde_json::Value = serde_json::from_str(body).unwrap();
+        let role = parsed["role"].as_str().filter(|s| !s.is_empty());
+        assert!(role.is_none(), "missing role should be rejected");
+    }
+
+    #[test]
+    fn roles_api_heartbeat_route_segments() {
+        // POST /api/v1/roles/backend/heartbeat → 5 segments
+        let path = "/api/v1/roles/backend/heartbeat";
+        let path_only = path.split('?').next().unwrap_or(path);
+        let segments: Vec<&str> = path_only.trim_start_matches('/').split('/').collect();
+        assert_eq!(segments, vec!["api", "v1", "roles", "backend", "heartbeat"]);
+    }
+
+    #[test]
+    fn roles_api_delete_route_segments() {
+        // DELETE /api/v1/roles/backend → 4 segments
+        let path = "/api/v1/roles/backend";
+        let path_only = path.split('?').next().unwrap_or(path);
+        let segments: Vec<&str> = path_only.trim_start_matches('/').split('/').collect();
+        assert_eq!(segments, vec!["api", "v1", "roles", "backend"]);
+    }
+
+    // ── Credits API tests ─────────────────────────────────────────
+
+    #[test]
+    fn credits_api_get_query_params() {
+        let path = "/api/v1/credits?room=plaza&agent=abc123";
+        let qs = path.split_once('?').map(|(_, q)| q).unwrap_or("");
+        let room = qs
+            .split('&')
+            .find_map(|kv| kv.strip_prefix("room=").map(|v| url_decode(v)));
+        let agent = qs
+            .split('&')
+            .find_map(|kv| kv.strip_prefix("agent=").map(|v| url_decode(v)));
+        assert_eq!(room.as_deref(), Some("plaza"));
+        assert_eq!(agent.as_deref(), Some("abc123"));
+    }
+
+    #[test]
+    fn credits_api_get_no_query_defaults_to_self() {
+        let path = "/api/v1/credits";
+        let qs = path.split_once('?').map(|(_, q)| q).unwrap_or("");
+        let room: Option<String> = qs
+            .split('&')
+            .find_map(|kv| kv.strip_prefix("room=").map(|v| url_decode(v)));
+        let agent: Option<String> = qs
+            .split('&')
+            .find_map(|kv| kv.strip_prefix("agent=").map(|v| url_decode(v)));
+        assert!(room.is_none());
+        assert!(agent.is_none());
+    }
+
+    #[test]
+    fn credits_api_grant_body_parsing() {
+        let body = r#"{"agent_id":"abc123","amount":500,"reason":"bounty reward","room":"plaza"}"#;
+        let parsed: serde_json::Value = serde_json::from_str(body).unwrap();
+        assert_eq!(parsed["agent_id"].as_str(), Some("abc123"));
+        assert_eq!(parsed["amount"].as_i64(), Some(500));
+        assert_eq!(parsed["reason"].as_str(), Some("bounty reward"));
+        assert_eq!(parsed["room"].as_str(), Some("plaza"));
+    }
+
+    #[test]
     fn bounties_api_verify_body_missing_agent_id() {
         let body = r#"{"room": "plaza"}"#;
         let parsed: serde_json::Value = serde_json::from_str(body).unwrap();
@@ -3114,16 +3625,26 @@ mod tests {
         let path = "/api/v1/rooms/plaza/messages";
         let path_only = path.split('?').next().unwrap_or(path);
         let segments: Vec<&str> = path_only.trim_start_matches('/').split('/').collect();
-        assert_eq!(segments.as_slice(), &["api", "v1", "rooms", "plaza", "messages"]);
+        assert_eq!(
+            segments.as_slice(),
+            &["api", "v1", "rooms", "plaza", "messages"]
+        );
     }
 
     #[test]
     fn messages_api_route_with_query_params() {
         let path = "/api/v1/rooms/plaza/messages?since=2h&limit=50";
         let qs = path.split_once('?').map(|(_, q)| q).unwrap_or("");
-        let since = qs.split('&').find_map(|kv| kv.strip_prefix("since=").map(|v| url_decode(v)))
+        let since = qs
+            .split('&')
+            .find_map(|kv| kv.strip_prefix("since=").map(|v| url_decode(v)))
             .unwrap_or_else(|| "1h".to_string());
-        let limit = qs.split('&').find_map(|kv| kv.strip_prefix("limit=").map(|v| v.parse::<usize>().unwrap_or(100)))
+        let limit = qs
+            .split('&')
+            .find_map(|kv| {
+                kv.strip_prefix("limit=")
+                    .map(|v| v.parse::<usize>().unwrap_or(100))
+            })
             .unwrap_or(100);
         assert_eq!(since, "2h");
         assert_eq!(limit, 50);
@@ -3134,9 +3655,16 @@ mod tests {
         // No query string — defaults apply
         let path = "/api/v1/rooms/plaza/messages";
         let qs = path.split_once('?').map(|(_, q)| q).unwrap_or("");
-        let since = qs.split('&').find_map(|kv| kv.strip_prefix("since=").map(|v| url_decode(v)))
+        let since = qs
+            .split('&')
+            .find_map(|kv| kv.strip_prefix("since=").map(|v| url_decode(v)))
             .unwrap_or_else(|| "1h".to_string());
-        let limit = qs.split('&').find_map(|kv| kv.strip_prefix("limit=").map(|v| v.parse::<usize>().unwrap_or(100)))
+        let limit = qs
+            .split('&')
+            .find_map(|kv| {
+                kv.strip_prefix("limit=")
+                    .map(|v| v.parse::<usize>().unwrap_or(100))
+            })
             .unwrap_or(100);
         assert_eq!(since, "1h");
         assert_eq!(limit, 100);
@@ -3148,17 +3676,26 @@ mod tests {
         let path = "/api/v1/rooms/plaza/messages/search";
         let path_only = path.split('?').next().unwrap_or(path);
         let segments: Vec<&str> = path_only.trim_start_matches('/').split('/').collect();
-        assert_eq!(segments.as_slice(), &["api", "v1", "rooms", "plaza", "messages", "search"]);
+        assert_eq!(
+            segments.as_slice(),
+            &["api", "v1", "rooms", "plaza", "messages", "search"]
+        );
     }
 
     #[test]
     fn messages_search_query_param_parsing() {
         let path = "/api/v1/rooms/plaza/messages/search?q=bounty&from=abc123&regex=1";
         let qs = path.split_once('?').map(|(_, q)| q).unwrap_or("");
-        let query = qs.split('&').find_map(|kv| kv.strip_prefix("q=").map(|v| url_decode(v)))
+        let query = qs
+            .split('&')
+            .find_map(|kv| kv.strip_prefix("q=").map(|v| url_decode(v)))
             .unwrap_or_default();
-        let from = qs.split('&').find_map(|kv| kv.strip_prefix("from=").map(|v| url_decode(v)));
-        let use_regex = qs.split('&').any(|kv| kv == "regex=1" || kv == "regex=true");
+        let from = qs
+            .split('&')
+            .find_map(|kv| kv.strip_prefix("from=").map(|v| url_decode(v)));
+        let use_regex = qs
+            .split('&')
+            .any(|kv| kv == "regex=1" || kv == "regex=true");
         assert_eq!(query, "bounty");
         assert_eq!(from.as_deref(), Some("abc123"));
         assert!(use_regex);
@@ -3168,7 +3705,9 @@ mod tests {
     fn messages_search_missing_q_detected() {
         let path = "/api/v1/rooms/plaza/messages/search?from=abc123";
         let qs = path.split_once('?').map(|(_, q)| q).unwrap_or("");
-        let query = qs.split('&').find_map(|kv| kv.strip_prefix("q=").map(|v| url_decode(v)))
+        let query = qs
+            .split('&')
+            .find_map(|kv| kv.strip_prefix("q=").map(|v| url_decode(v)))
             .unwrap_or_default();
         assert!(query.is_empty());
     }
@@ -3179,15 +3718,22 @@ mod tests {
         let path = "/api/v1/rooms/collab/mentions";
         let path_only = path.split('?').next().unwrap_or(path);
         let segments: Vec<&str> = path_only.trim_start_matches('/').split('/').collect();
-        assert_eq!(segments.as_slice(), &["api", "v1", "rooms", "collab", "mentions"]);
+        assert_eq!(
+            segments.as_slice(),
+            &["api", "v1", "rooms", "collab", "mentions"]
+        );
     }
 
     #[test]
     fn mentions_api_param_parsing() {
         let path = "/api/v1/rooms/plaza/mentions?agent=abc123def456&since=4h";
         let qs = path.split_once('?').map(|(_, q)| q).unwrap_or("");
-        let agent = qs.split('&').find_map(|kv| kv.strip_prefix("agent=").map(|v| url_decode(v)));
-        let since = qs.split('&').find_map(|kv| kv.strip_prefix("since=").map(|v| url_decode(v)))
+        let agent = qs
+            .split('&')
+            .find_map(|kv| kv.strip_prefix("agent=").map(|v| url_decode(v)));
+        let since = qs
+            .split('&')
+            .find_map(|kv| kv.strip_prefix("since=").map(|v| url_decode(v)))
             .unwrap_or_else(|| "1h".to_string());
         assert_eq!(agent.as_deref(), Some("abc123def456"));
         assert_eq!(since, "4h");
@@ -3199,9 +3745,14 @@ mod tests {
         let path = "/api/v1/rooms/plaza/links?since=48h";
         let path_only = path.split('?').next().unwrap_or(path);
         let segments: Vec<&str> = path_only.trim_start_matches('/').split('/').collect();
-        assert_eq!(segments.as_slice(), &["api", "v1", "rooms", "plaza", "links"]);
+        assert_eq!(
+            segments.as_slice(),
+            &["api", "v1", "rooms", "plaza", "links"]
+        );
         let qs = path.split_once('?').map(|(_, q)| q).unwrap_or("");
-        let since = qs.split('&').find_map(|kv| kv.strip_prefix("since=").map(|v| url_decode(v)))
+        let since = qs
+            .split('&')
+            .find_map(|kv| kv.strip_prefix("since=").map(|v| url_decode(v)))
             .unwrap_or_else(|| "24h".to_string());
         assert_eq!(since, "48h");
     }
@@ -3212,7 +3763,10 @@ mod tests {
         let path = "/api/v1/rooms/plaza/digest";
         let path_only = path.split('?').next().unwrap_or(path);
         let segments: Vec<&str> = path_only.trim_start_matches('/').split('/').collect();
-        assert_eq!(segments.as_slice(), &["api", "v1", "rooms", "plaza", "digest"]);
+        assert_eq!(
+            segments.as_slice(),
+            &["api", "v1", "rooms", "plaza", "digest"]
+        );
     }
 
     #[test]
@@ -3221,9 +3775,14 @@ mod tests {
         let path = "/api/v1/rooms/collab/recap?since=12h";
         let path_only = path.split('?').next().unwrap_or(path);
         let segments: Vec<&str> = path_only.trim_start_matches('/').split('/').collect();
-        assert_eq!(segments.as_slice(), &["api", "v1", "rooms", "collab", "recap"]);
+        assert_eq!(
+            segments.as_slice(),
+            &["api", "v1", "rooms", "collab", "recap"]
+        );
         let qs = path.split_once('?').map(|(_, q)| q).unwrap_or("");
-        let since = qs.split('&').find_map(|kv| kv.strip_prefix("since=").map(|v| url_decode(v)))
+        let since = qs
+            .split('&')
+            .find_map(|kv| kv.strip_prefix("since=").map(|v| url_decode(v)))
             .unwrap_or_else(|| "24h".to_string());
         assert_eq!(since, "12h");
     }
@@ -3234,7 +3793,10 @@ mod tests {
         let path = "/api/v1/rooms/plaza/read-status";
         let path_only = path.split('?').next().unwrap_or(path);
         let segments: Vec<&str> = path_only.trim_start_matches('/').split('/').collect();
-        assert_eq!(segments.as_slice(), &["api", "v1", "rooms", "plaza", "read-status"]);
+        assert_eq!(
+            segments.as_slice(),
+            &["api", "v1", "rooms", "plaza", "read-status"]
+        );
     }
 
     #[test]
@@ -3243,7 +3805,10 @@ mod tests {
         let path = "/api/v1/rooms/plaza/webhooks";
         let path_only = path.split('?').next().unwrap_or(path);
         let segments: Vec<&str> = path_only.trim_start_matches('/').split('/').collect();
-        assert_eq!(segments.as_slice(), &["api", "v1", "rooms", "plaza", "webhooks"]);
+        assert_eq!(
+            segments.as_slice(),
+            &["api", "v1", "rooms", "plaza", "webhooks"]
+        );
     }
 
     #[test]
@@ -3266,16 +3831,74 @@ mod tests {
         let path = "/api/v1/rooms/plaza/webhooks/wh-abc123";
         let path_only = path.split('?').next().unwrap_or(path);
         let segments: Vec<&str> = path_only.trim_start_matches('/').split('/').collect();
-        assert_eq!(segments.as_slice(), &["api", "v1", "rooms", "plaza", "webhooks", "wh-abc123"]);
+        assert_eq!(
+            segments.as_slice(),
+            &["api", "v1", "rooms", "plaza", "webhooks", "wh-abc123"]
+        );
     }
 
     #[test]
     fn messages_search_timestamp_params() {
         let path = "/api/v1/rooms/plaza/messages/search?q=hello&after=1700000000&before=1800000000";
         let qs = path.split_once('?').map(|(_, q)| q).unwrap_or("");
-        let after = qs.split('&').find_map(|kv| kv.strip_prefix("after=").map(|v| v.parse::<u64>().ok())).flatten();
-        let before = qs.split('&').find_map(|kv| kv.strip_prefix("before=").map(|v| v.parse::<u64>().ok())).flatten();
+        let after = qs
+            .split('&')
+            .find_map(|kv| kv.strip_prefix("after=").map(|v| v.parse::<u64>().ok()))
+            .flatten();
+        let before = qs
+            .split('&')
+            .find_map(|kv| kv.strip_prefix("before=").map(|v| v.parse::<u64>().ok()))
+            .flatten();
         assert_eq!(after, Some(1700000000u64));
         assert_eq!(before, Some(1800000000u64));
+    }
+
+    #[test]
+    fn credits_api_grant_missing_agent_rejected() {
+        let body = r#"{"amount":100}"#;
+        let parsed: serde_json::Value = serde_json::from_str(body).unwrap();
+        let agent = parsed["agent_id"].as_str().filter(|s| !s.is_empty());
+        assert!(agent.is_none());
+    }
+
+    #[test]
+    fn credits_api_grant_zero_amount_rejected() {
+        let body = r#"{"agent_id":"abc","amount":0}"#;
+        let parsed: serde_json::Value = serde_json::from_str(body).unwrap();
+        let amount = parsed["amount"].as_i64().filter(|&n| n != 0);
+        assert!(amount.is_none(), "zero amount should be rejected");
+    }
+
+    #[test]
+    fn credits_api_spend_body_parsing() {
+        let body = r#"{"amount":50,"reason":"claim fee","room":"collab"}"#;
+        let parsed: serde_json::Value = serde_json::from_str(body).unwrap();
+        assert_eq!(parsed["amount"].as_i64(), Some(50));
+        assert_eq!(parsed["reason"].as_str(), Some("claim fee"));
+    }
+
+    #[test]
+    fn credits_api_spend_negative_amount_rejected() {
+        let body = r#"{"amount":-10}"#;
+        let parsed: serde_json::Value = serde_json::from_str(body).unwrap();
+        let amount = parsed["amount"].as_i64().filter(|&n| n > 0);
+        assert!(amount.is_none(), "negative amount should be rejected");
+    }
+
+    #[test]
+    fn credits_api_transfer_body_parsing() {
+        let body = r#"{"to":"def456","amount":25,"reason":"tip","room":"plaza"}"#;
+        let parsed: serde_json::Value = serde_json::from_str(body).unwrap();
+        assert_eq!(parsed["to"].as_str(), Some("def456"));
+        assert_eq!(parsed["amount"].as_i64(), Some(25));
+        assert_eq!(parsed["reason"].as_str(), Some("tip"));
+    }
+
+    #[test]
+    fn credits_api_transfer_missing_to_rejected() {
+        let body = r#"{"amount":25}"#;
+        let parsed: serde_json::Value = serde_json::from_str(body).unwrap();
+        let to = parsed["to"].as_str().filter(|s| !s.is_empty());
+        assert!(to.is_none());
     }
 }
