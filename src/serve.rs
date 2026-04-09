@@ -15,6 +15,9 @@ use std::time::Duration;
 
 use crate::{chat, store};
 
+/// Credits charged per sandbox creation. Refunded if the provider call fails.
+const SANDBOX_OPEN_COST_CREDITS: i64 = 10;
+
 // ── HTML helpers ─────────────────────────────────────────────────
 
 fn html_escape(s: &str) -> String {
@@ -1107,6 +1110,17 @@ fn handle_connection(stream: TcpStream) {
                 Ok(v) => v,
                 Err(e) => { send_json(stream, 401, &format!(r#"{{"error":"{}"}}"#, e)); return; }
             };
+            // Atomic credit gate — check-and-debit in a single locked operation to
+            // prevent TOCTOU races where two concurrent requests both pass the balance
+            // check and then both deduct, driving the account negative.
+            let room_id = form_field(body, "room_id").unwrap_or_else(|| "plaza".to_string());
+            if let Err(e) = store::atomic_credit_debit(
+                &room_id, &verified_agent_id,
+                SANDBOX_OPEN_COST_CREDITS, "sandbox:open",
+            ) {
+                send_json(stream, 402, &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'")));
+                return;
+            }
             // Bug fix: always use the verified agent_id from the token
             match sandbox::create(&verified_agent_id) {
                 Ok(session) => {
@@ -1117,7 +1131,15 @@ fn handle_connection(stream: TcpStream) {
                     });
                     send_json(stream, 200, &resp.to_string());
                 }
-                Err(e) => send_json(stream, 500, &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'"))),
+                Err(e) => {
+                    // Sandbox creation failed — refund the pre-charged credits so the
+                    // agent is not penalised for a provider-side failure.
+                    store::credit_add(
+                        &room_id, &verified_agent_id,
+                        SANDBOX_OPEN_COST_CREDITS, "sandbox:open:refund",
+                    );
+                    send_json(stream, 500, &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'")));
+                }
             }
         }
 
