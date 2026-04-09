@@ -1415,6 +1415,252 @@ fn handle_connection(stream: TcpStream) {
             }
         }
 
+        // GET /api/v1/roles — list active role leases in a room
+        // Query param: room=<label|id>  (optional)
+        ("GET", ["api", "v1", "roles"]) => {
+            let qs = path.split_once('?').map(|(_, q)| q).unwrap_or("");
+            let room_param = qs.split('&').find_map(|kv| {
+                kv.strip_prefix("room=").map(|v| url_decode(v))
+            });
+            match chat::list_role_leases(room_param.as_deref()) {
+                Ok(leases) => {
+                    let body = serde_json::to_string(&leases).unwrap_or_else(|_| "[]".to_string());
+                    send_json(stream, 200, &body);
+                }
+                Err(e) => send_json(stream, 400, &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'"))),
+            }
+        }
+
+        // POST /api/v1/roles — claim (or renew) a role lease
+        // JSON body: {"role": "...", "room": "...", "summary": "...", "ttl": 300}
+        // Returns the RoleLease object. Requires Bearer auth.
+        ("POST", ["api", "v1", "roles"]) => {
+            let agent_id = match verify_bearer_agent_token(&raw) {
+                Ok(id) => id,
+                Err(e) => {
+                    send_json(stream, 401, &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'")));
+                    return;
+                }
+            };
+            let _ = agent_id; // identity verified; role_claim uses stored agent id
+            let parsed: serde_json::Value = match serde_json::from_str(body) {
+                Ok(v) => v,
+                Err(_) => {
+                    send_json(stream, 400, r#"{"error":"invalid JSON body"}"#);
+                    return;
+                }
+            };
+            let role = match parsed["role"].as_str().filter(|s| !s.is_empty()) {
+                Some(r) => r.to_string(),
+                None => {
+                    send_json(stream, 400, r#"{"error":"role is required"}"#);
+                    return;
+                }
+            };
+            let room_label = parsed["room"].as_str().map(|s| s.to_string());
+            let summary = parsed["summary"].as_str().map(|s| s.to_string());
+            let ttl = parsed["ttl"].as_u64().unwrap_or(300);
+            match chat::role_claim(&role, summary.as_deref(), ttl, room_label.as_deref()) {
+                Ok(lease) => {
+                    let body = serde_json::to_string(&lease).unwrap_or_else(|_| "{}".to_string());
+                    send_json(stream, 201, &body);
+                }
+                Err(e) => send_json(stream, 400, &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'"))),
+            }
+        }
+
+        // POST /api/v1/roles/:role/heartbeat — renew an existing role lease
+        // JSON body: {"room": "...", "summary": "...", "ttl": 300}  (all optional)
+        // Returns the updated RoleLease. Requires Bearer auth.
+        ("POST", ["api", "v1", "roles", role, "heartbeat"]) => {
+            let agent_id = match verify_bearer_agent_token(&raw) {
+                Ok(id) => id,
+                Err(e) => {
+                    send_json(stream, 401, &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'")));
+                    return;
+                }
+            };
+            let _ = agent_id;
+            let parsed: serde_json::Value = serde_json::from_str(body).unwrap_or(serde_json::json!({}));
+            let room_label = parsed["room"].as_str().map(|s| s.to_string());
+            let summary = parsed["summary"].as_str().map(|s| s.to_string());
+            let ttl = parsed["ttl"].as_u64().unwrap_or(300);
+            let role_str = (*role).to_string();
+            match chat::role_heartbeat(&role_str, summary.as_deref(), ttl, room_label.as_deref()) {
+                Ok(lease) => {
+                    let body = serde_json::to_string(&lease).unwrap_or_else(|_| "{}".to_string());
+                    send_json(stream, 200, &body);
+                }
+                Err(e) => send_json(stream, 400, &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'"))),
+            }
+        }
+
+        // DELETE /api/v1/roles/:role — release a role lease
+        // Query param: room=<label|id>  (optional). Requires Bearer auth.
+        ("DELETE", ["api", "v1", "roles", role]) => {
+            let agent_id = match verify_bearer_agent_token(&raw) {
+                Ok(id) => id,
+                Err(e) => {
+                    send_json(stream, 401, &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'")));
+                    return;
+                }
+            };
+            let _ = agent_id;
+            let qs = path.split_once('?').map(|(_, q)| q).unwrap_or("");
+            let room_param = qs.split('&').find_map(|kv| {
+                kv.strip_prefix("room=").map(|v| url_decode(v))
+            });
+            let role_str = (*role).to_string();
+            match chat::role_release(&role_str, room_param.as_deref()) {
+                Ok(()) => send_json(stream, 200, r#"{"status":"released"}"#),
+                Err(e) => send_json(stream, 400, &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'"))),
+            }
+        }
+
+        // GET /api/v1/credits — check credit + trust balance for self or another agent
+        // Query params: room=<label|id>  agent=<id>  (both optional; defaults to self)
+        ("GET", ["api", "v1", "credits"]) => {
+            let qs = path.split_once('?').map(|(_, q)| q).unwrap_or("");
+            let room_param = qs.split('&').find_map(|kv| {
+                kv.strip_prefix("room=").map(|v| url_decode(v))
+            });
+            let agent_param = qs.split('&').find_map(|kv| {
+                kv.strip_prefix("agent=").map(|v| url_decode(v))
+            });
+            match chat::credit_balance_check(agent_param.as_deref(), room_param.as_deref()) {
+                Ok((credits, trust)) => {
+                    let body = serde_json::json!({"credits": credits, "trust": trust});
+                    send_json(stream, 200, &body.to_string());
+                }
+                Err(e) => send_json(stream, 400, &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'"))),
+            }
+        }
+
+        // POST /api/v1/credits/grant — admin-only credit grant to another agent
+        // JSON body: {"agent_id": "...", "amount": 100, "reason": "...", "room": "..."}
+        // Returns: {"balance": <new_balance>}. Requires Bearer auth (admin only).
+        ("POST", ["api", "v1", "credits", "grant"]) => {
+            let agent_id = match verify_bearer_agent_token(&raw) {
+                Ok(id) => id,
+                Err(e) => {
+                    send_json(stream, 401, &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'")));
+                    return;
+                }
+            };
+            let _ = agent_id;
+            let parsed: serde_json::Value = match serde_json::from_str(body) {
+                Ok(v) => v,
+                Err(_) => {
+                    send_json(stream, 400, r#"{"error":"invalid JSON body"}"#);
+                    return;
+                }
+            };
+            let target = match parsed["agent_id"].as_str().filter(|s| !s.is_empty()) {
+                Some(a) => a.to_string(),
+                None => {
+                    send_json(stream, 400, r#"{"error":"agent_id is required"}"#);
+                    return;
+                }
+            };
+            let amount = match parsed["amount"].as_i64().filter(|&n| n != 0) {
+                Some(n) => n,
+                None => {
+                    send_json(stream, 400, r#"{"error":"amount (non-zero integer) is required"}"#);
+                    return;
+                }
+            };
+            let reason = parsed["reason"].as_str().unwrap_or("API grant").to_string();
+            let room_label = parsed["room"].as_str().map(|s| s.to_string());
+            match chat::credit_grant(&target, amount, &reason, room_label.as_deref()) {
+                Ok(balance) => {
+                    let resp = serde_json::json!({"agent_id": target, "amount": amount, "balance": balance});
+                    send_json(stream, 200, &resp.to_string());
+                }
+                Err(e) => send_json(stream, 400, &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'"))),
+            }
+        }
+
+        // POST /api/v1/credits/spend — spend credits from the calling agent's balance
+        // JSON body: {"amount": 50, "reason": "...", "room": "..."}
+        // Returns: {"balance": <new_balance>}. Requires Bearer auth.
+        ("POST", ["api", "v1", "credits", "spend"]) => {
+            let agent_id = match verify_bearer_agent_token(&raw) {
+                Ok(id) => id,
+                Err(e) => {
+                    send_json(stream, 401, &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'")));
+                    return;
+                }
+            };
+            let _ = agent_id;
+            let parsed: serde_json::Value = match serde_json::from_str(body) {
+                Ok(v) => v,
+                Err(_) => {
+                    send_json(stream, 400, r#"{"error":"invalid JSON body"}"#);
+                    return;
+                }
+            };
+            let amount = match parsed["amount"].as_i64().filter(|&n| n > 0) {
+                Some(n) => n,
+                None => {
+                    send_json(stream, 400, r#"{"error":"amount (positive integer) is required"}"#);
+                    return;
+                }
+            };
+            let reason = parsed["reason"].as_str().unwrap_or("API spend").to_string();
+            let room_label = parsed["room"].as_str().map(|s| s.to_string());
+            match chat::credit_spend(amount, &reason, room_label.as_deref()) {
+                Ok(balance) => {
+                    let resp = serde_json::json!({"amount": amount, "balance": balance});
+                    send_json(stream, 200, &resp.to_string());
+                }
+                Err(e) => send_json(stream, 400, &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'"))),
+            }
+        }
+
+        // POST /api/v1/credits/transfer — transfer credits to another agent
+        // JSON body: {"to": "<agent_id>", "amount": 50, "reason": "...", "room": "..."}
+        // Returns: {"from_balance": <n>, "to_balance": <n>}. Requires Bearer auth.
+        ("POST", ["api", "v1", "credits", "transfer"]) => {
+            let agent_id = match verify_bearer_agent_token(&raw) {
+                Ok(id) => id,
+                Err(e) => {
+                    send_json(stream, 401, &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'")));
+                    return;
+                }
+            };
+            let _ = agent_id;
+            let parsed: serde_json::Value = match serde_json::from_str(body) {
+                Ok(v) => v,
+                Err(_) => {
+                    send_json(stream, 400, r#"{"error":"invalid JSON body"}"#);
+                    return;
+                }
+            };
+            let to_agent = match parsed["to"].as_str().filter(|s| !s.is_empty()) {
+                Some(a) => a.to_string(),
+                None => {
+                    send_json(stream, 400, r#"{"error":"to (agent_id) is required"}"#);
+                    return;
+                }
+            };
+            let amount = match parsed["amount"].as_i64().filter(|&n| n > 0) {
+                Some(n) => n,
+                None => {
+                    send_json(stream, 400, r#"{"error":"amount (positive integer) is required"}"#);
+                    return;
+                }
+            };
+            let reason = parsed["reason"].as_str().map(|s| s.to_string());
+            let room_label = parsed["room"].as_str().map(|s| s.to_string());
+            match chat::credit_transfer(&to_agent, amount, reason.as_deref(), room_label.as_deref()) {
+                Ok((from_bal, to_bal)) => {
+                    let resp = serde_json::json!({"to": to_agent, "amount": amount, "from_balance": from_bal, "to_balance": to_bal});
+                    send_json(stream, 200, &resp.to_string());
+                }
+                Err(e) => send_json(stream, 400, &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'"))),
+            }
+        }
+
         _ => {
             send_response(
                 stream,
@@ -1986,5 +2232,150 @@ mod tests {
         let qs = path.split_once('?').map(|(_, q)| q).unwrap_or("");
         let room_param = qs.split('&').find_map(|kv| kv.strip_prefix("room=").map(|v| v.to_string()));
         assert_eq!(room_param.as_deref(), Some("collab"));
+    }
+
+    // ── Roles API tests ───────────────────────────────────────────
+
+    #[test]
+    fn roles_api_get_route_segments() {
+        // GET /api/v1/roles should produce 3 segments
+        let path = "/api/v1/roles";
+        let path_only = path.split('?').next().unwrap_or(path);
+        let segments: Vec<&str> = path_only.trim_start_matches('/').split('/').collect();
+        assert_eq!(segments, vec!["api", "v1", "roles"]);
+    }
+
+    #[test]
+    fn roles_api_get_with_room_query() {
+        let path = "/api/v1/roles?room=plaza";
+        let qs = path.split_once('?').map(|(_, q)| q).unwrap_or("");
+        let room_param = qs.split('&').find_map(|kv| kv.strip_prefix("room=").map(|v| url_decode(v)));
+        assert_eq!(room_param.as_deref(), Some("plaza"));
+    }
+
+    #[test]
+    fn roles_api_post_body_parsing_full() {
+        let body = r#"{"role":"backend","room":"collab","summary":"building REST API","ttl":600}"#;
+        let parsed: serde_json::Value = serde_json::from_str(body).unwrap();
+        assert_eq!(parsed["role"].as_str(), Some("backend"));
+        assert_eq!(parsed["room"].as_str(), Some("collab"));
+        assert_eq!(parsed["summary"].as_str(), Some("building REST API"));
+        assert_eq!(parsed["ttl"].as_u64(), Some(600));
+    }
+
+    #[test]
+    fn roles_api_post_body_defaults_ttl() {
+        // When ttl is absent, route defaults to 300
+        let body = r#"{"role":"security"}"#;
+        let parsed: serde_json::Value = serde_json::from_str(body).unwrap();
+        let ttl = parsed["ttl"].as_u64().unwrap_or(300);
+        assert_eq!(ttl, 300);
+    }
+
+    #[test]
+    fn roles_api_post_body_missing_role() {
+        let body = r#"{"room":"collab"}"#;
+        let parsed: serde_json::Value = serde_json::from_str(body).unwrap();
+        let role = parsed["role"].as_str().filter(|s| !s.is_empty());
+        assert!(role.is_none(), "missing role should be rejected");
+    }
+
+    #[test]
+    fn roles_api_heartbeat_route_segments() {
+        // POST /api/v1/roles/backend/heartbeat → 5 segments
+        let path = "/api/v1/roles/backend/heartbeat";
+        let path_only = path.split('?').next().unwrap_or(path);
+        let segments: Vec<&str> = path_only.trim_start_matches('/').split('/').collect();
+        assert_eq!(segments, vec!["api", "v1", "roles", "backend", "heartbeat"]);
+    }
+
+    #[test]
+    fn roles_api_delete_route_segments() {
+        // DELETE /api/v1/roles/backend → 4 segments
+        let path = "/api/v1/roles/backend";
+        let path_only = path.split('?').next().unwrap_or(path);
+        let segments: Vec<&str> = path_only.trim_start_matches('/').split('/').collect();
+        assert_eq!(segments, vec!["api", "v1", "roles", "backend"]);
+    }
+
+    // ── Credits API tests ─────────────────────────────────────────
+
+    #[test]
+    fn credits_api_get_query_params() {
+        let path = "/api/v1/credits?room=plaza&agent=abc123";
+        let qs = path.split_once('?').map(|(_, q)| q).unwrap_or("");
+        let room = qs.split('&').find_map(|kv| kv.strip_prefix("room=").map(|v| url_decode(v)));
+        let agent = qs.split('&').find_map(|kv| kv.strip_prefix("agent=").map(|v| url_decode(v)));
+        assert_eq!(room.as_deref(), Some("plaza"));
+        assert_eq!(agent.as_deref(), Some("abc123"));
+    }
+
+    #[test]
+    fn credits_api_get_no_query_defaults_to_self() {
+        let path = "/api/v1/credits";
+        let qs = path.split_once('?').map(|(_, q)| q).unwrap_or("");
+        let room: Option<String> = qs.split('&').find_map(|kv| kv.strip_prefix("room=").map(|v| url_decode(v)));
+        let agent: Option<String> = qs.split('&').find_map(|kv| kv.strip_prefix("agent=").map(|v| url_decode(v)));
+        assert!(room.is_none());
+        assert!(agent.is_none());
+    }
+
+    #[test]
+    fn credits_api_grant_body_parsing() {
+        let body = r#"{"agent_id":"abc123","amount":500,"reason":"bounty reward","room":"plaza"}"#;
+        let parsed: serde_json::Value = serde_json::from_str(body).unwrap();
+        assert_eq!(parsed["agent_id"].as_str(), Some("abc123"));
+        assert_eq!(parsed["amount"].as_i64(), Some(500));
+        assert_eq!(parsed["reason"].as_str(), Some("bounty reward"));
+        assert_eq!(parsed["room"].as_str(), Some("plaza"));
+    }
+
+    #[test]
+    fn credits_api_grant_missing_agent_rejected() {
+        let body = r#"{"amount":100}"#;
+        let parsed: serde_json::Value = serde_json::from_str(body).unwrap();
+        let agent = parsed["agent_id"].as_str().filter(|s| !s.is_empty());
+        assert!(agent.is_none());
+    }
+
+    #[test]
+    fn credits_api_grant_zero_amount_rejected() {
+        let body = r#"{"agent_id":"abc","amount":0}"#;
+        let parsed: serde_json::Value = serde_json::from_str(body).unwrap();
+        let amount = parsed["amount"].as_i64().filter(|&n| n != 0);
+        assert!(amount.is_none(), "zero amount should be rejected");
+    }
+
+    #[test]
+    fn credits_api_spend_body_parsing() {
+        let body = r#"{"amount":50,"reason":"claim fee","room":"collab"}"#;
+        let parsed: serde_json::Value = serde_json::from_str(body).unwrap();
+        assert_eq!(parsed["amount"].as_i64(), Some(50));
+        assert_eq!(parsed["reason"].as_str(), Some("claim fee"));
+    }
+
+    #[test]
+    fn credits_api_spend_negative_amount_rejected() {
+        let body = r#"{"amount":-10}"#;
+        let parsed: serde_json::Value = serde_json::from_str(body).unwrap();
+        let amount = parsed["amount"].as_i64().filter(|&n| n > 0);
+        assert!(amount.is_none(), "negative amount should be rejected");
+    }
+
+    #[test]
+    fn credits_api_transfer_body_parsing() {
+        let body = r#"{"to":"def456","amount":25,"reason":"tip","room":"plaza"}"#;
+        let parsed: serde_json::Value = serde_json::from_str(body).unwrap();
+        assert_eq!(parsed["to"].as_str(), Some("def456"));
+        assert_eq!(parsed["amount"].as_i64(), Some(25));
+        assert_eq!(parsed["reason"].as_str(), Some("tip"));
+    }
+
+    #[test]
+    fn credits_api_transfer_missing_to_rejected() {
+        let body = r#"{"amount":25}"#;
+        let parsed: serde_json::Value = serde_json::from_str(body).unwrap();
+        let to = parsed["to"].as_str().filter(|s| !s.is_empty());
+        assert!(to.is_none());
     }
 }
