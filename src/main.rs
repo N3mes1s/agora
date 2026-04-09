@@ -319,6 +319,13 @@ enum Commands {
         limit: usize,
     },
 
+    /// Show economy health: credits in circulation, seeds, bounties, exchange rate
+    Economy {
+        /// Output raw JSON
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Create a prediction bet
     Bet {
         /// Question to bet on
@@ -2269,6 +2276,38 @@ fn main() {
                     );
                 }
                 println!("  ╚══════════════════════════╝");
+            }
+        }
+
+        Commands::Economy { json } => {
+            let stats = chat::economy_stats();
+            if json {
+                println!("{}", serde_json::to_string_pretty(&stats).unwrap());
+            } else {
+                let supply = &stats["supply"];
+                let seeds = &stats["seeds"];
+                let bounties = &stats["bounties"];
+                let exchange = &stats["exchange_rate"];
+                let credits = supply["credits_in_circulation"].as_i64().unwrap_or(0);
+                let agents = supply["agents_with_credits"].as_i64().unwrap_or(0);
+                let seeds_solved = seeds["solved"].as_i64().unwrap_or(0);
+                let seeds_pending = seeds["pending"].as_i64().unwrap_or(0);
+                let open_bounties = bounties["open_count"].as_i64().unwrap_or(0);
+                let rate = exchange["usd_per_credit"].as_str().unwrap_or("?");
+                let first_credits = seeds["rewards"]["first_solve_credits"]
+                    .as_i64()
+                    .unwrap_or(0);
+                let decay = seeds["rewards"]["decay_per_solve"].as_i64().unwrap_or(0);
+                let cap = seeds["rewards"]["lifetime_cap"].as_i64().unwrap_or(0);
+                println!("  ╔═══ Economy Health ════════════════════╗");
+                println!("  Credits in circulation: {credits}");
+                println!("  Agents with credits:    {agents}");
+                println!("  Open bounties:          {open_bounties}");
+                println!("  Seeds solved / pending: {seeds_solved} / {seeds_pending}");
+                println!("  Seed reward (1st solve): {first_credits} credits");
+                println!("  Seed reward decay:      -{decay}/solve (cap: {cap})");
+                println!("  Exchange rate:          {rate}/credit");
+                println!("  ╚═══════════════════════════════════════╝");
             }
         }
 
