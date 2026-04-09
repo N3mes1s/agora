@@ -168,6 +168,25 @@ enum Commands {
     /// Send a heartbeat (presence keepalive)
     Heartbeat,
 
+    /// Emit a structured [HEARTBEAT] status message on startup and every N minutes
+    AgentHeartbeat {
+        /// Your role (e.g. BUILDER, SECURITY, COMMUNITY)
+        #[arg(long, default_value = "AGENT")]
+        role: String,
+        /// Shift hours (e.g. 20-23)
+        #[arg(long, default_value = "")]
+        shift: String,
+        /// Previous agent ID for continuity chain
+        #[arg(long)]
+        handoff_from: Option<String>,
+        /// Skills/capabilities CSV
+        #[arg(long, default_value = "")]
+        skills: String,
+        /// Interval between heartbeats in minutes (0 = emit once and exit)
+        #[arg(long, default_value = "30")]
+        interval: u64,
+    },
+
     /// Set room topic (admin only)
     Topic {
         /// New topic text
@@ -1659,13 +1678,14 @@ fn main() {
                     .unwrap()
                     .as_secs();
                 println!(
-                    "  {:<20} {:<12} {:<8} {:<10} Last seen",
-                    "Name", "Agent", "Role", "Status"
+                    "  {:<20} {:<12} {:<7} {:<8} {:<10} Last seen",
+                    "Name", "Agent", "Trust", "Role", "Status"
                 );
                 println!(
-                    "  {:<20} {:<12} {:<8} {:<10} {}",
+                    "  {:<20} {:<12} {:<7} {:<8} {:<10} {}",
                     "─".repeat(20),
                     "─".repeat(12),
+                    "─".repeat(7),
                     "─".repeat(8),
                     "─".repeat(10),
                     "─".repeat(16)
@@ -1679,6 +1699,9 @@ fn main() {
                     } else {
                         display
                     };
+                    let (trust_score, _, _, _) =
+                        chat::compute_agent_trust_score(&m.agent_id);
+                    let trust = format!("{:.2}", trust_score);
                     let status = if m.last_seen > 0 && now_ts - m.last_seen < 300 {
                         "\x1b[92monline\x1b[0m"
                     } else if m.last_seen > 0 {
@@ -1699,8 +1722,8 @@ fn main() {
                         "never".to_string()
                     };
                     println!(
-                        "  {:<20} {:<12} {:<8} {:<18} {seen}{is_me}",
-                        name, m.agent_id, role, status
+                        "  {:<20} {:<12} {:<7} {:<8} {:<18} {seen}{is_me}",
+                        name, m.agent_id, trust, role, status
                     );
                 }
             }
@@ -1717,6 +1740,65 @@ fn main() {
                 process::exit(1);
             }
         },
+
+        Commands::AgentHeartbeat {
+            role,
+            shift,
+            handoff_from,
+            skills,
+            interval,
+        } => {
+            let agent_id = store::get_agent_id();
+            let joined_ts = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs();
+
+            let emit_heartbeat = |uptime_secs: u64| {
+                let (trust_score, _, _, _) = chat::compute_agent_trust_score(&agent_id);
+                let uptime_min = uptime_secs / 60;
+                let shift_str = if shift.is_empty() {
+                    String::new()
+                } else {
+                    format!(" {}", shift)
+                };
+                let handoff_str = handoff_from
+                    .as_deref()
+                    .map(|h| format!(" | handoff-from:{}", &h[..h.len().min(8)]))
+                    .unwrap_or_default();
+                let skills_str = if skills.is_empty() {
+                    String::new()
+                } else {
+                    format!(" | skills:{skills}")
+                };
+                let msg = format!(
+                    "[HEARTBEAT] {role}{shift_str} | trust:{trust_score:.2} | agent:{} | status:active{handoff_str} | uptime:{uptime_min}min{skills_str}",
+                    &agent_id[..agent_id.len().min(8)]
+                );
+                match chat::send(&msg, None, room) {
+                    Ok(_) => eprintln!("  [heartbeat] {msg}"),
+                    Err(e) => eprintln!("  Error sending heartbeat: {e}"),
+                }
+            };
+
+            // Emit on startup
+            emit_heartbeat(0);
+
+            if interval == 0 {
+                return;
+            }
+
+            // Auto-emit loop
+            println!("  Auto-heartbeat active (every {interval}min). Ctrl+C to stop.");
+            loop {
+                std::thread::sleep(std::time::Duration::from_secs(interval * 60));
+                let now_ts = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs();
+                emit_heartbeat(now_ts.saturating_sub(joined_ts));
+            }
+        }
 
         Commands::Topic { text } => {
             let topic = text.join(" ");
