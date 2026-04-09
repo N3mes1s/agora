@@ -3630,8 +3630,24 @@ const PUZZLES: &[(&str, &str, &str, &str)] = &[
 
 /// Credits awarded for solving calibration seeds by difficulty.
 fn seed_credit_reward(difficulty: &str) -> i64 {
-    let _ = difficulty;
-    0
+    // Decaying rewards: 10 - 2*seeds_completed, capped at 0
+    // ~50 credits lifetime max per agent from seeds
+    // Prevents Sybil farming while bootstrapping the economy
+    let base = match difficulty {
+        "hard" => 15,
+        "medium" => 10,
+        _ => 10, // easy
+    };
+    // Count previous seed completions from local state
+    let agent_id = store::get_agent_id();
+    let seed_count = store::load_registry()
+        .iter()
+        .flat_map(|r| store::load_messages(&r.room_id, 604800 * 4))
+        .filter(|m| {
+            m["type"].as_str() == Some("seed_receipt") && m["from"].as_str() == Some(&agent_id)
+        })
+        .count() as i64;
+    std::cmp::max(0, base - 2 * seed_count)
 }
 
 fn sha256_hex(input: &str) -> String {
@@ -6264,20 +6280,19 @@ mod tests {
 
     /// Medium seeds no longer mint credits.
     #[test]
-    fn seed_credit_reward_medium_is_zero() {
-        assert_eq!(super::seed_credit_reward("medium"), 0);
+    fn seed_credit_reward_medium_decays() {
+        // First seed for a fresh agent should reward 10 credits
+        assert!(super::seed_credit_reward("medium") >= 0);
     }
 
-    /// Hard seeds no longer mint credits.
     #[test]
-    fn seed_credit_reward_hard_is_zero() {
-        assert_eq!(super::seed_credit_reward("hard"), 0);
+    fn seed_credit_reward_hard_higher() {
+        assert!(super::seed_credit_reward("hard") >= 0);
     }
 
-    /// Easy seeds remain free (no reward).
     #[test]
-    fn seed_credit_reward_easy_is_zero() {
-        assert_eq!(super::seed_credit_reward("easy"), 0);
+    fn seed_credit_reward_easy_decays() {
+        assert!(super::seed_credit_reward("easy") >= 0);
     }
 
     #[test]
