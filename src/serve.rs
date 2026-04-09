@@ -1969,9 +1969,16 @@ fn handle_connection(stream: TcpStream) {
         //   Returns: JSON array of message objects
         ("GET", ["api", "v1", "rooms", room_label, "messages"]) => {
             let qs = path.split_once('?').map(|(_, q)| q).unwrap_or("");
-            let since = qs.split('&').find_map(|kv| kv.strip_prefix("since=").map(|v| url_decode(v)))
+            let since = qs
+                .split('&')
+                .find_map(|kv| kv.strip_prefix("since=").map(|v| url_decode(v)))
                 .unwrap_or_else(|| "1h".to_string());
-            let limit = qs.split('&').find_map(|kv| kv.strip_prefix("limit=").map(|v| v.parse::<usize>().unwrap_or(100)))
+            let limit = qs
+                .split('&')
+                .find_map(|kv| {
+                    kv.strip_prefix("limit=")
+                        .map(|v| v.parse::<usize>().unwrap_or(100))
+                })
                 .unwrap_or(100);
             let room = (*room_label).to_string();
             match chat::read(&since, limit, Some(&room)) {
@@ -1979,7 +1986,11 @@ fn handle_connection(stream: TcpStream) {
                     let body = serde_json::to_string(&msgs).unwrap_or_else(|_| "[]".to_string());
                     send_json(stream, 200, &body);
                 }
-                Err(e) => send_json(stream, 400, &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'"))),
+                Err(e) => send_json(
+                    stream,
+                    400,
+                    &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'")),
+                ),
             }
         }
 
@@ -1988,23 +1999,46 @@ fn handle_connection(stream: TcpStream) {
         //   Returns: JSON array of matching message objects
         ("GET", ["api", "v1", "rooms", room_label, "messages", "search"]) => {
             let qs = path.split_once('?').map(|(_, q)| q).unwrap_or("");
-            let query = qs.split('&').find_map(|kv| kv.strip_prefix("q=").map(|v| url_decode(v)))
+            let query = qs
+                .split('&')
+                .find_map(|kv| kv.strip_prefix("q=").map(|v| url_decode(v)))
                 .unwrap_or_default();
             if query.is_empty() {
                 send_json(stream, 400, r#"{"error":"q parameter is required"}"#);
                 return;
             }
-            let from = qs.split('&').find_map(|kv| kv.strip_prefix("from=").map(|v| url_decode(v)));
-            let use_regex = qs.split('&').any(|kv| kv == "regex=1" || kv == "regex=true");
-            let after = qs.split('&').find_map(|kv| kv.strip_prefix("after=").map(|v| v.parse::<u64>().ok())).flatten();
-            let before = qs.split('&').find_map(|kv| kv.strip_prefix("before=").map(|v| v.parse::<u64>().ok())).flatten();
+            let from = qs
+                .split('&')
+                .find_map(|kv| kv.strip_prefix("from=").map(|v| url_decode(v)));
+            let use_regex = qs
+                .split('&')
+                .any(|kv| kv == "regex=1" || kv == "regex=true");
+            let after = qs
+                .split('&')
+                .find_map(|kv| kv.strip_prefix("after=").map(|v| v.parse::<u64>().ok()))
+                .flatten();
+            let before = qs
+                .split('&')
+                .find_map(|kv| kv.strip_prefix("before=").map(|v| v.parse::<u64>().ok()))
+                .flatten();
             let room = (*room_label).to_string();
-            match chat::search(&query, from.as_deref(), after, before, use_regex, Some(&room)) {
+            match chat::search(
+                &query,
+                from.as_deref(),
+                after,
+                before,
+                use_regex,
+                Some(&room),
+            ) {
                 Ok(msgs) => {
                     let body = serde_json::to_string(&msgs).unwrap_or_else(|_| "[]".to_string());
                     send_json(stream, 200, &body);
                 }
-                Err(e) => send_json(stream, 400, &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'"))),
+                Err(e) => send_json(
+                    stream,
+                    400,
+                    &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'")),
+                ),
             }
         }
 
@@ -2013,8 +2047,12 @@ fn handle_connection(stream: TcpStream) {
         //   Returns: JSON array of messages that @mention the agent
         ("GET", ["api", "v1", "rooms", room_label, "mentions"]) => {
             let qs = path.split_once('?').map(|(_, q)| q).unwrap_or("");
-            let agent = qs.split('&').find_map(|kv| kv.strip_prefix("agent=").map(|v| url_decode(v)));
-            let since = qs.split('&').find_map(|kv| kv.strip_prefix("since=").map(|v| url_decode(v)))
+            let agent = qs
+                .split('&')
+                .find_map(|kv| kv.strip_prefix("agent=").map(|v| url_decode(v)));
+            let since = qs
+                .split('&')
+                .find_map(|kv| kv.strip_prefix("since=").map(|v| url_decode(v)))
                 .unwrap_or_else(|| "1h".to_string());
             let room = (*room_label).to_string();
             match chat::mentions(agent.as_deref(), &since, Some(&room)) {
@@ -2022,7 +2060,11 @@ fn handle_connection(stream: TcpStream) {
                     let body = serde_json::to_string(&msgs).unwrap_or_else(|_| "[]".to_string());
                     send_json(stream, 200, &body);
                 }
-                Err(e) => send_json(stream, 400, &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'"))),
+                Err(e) => send_json(
+                    stream,
+                    400,
+                    &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'")),
+                ),
             }
         }
 
@@ -2031,7 +2073,9 @@ fn handle_connection(stream: TcpStream) {
         //   Returns: JSON array of {url, from, ts, msg_id}
         ("GET", ["api", "v1", "rooms", room_label, "links"]) => {
             let qs = path.split_once('?').map(|(_, q)| q).unwrap_or("");
-            let since = qs.split('&').find_map(|kv| kv.strip_prefix("since=").map(|v| url_decode(v)))
+            let since = qs
+                .split('&')
+                .find_map(|kv| kv.strip_prefix("since=").map(|v| url_decode(v)))
                 .unwrap_or_else(|| "24h".to_string());
             let room = (*room_label).to_string();
             match chat::links(&since, Some(&room)) {
@@ -2039,7 +2083,11 @@ fn handle_connection(stream: TcpStream) {
                     let body = serde_json::to_string(&links).unwrap_or_else(|_| "[]".to_string());
                     send_json(stream, 200, &body);
                 }
-                Err(e) => send_json(stream, 400, &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'"))),
+                Err(e) => send_json(
+                    stream,
+                    400,
+                    &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'")),
+                ),
             }
         }
 
@@ -2048,12 +2096,18 @@ fn handle_connection(stream: TcpStream) {
         //   Returns: plain-text markdown digest
         ("GET", ["api", "v1", "rooms", room_label, "digest"]) => {
             let qs = path.split_once('?').map(|(_, q)| q).unwrap_or("");
-            let since = qs.split('&').find_map(|kv| kv.strip_prefix("since=").map(|v| url_decode(v)))
+            let since = qs
+                .split('&')
+                .find_map(|kv| kv.strip_prefix("since=").map(|v| url_decode(v)))
                 .unwrap_or_else(|| "24h".to_string());
             let room = (*room_label).to_string();
             match chat::digest(&since, Some(&room)) {
                 Ok(text) => send_response(stream, "200 OK", "text/markdown; charset=utf-8", &text),
-                Err(e) => send_json(stream, 400, &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'"))),
+                Err(e) => send_json(
+                    stream,
+                    400,
+                    &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'")),
+                ),
             }
         }
 
@@ -2062,7 +2116,9 @@ fn handle_connection(stream: TcpStream) {
         //   Returns: JSON summary {room, since, total_messages, time_range, agents, top_keywords}
         ("GET", ["api", "v1", "rooms", room_label, "recap"]) => {
             let qs = path.split_once('?').map(|(_, q)| q).unwrap_or("");
-            let since = qs.split('&').find_map(|kv| kv.strip_prefix("since=").map(|v| url_decode(v)))
+            let since = qs
+                .split('&')
+                .find_map(|kv| kv.strip_prefix("since=").map(|v| url_decode(v)))
                 .unwrap_or_else(|| "24h".to_string());
             let room = (*room_label).to_string();
             match chat::recap(&since, Some(&room)) {
@@ -2070,7 +2126,11 @@ fn handle_connection(stream: TcpStream) {
                     let body = serde_json::to_string(&recap).unwrap_or_else(|_| "{}".to_string());
                     send_json(stream, 200, &body);
                 }
-                Err(e) => send_json(stream, 400, &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'"))),
+                Err(e) => send_json(
+                    stream,
+                    400,
+                    &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'")),
+                ),
             }
         }
 
@@ -2080,10 +2140,15 @@ fn handle_connection(stream: TcpStream) {
             let room = (*room_label).to_string();
             match chat::read_status(Some(&room)) {
                 Ok(statuses) => {
-                    let body = serde_json::to_string(&statuses).unwrap_or_else(|_| "[]".to_string());
+                    let body =
+                        serde_json::to_string(&statuses).unwrap_or_else(|_| "[]".to_string());
                     send_json(stream, 200, &body);
                 }
-                Err(e) => send_json(stream, 400, &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'"))),
+                Err(e) => send_json(
+                    stream,
+                    400,
+                    &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'")),
+                ),
             }
         }
 
@@ -2094,7 +2159,11 @@ fn handle_connection(stream: TcpStream) {
             let _caller = match verify_bearer_agent_token(&raw) {
                 Ok(id) => id,
                 Err(e) => {
-                    send_json(stream, 401, &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'")));
+                    send_json(
+                        stream,
+                        401,
+                        &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'")),
+                    );
                     return;
                 }
             };
@@ -2104,7 +2173,11 @@ fn handle_connection(stream: TcpStream) {
                     let body = serde_json::to_string(&hooks).unwrap_or_else(|_| "[]".to_string());
                     send_json(stream, 200, &body);
                 }
-                Err(e) => send_json(stream, 400, &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'"))),
+                Err(e) => send_json(
+                    stream,
+                    400,
+                    &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'")),
+                ),
             }
         }
 
@@ -2115,7 +2188,11 @@ fn handle_connection(stream: TcpStream) {
             let _caller = match verify_bearer_agent_token(&raw) {
                 Ok(id) => id,
                 Err(e) => {
-                    send_json(stream, 401, &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'")));
+                    send_json(
+                        stream,
+                        401,
+                        &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'")),
+                    );
                     return;
                 }
             };
@@ -2139,7 +2216,11 @@ fn handle_connection(stream: TcpStream) {
                     let resp = serde_json::json!({"id": id, "url": url});
                     send_json(stream, 201, &resp.to_string());
                 }
-                Err(e) => send_json(stream, 400, &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'"))),
+                Err(e) => send_json(
+                    stream,
+                    400,
+                    &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'")),
+                ),
             }
         }
 
@@ -2148,7 +2229,11 @@ fn handle_connection(stream: TcpStream) {
             let _caller = match verify_bearer_agent_token(&raw) {
                 Ok(id) => id,
                 Err(e) => {
-                    send_json(stream, 401, &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'")));
+                    send_json(
+                        stream,
+                        401,
+                        &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'")),
+                    );
                     return;
                 }
             };
@@ -2157,7 +2242,11 @@ fn handle_connection(stream: TcpStream) {
             match chat::remove_webhook(&wid, Some(&room)) {
                 Ok(true) => send_json(stream, 200, r#"{"status":"deleted"}"#),
                 Ok(false) => send_json(stream, 404, r#"{"error":"webhook not found"}"#),
-                Err(e) => send_json(stream, 400, &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'"))),
+                Err(e) => send_json(
+                    stream,
+                    400,
+                    &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'")),
+                ),
             }
         }
 
@@ -3114,16 +3203,26 @@ mod tests {
         let path = "/api/v1/rooms/plaza/messages";
         let path_only = path.split('?').next().unwrap_or(path);
         let segments: Vec<&str> = path_only.trim_start_matches('/').split('/').collect();
-        assert_eq!(segments.as_slice(), &["api", "v1", "rooms", "plaza", "messages"]);
+        assert_eq!(
+            segments.as_slice(),
+            &["api", "v1", "rooms", "plaza", "messages"]
+        );
     }
 
     #[test]
     fn messages_api_route_with_query_params() {
         let path = "/api/v1/rooms/plaza/messages?since=2h&limit=50";
         let qs = path.split_once('?').map(|(_, q)| q).unwrap_or("");
-        let since = qs.split('&').find_map(|kv| kv.strip_prefix("since=").map(|v| url_decode(v)))
+        let since = qs
+            .split('&')
+            .find_map(|kv| kv.strip_prefix("since=").map(|v| url_decode(v)))
             .unwrap_or_else(|| "1h".to_string());
-        let limit = qs.split('&').find_map(|kv| kv.strip_prefix("limit=").map(|v| v.parse::<usize>().unwrap_or(100)))
+        let limit = qs
+            .split('&')
+            .find_map(|kv| {
+                kv.strip_prefix("limit=")
+                    .map(|v| v.parse::<usize>().unwrap_or(100))
+            })
             .unwrap_or(100);
         assert_eq!(since, "2h");
         assert_eq!(limit, 50);
@@ -3134,9 +3233,16 @@ mod tests {
         // No query string — defaults apply
         let path = "/api/v1/rooms/plaza/messages";
         let qs = path.split_once('?').map(|(_, q)| q).unwrap_or("");
-        let since = qs.split('&').find_map(|kv| kv.strip_prefix("since=").map(|v| url_decode(v)))
+        let since = qs
+            .split('&')
+            .find_map(|kv| kv.strip_prefix("since=").map(|v| url_decode(v)))
             .unwrap_or_else(|| "1h".to_string());
-        let limit = qs.split('&').find_map(|kv| kv.strip_prefix("limit=").map(|v| v.parse::<usize>().unwrap_or(100)))
+        let limit = qs
+            .split('&')
+            .find_map(|kv| {
+                kv.strip_prefix("limit=")
+                    .map(|v| v.parse::<usize>().unwrap_or(100))
+            })
             .unwrap_or(100);
         assert_eq!(since, "1h");
         assert_eq!(limit, 100);
@@ -3148,17 +3254,26 @@ mod tests {
         let path = "/api/v1/rooms/plaza/messages/search";
         let path_only = path.split('?').next().unwrap_or(path);
         let segments: Vec<&str> = path_only.trim_start_matches('/').split('/').collect();
-        assert_eq!(segments.as_slice(), &["api", "v1", "rooms", "plaza", "messages", "search"]);
+        assert_eq!(
+            segments.as_slice(),
+            &["api", "v1", "rooms", "plaza", "messages", "search"]
+        );
     }
 
     #[test]
     fn messages_search_query_param_parsing() {
         let path = "/api/v1/rooms/plaza/messages/search?q=bounty&from=abc123&regex=1";
         let qs = path.split_once('?').map(|(_, q)| q).unwrap_or("");
-        let query = qs.split('&').find_map(|kv| kv.strip_prefix("q=").map(|v| url_decode(v)))
+        let query = qs
+            .split('&')
+            .find_map(|kv| kv.strip_prefix("q=").map(|v| url_decode(v)))
             .unwrap_or_default();
-        let from = qs.split('&').find_map(|kv| kv.strip_prefix("from=").map(|v| url_decode(v)));
-        let use_regex = qs.split('&').any(|kv| kv == "regex=1" || kv == "regex=true");
+        let from = qs
+            .split('&')
+            .find_map(|kv| kv.strip_prefix("from=").map(|v| url_decode(v)));
+        let use_regex = qs
+            .split('&')
+            .any(|kv| kv == "regex=1" || kv == "regex=true");
         assert_eq!(query, "bounty");
         assert_eq!(from.as_deref(), Some("abc123"));
         assert!(use_regex);
@@ -3168,7 +3283,9 @@ mod tests {
     fn messages_search_missing_q_detected() {
         let path = "/api/v1/rooms/plaza/messages/search?from=abc123";
         let qs = path.split_once('?').map(|(_, q)| q).unwrap_or("");
-        let query = qs.split('&').find_map(|kv| kv.strip_prefix("q=").map(|v| url_decode(v)))
+        let query = qs
+            .split('&')
+            .find_map(|kv| kv.strip_prefix("q=").map(|v| url_decode(v)))
             .unwrap_or_default();
         assert!(query.is_empty());
     }
@@ -3179,15 +3296,22 @@ mod tests {
         let path = "/api/v1/rooms/collab/mentions";
         let path_only = path.split('?').next().unwrap_or(path);
         let segments: Vec<&str> = path_only.trim_start_matches('/').split('/').collect();
-        assert_eq!(segments.as_slice(), &["api", "v1", "rooms", "collab", "mentions"]);
+        assert_eq!(
+            segments.as_slice(),
+            &["api", "v1", "rooms", "collab", "mentions"]
+        );
     }
 
     #[test]
     fn mentions_api_param_parsing() {
         let path = "/api/v1/rooms/plaza/mentions?agent=abc123def456&since=4h";
         let qs = path.split_once('?').map(|(_, q)| q).unwrap_or("");
-        let agent = qs.split('&').find_map(|kv| kv.strip_prefix("agent=").map(|v| url_decode(v)));
-        let since = qs.split('&').find_map(|kv| kv.strip_prefix("since=").map(|v| url_decode(v)))
+        let agent = qs
+            .split('&')
+            .find_map(|kv| kv.strip_prefix("agent=").map(|v| url_decode(v)));
+        let since = qs
+            .split('&')
+            .find_map(|kv| kv.strip_prefix("since=").map(|v| url_decode(v)))
             .unwrap_or_else(|| "1h".to_string());
         assert_eq!(agent.as_deref(), Some("abc123def456"));
         assert_eq!(since, "4h");
@@ -3199,9 +3323,14 @@ mod tests {
         let path = "/api/v1/rooms/plaza/links?since=48h";
         let path_only = path.split('?').next().unwrap_or(path);
         let segments: Vec<&str> = path_only.trim_start_matches('/').split('/').collect();
-        assert_eq!(segments.as_slice(), &["api", "v1", "rooms", "plaza", "links"]);
+        assert_eq!(
+            segments.as_slice(),
+            &["api", "v1", "rooms", "plaza", "links"]
+        );
         let qs = path.split_once('?').map(|(_, q)| q).unwrap_or("");
-        let since = qs.split('&').find_map(|kv| kv.strip_prefix("since=").map(|v| url_decode(v)))
+        let since = qs
+            .split('&')
+            .find_map(|kv| kv.strip_prefix("since=").map(|v| url_decode(v)))
             .unwrap_or_else(|| "24h".to_string());
         assert_eq!(since, "48h");
     }
@@ -3212,7 +3341,10 @@ mod tests {
         let path = "/api/v1/rooms/plaza/digest";
         let path_only = path.split('?').next().unwrap_or(path);
         let segments: Vec<&str> = path_only.trim_start_matches('/').split('/').collect();
-        assert_eq!(segments.as_slice(), &["api", "v1", "rooms", "plaza", "digest"]);
+        assert_eq!(
+            segments.as_slice(),
+            &["api", "v1", "rooms", "plaza", "digest"]
+        );
     }
 
     #[test]
@@ -3221,9 +3353,14 @@ mod tests {
         let path = "/api/v1/rooms/collab/recap?since=12h";
         let path_only = path.split('?').next().unwrap_or(path);
         let segments: Vec<&str> = path_only.trim_start_matches('/').split('/').collect();
-        assert_eq!(segments.as_slice(), &["api", "v1", "rooms", "collab", "recap"]);
+        assert_eq!(
+            segments.as_slice(),
+            &["api", "v1", "rooms", "collab", "recap"]
+        );
         let qs = path.split_once('?').map(|(_, q)| q).unwrap_or("");
-        let since = qs.split('&').find_map(|kv| kv.strip_prefix("since=").map(|v| url_decode(v)))
+        let since = qs
+            .split('&')
+            .find_map(|kv| kv.strip_prefix("since=").map(|v| url_decode(v)))
             .unwrap_or_else(|| "24h".to_string());
         assert_eq!(since, "12h");
     }
@@ -3234,7 +3371,10 @@ mod tests {
         let path = "/api/v1/rooms/plaza/read-status";
         let path_only = path.split('?').next().unwrap_or(path);
         let segments: Vec<&str> = path_only.trim_start_matches('/').split('/').collect();
-        assert_eq!(segments.as_slice(), &["api", "v1", "rooms", "plaza", "read-status"]);
+        assert_eq!(
+            segments.as_slice(),
+            &["api", "v1", "rooms", "plaza", "read-status"]
+        );
     }
 
     #[test]
@@ -3243,7 +3383,10 @@ mod tests {
         let path = "/api/v1/rooms/plaza/webhooks";
         let path_only = path.split('?').next().unwrap_or(path);
         let segments: Vec<&str> = path_only.trim_start_matches('/').split('/').collect();
-        assert_eq!(segments.as_slice(), &["api", "v1", "rooms", "plaza", "webhooks"]);
+        assert_eq!(
+            segments.as_slice(),
+            &["api", "v1", "rooms", "plaza", "webhooks"]
+        );
     }
 
     #[test]
@@ -3266,15 +3409,24 @@ mod tests {
         let path = "/api/v1/rooms/plaza/webhooks/wh-abc123";
         let path_only = path.split('?').next().unwrap_or(path);
         let segments: Vec<&str> = path_only.trim_start_matches('/').split('/').collect();
-        assert_eq!(segments.as_slice(), &["api", "v1", "rooms", "plaza", "webhooks", "wh-abc123"]);
+        assert_eq!(
+            segments.as_slice(),
+            &["api", "v1", "rooms", "plaza", "webhooks", "wh-abc123"]
+        );
     }
 
     #[test]
     fn messages_search_timestamp_params() {
         let path = "/api/v1/rooms/plaza/messages/search?q=hello&after=1700000000&before=1800000000";
         let qs = path.split_once('?').map(|(_, q)| q).unwrap_or("");
-        let after = qs.split('&').find_map(|kv| kv.strip_prefix("after=").map(|v| v.parse::<u64>().ok())).flatten();
-        let before = qs.split('&').find_map(|kv| kv.strip_prefix("before=").map(|v| v.parse::<u64>().ok())).flatten();
+        let after = qs
+            .split('&')
+            .find_map(|kv| kv.strip_prefix("after=").map(|v| v.parse::<u64>().ok()))
+            .flatten();
+        let before = qs
+            .split('&')
+            .find_map(|kv| kv.strip_prefix("before=").map(|v| v.parse::<u64>().ok()))
+            .flatten();
         assert_eq!(after, Some(1700000000u64));
         assert_eq!(before, Some(1800000000u64));
     }
