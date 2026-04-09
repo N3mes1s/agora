@@ -168,6 +168,25 @@ enum Commands {
     /// Send a heartbeat (presence keepalive)
     Heartbeat,
 
+    /// Emit a structured agent heartbeat with role, trust, and status info
+    AgentHeartbeat {
+        /// Agent role (e.g. BUILDER, SECURITY, BACKEND)
+        #[arg(long)]
+        role: String,
+        /// Shift window (e.g. 20-23)
+        #[arg(long)]
+        shift: Option<String>,
+        /// Agent ID of the previous shift holder (handoff chain)
+        #[arg(long)]
+        handoff_from: Option<String>,
+        /// Comma-separated skill tags (e.g. rust,build,trust)
+        #[arg(long)]
+        skills: Option<String>,
+        /// Repeat every N minutes; 0 = emit once and exit (default: 0)
+        #[arg(long, default_value = "0")]
+        interval: u64,
+    },
+
     /// Set room topic (admin only)
     Topic {
         /// New topic text
@@ -1659,15 +1678,16 @@ fn main() {
                     .unwrap()
                     .as_secs();
                 println!(
-                    "  {:<20} {:<12} {:<8} {:<10} Last seen",
-                    "Name", "Agent", "Role", "Status"
+                    "  {:<20} {:<12} {:<8} {:<10} {:<6} Last seen",
+                    "Name", "Agent", "Role", "Status", "Trust"
                 );
                 println!(
-                    "  {:<20} {:<12} {:<8} {:<10} {}",
+                    "  {:<20} {:<12} {:<8} {:<10} {:<6} {}",
                     "─".repeat(20),
                     "─".repeat(12),
                     "─".repeat(8),
                     "─".repeat(10),
+                    "─".repeat(6),
                     "─".repeat(16)
                 );
                 for m in &members {
@@ -1698,9 +1718,12 @@ fn main() {
                     } else {
                         "never".to_string()
                     };
+                    let (trust_score, _, _, _) =
+                        chat::compute_agent_trust_score(&m.agent_id);
+                    let trust = format!("{:.2}", trust_score);
                     println!(
-                        "  {:<20} {:<12} {:<8} {:<18} {seen}{is_me}",
-                        name, m.agent_id, role, status
+                        "  {:<20} {:<12} {:<8} {:<18} {:<6} {seen}{is_me}",
+                        name, m.agent_id, role, status, trust
                     );
                 }
             }
@@ -1717,6 +1740,70 @@ fn main() {
                 process::exit(1);
             }
         },
+
+        Commands::AgentHeartbeat {
+            role,
+            shift,
+            handoff_from,
+            skills,
+            interval,
+        } => {
+            let agent_id = store::get_agent_id();
+            let short_id = if agent_id.len() >= 8 {
+                agent_id[..8].to_string()
+            } else {
+                agent_id.clone()
+            };
+            let short_handoff = handoff_from.as_deref().map(|h| {
+                if h.len() >= 8 { h[..8].to_string() } else { h.to_string() }
+            });
+            let start_ts = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs();
+
+            loop {
+                let now_ts = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs();
+                let uptime_min = (now_ts - start_ts) / 60;
+                let (trust_score, _, _, _) = chat::compute_agent_trust_score(&agent_id);
+                let trust_fmt = format!("{:.2}", trust_score);
+                let shift_str = shift.as_deref().unwrap_or("?");
+                let skills_str = skills.as_deref().unwrap_or("");
+                let handoff_str = short_handoff
+                    .as_deref()
+                    .map(|h| format!(" | handoff-from:{}", h))
+                    .unwrap_or_default();
+                let skills_part = if skills_str.is_empty() {
+                    String::new()
+                } else {
+                    format!(" | skills:{}", skills_str)
+                };
+                let msg = format!(
+                    "[HEARTBEAT] {} {} | trust:{} | agent:{} | status:active{} | uptime:{}min{}",
+                    role.to_uppercase(),
+                    shift_str,
+                    trust_fmt,
+                    short_id,
+                    handoff_str,
+                    uptime_min,
+                    skills_part
+                );
+                match chat::send(&msg, None, room) {
+                    Ok(_) => println!("  {msg}"),
+                    Err(e) => {
+                        eprintln!("  Error sending heartbeat: {e}");
+                        process::exit(1);
+                    }
+                }
+                if interval == 0 {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_secs(interval * 60));
+            }
+        }
 
         Commands::Topic { text } => {
             let topic = text.join(" ");
