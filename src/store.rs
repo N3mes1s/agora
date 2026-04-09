@@ -949,6 +949,9 @@ pub struct Task {
     /// Unix timestamp after which the bounty auto-expires and credits are refunded
     #[serde(skip_serializing_if = "Option::is_none")]
     pub expires_at: Option<u64>,
+    /// Crowdfunding contributors: vec of (agent_id, amount) pledged to this bounty
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub contributors: Vec<(String, i64)>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
