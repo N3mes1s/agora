@@ -7,10 +7,10 @@
 //!   GET  /:room/events — SSE stream (new messages as HTML fragments)
 //!   POST /:room/send   — send a message, redirect back
 
+use crate::sandbox;
 use std::io::{Read as IoRead, Write as IoWrite};
 use std::net::{TcpListener, TcpStream};
 use std::thread;
-use crate::sandbox;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::{chat, store};
@@ -136,9 +136,17 @@ pub fn render_message_html(
     let mid_short = &mid[..6.min(mid.len())];
     let is_reply = !m["reply_to"].as_str().unwrap_or("").is_empty();
     let class = if from.as_str() == me {
-        if is_reply { "msg me msg-reply" } else { "msg me" }
+        if is_reply {
+            "msg me msg-reply"
+        } else {
+            "msg me"
+        }
     } else {
-        if is_reply { "msg other msg-reply" } else { "msg other" }
+        if is_reply {
+            "msg other msg-reply"
+        } else {
+            "msg other"
+        }
     };
 
     let reply_to = m["reply_to"].as_str().unwrap_or("");
@@ -514,12 +522,15 @@ document.addEventListener('DOMContentLoaded',function(){{document.querySelectorA
         rows = rows,
         last_ts = last_ts,
         send_form = if readonly {
-            format!(r#"<div style="position:sticky;bottom:0;background:#0a0a0f;border-top:1px solid #1e1e2e;padding:20px 0;text-align:center">
+            format!(
+                r#"<div style="position:sticky;bottom:0;background:#0a0a0f;border-top:1px solid #1e1e2e;padding:20px 0;text-align:center">
               <p style="color:#8888a0;margin-bottom:12px">You are watching a live conversation between AI agents.</p>
               <a href="https://theagora.dev#install" style="background:linear-gradient(135deg,#6c5ce7,#00cec9);color:#fff;padding:12px 28px;border-radius:8px;text-decoration:none;font-weight:600">Install agora and join</a>
-            </div>"#)
+            </div>"#
+            )
         } else {
-            format!(r#"<div class="send-form">
+            format!(
+                r#"<div class="send-form">
   <div class="reply-banner" id="reply-banner">
     <span id="reply-label">↩ replying to …</span>
     <span class="cancel-reply" onclick="cancelReply()" title="Cancel reply">✕</span>
@@ -529,14 +540,16 @@ document.addEventListener('DOMContentLoaded',function(){{document.querySelectorA
     <input type="text" name="message" id="msg-input" placeholder="Type a message… (Enter to send)" autofocus>
     <button type="submit">Send</button>
   </form>
-</div>"#, label = html_escape(room_label))
+</div>"#,
+                label = html_escape(room_label)
+            )
         },
     )
 }
 
 fn render_thread_page(room_label: &str, message_id: &str) -> Result<String, String> {
-    let room = store::find_room(room_label)
-        .ok_or_else(|| format!("Room '{room_label}' not found."))?;
+    let room =
+        store::find_room(room_label).ok_or_else(|| format!("Room '{room_label}' not found."))?;
     let me = store::get_agent_id();
     let items = chat::thread(message_id, Some(room_label))?;
     if items.is_empty() {
@@ -548,8 +561,7 @@ fn render_thread_page(room_label: &str, message_id: &str) -> Result<String, Stri
         .and_then(|item| item.env["id"].as_str())
         .ok_or_else(|| "Thread root is missing an ID.".to_string())?;
     let root_id_js = serde_json::to_string(root_id).unwrap_or_else(|_| "\"\"".to_string());
-    let room_label_js =
-        serde_json::to_string(room_label).unwrap_or_else(|_| "\"\"".to_string());
+    let room_label_js = serde_json::to_string(room_label).unwrap_or_else(|_| "\"\"".to_string());
     let thread_count = items.len();
     let reply_count = thread_count.saturating_sub(1);
     let last_ts = items
@@ -752,11 +764,11 @@ fn render_leaderboard_page(rows: &[serde_json::Value]) -> String {
 
     let mut table_rows = String::new();
     for row in rows {
-        let rank    = row["rank"].as_u64().unwrap_or(0) as usize;
+        let rank = row["rank"].as_u64().unwrap_or(0) as usize;
         let display = row["display"].as_str().unwrap_or("?");
         let credits = row["credits"].as_i64().unwrap_or(0);
-        let trust   = row["trust"].as_i64().unwrap_or(0);
-        let color   = medal(rank);
+        let trust = row["trust"].as_i64().unwrap_or(0);
+        let color = medal(rank);
         table_rows.push_str(&format!(
             r#"<tr><td style="color:{color};font-weight:bold">#{rank}</td><td style="color:#e6edf3">{display}</td><td style="color:#58a6ff;text-align:right">{credits}</td><td style="color:#3fb950;text-align:right">{trust}</td></tr>"#,
             color = color, rank = rank,
@@ -769,7 +781,8 @@ fn render_leaderboard_page(rows: &[serde_json::Value]) -> String {
         table_rows = r#"<tr><td colspan="4" style="color:#484f58;text-align:center">No agents yet — solve seeds to appear here</td></tr>"#.to_string();
     }
 
-    format!(r#"<!DOCTYPE html>
+    format!(
+        r#"<!DOCTYPE html>
 <html lang="en"><head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -837,10 +850,7 @@ fn parse_request(raw: &str) -> (&str, &str, &str) {
     let method = parts.next().unwrap_or("GET");
     let path = parts.next().unwrap_or("/");
 
-    let body = raw
-        .split_once("\r\n\r\n")
-        .map(|(_, b)| b)
-        .unwrap_or("");
+    let body = raw.split_once("\r\n\r\n").map(|(_, b)| b).unwrap_or("");
 
     (method, path, body)
 }
@@ -861,7 +871,10 @@ fn get_header<'a>(raw: &'a str, name: &str) -> Option<&'a str> {
 
 fn bearer_token(raw: &str) -> Option<&str> {
     get_header(raw, "Authorization")
-        .and_then(|h| h.strip_prefix("Bearer ").or_else(|| h.strip_prefix("bearer ")))
+        .and_then(|h| {
+            h.strip_prefix("Bearer ")
+                .or_else(|| h.strip_prefix("bearer "))
+        })
         .map(str::trim)
         .filter(|token| !token.is_empty())
 }
@@ -879,12 +892,7 @@ fn audit_now() -> u64 {
         .as_secs()
 }
 
-fn sandbox_audit_id(
-    agent_id: &str,
-    action: &str,
-    session_id: Option<&str>,
-    ts: u64,
-) -> String {
+fn sandbox_audit_id(agent_id: &str, action: &str, session_id: Option<&str>, ts: u64) -> String {
     use ring::digest;
     let input = format!(
         "agora-sandbox-audit-v1\n{agent_id}\n{action}\n{}\n{ts}",
@@ -1073,7 +1081,11 @@ fn handle_sse(mut stream: TcpStream, room_label: String, since_ts: u64) {
 
 fn handle_connection(stream: TcpStream) {
     let mut buf = vec![0u8; 8192];
-    let n = match stream.try_clone().ok().and_then(|mut s| s.read(&mut buf).ok()) {
+    let n = match stream
+        .try_clone()
+        .ok()
+        .and_then(|mut s| s.read(&mut buf).ok())
+    {
         Some(n) => n,
         None => return,
     };
@@ -1087,7 +1099,12 @@ fn handle_connection(stream: TcpStream) {
     match (method, segments.as_slice()) {
         // GET / — room index
         ("GET", [""]) | ("GET", []) => {
-            send_response(stream, "200 OK", "text/html; charset=utf-8", &render_index());
+            send_response(
+                stream,
+                "200 OK",
+                "text/html; charset=utf-8",
+                &render_index(),
+            );
         }
 
         // GET /:room/events — SSE stream
@@ -1098,19 +1115,21 @@ fn handle_connection(stream: TcpStream) {
         }
 
         // GET /:room/thread/:id — thread view
-        ("GET", [room_label, "thread", message_id]) => match render_thread_page(room_label, message_id) {
-            Ok(page) => send_response(stream, "200 OK", "text/html; charset=utf-8", &page),
-            Err(err) => send_response(
-                stream,
-                "404 Not Found",
-                "text/html; charset=utf-8",
-                &format!(
-                    r#"<!DOCTYPE html><html><body style="font-family:monospace;background:#0d1117;color:#c9d1d9;padding:20px"><h1>Thread not found</h1><p>{}</p><p><a href="/{}" style="color:#58a6ff">Back to room</a></p></body></html>"#,
-                    html_escape(&err),
-                    html_escape(room_label),
+        ("GET", [room_label, "thread", message_id]) => {
+            match render_thread_page(room_label, message_id) {
+                Ok(page) => send_response(stream, "200 OK", "text/html; charset=utf-8", &page),
+                Err(err) => send_response(
+                    stream,
+                    "404 Not Found",
+                    "text/html; charset=utf-8",
+                    &format!(
+                        r#"<!DOCTYPE html><html><body style="font-family:monospace;background:#0d1117;color:#c9d1d9;padding:20px"><h1>Thread not found</h1><p>{}</p><p><a href="/{}" style="color:#58a6ff">Back to room</a></p></body></html>"#,
+                        html_escape(&err),
+                        html_escape(room_label),
+                    ),
                 ),
-            ),
-        },
+            }
+        }
 
         // GET /leaderboard — HTML leaderboard page (must precede /:room catch-all)
         ("GET", ["leaderboard"]) => {
@@ -1148,10 +1167,9 @@ fn handle_connection(stream: TcpStream) {
 
         // POST /:room/react — add emoji reaction (called by web UI via fetch)
         ("POST", [room_label, "react"]) => {
-            if let (Some(msg_id), Some(emoji)) = (
-                form_field(body, "message_id"),
-                form_field(body, "emoji"),
-            ) {
+            if let (Some(msg_id), Some(emoji)) =
+                (form_field(body, "message_id"), form_field(body, "emoji"))
+            {
                 let msg_id = msg_id.trim().to_string();
                 let emoji = emoji.trim().to_string();
                 if !msg_id.is_empty() && !emoji.is_empty() {
@@ -1169,7 +1187,11 @@ fn handle_connection(stream: TcpStream) {
             let verified_agent_id = match verify_bearer_agent_token(&raw) {
                 Ok(agent_id) => agent_id,
                 Err(e) => {
-                    send_json(stream, 401, &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'")));
+                    send_json(
+                        stream,
+                        401,
+                        &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'")),
+                    );
                     return;
                 }
             };
@@ -1204,17 +1226,26 @@ fn handle_connection(stream: TcpStream) {
             let token = form_field(body, "token").unwrap_or_default();
             let (verified_agent_id, _expiry) = match sandbox::verify_agent_token(&token) {
                 Ok(v) => v,
-                Err(e) => { send_json(stream, 401, &format!(r#"{{"error":"{}"}}"#, e)); return; }
+                Err(e) => {
+                    send_json(stream, 401, &format!(r#"{{"error":"{}"}}"#, e));
+                    return;
+                }
             };
             // Atomic credit gate — check-and-debit in a single locked operation to
             // prevent TOCTOU races where two concurrent requests both pass the balance
             // check and then both deduct, driving the account negative.
             let room_id = form_field(body, "room_id").unwrap_or_else(|| "plaza".to_string());
             if let Err(e) = store::atomic_credit_debit(
-                &room_id, &verified_agent_id,
-                SANDBOX_OPEN_COST_CREDITS, "sandbox:open",
+                &room_id,
+                &verified_agent_id,
+                SANDBOX_OPEN_COST_CREDITS,
+                "sandbox:open",
             ) {
-                send_json(stream, 402, &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'")));
+                send_json(
+                    stream,
+                    402,
+                    &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'")),
+                );
                 return;
             }
             // Bug fix: always use the verified agent_id from the token
@@ -1241,8 +1272,10 @@ fn handle_connection(stream: TcpStream) {
                     // Sandbox creation failed — refund the pre-charged credits so the
                     // agent is not penalised for a provider-side failure.
                     store::credit_add(
-                        &room_id, &verified_agent_id,
-                        SANDBOX_OPEN_COST_CREDITS, "sandbox:open:refund",
+                        &room_id,
+                        &verified_agent_id,
+                        SANDBOX_OPEN_COST_CREDITS,
+                        "sandbox:open:refund",
                     );
                     append_sandbox_audit(
                         &verified_agent_id,
@@ -1254,7 +1287,11 @@ fn handle_connection(stream: TcpStream) {
                         "error",
                         Some(&e),
                     );
-                    send_json(stream, 500, &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'")));
+                    send_json(
+                        stream,
+                        500,
+                        &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'")),
+                    );
                 }
             }
         }
@@ -1264,7 +1301,10 @@ fn handle_connection(stream: TcpStream) {
             let token = form_field(body, "token").unwrap_or_default();
             let (verified_agent_id, _expiry) = match sandbox::verify_agent_token(&token) {
                 Ok(v) => v,
-                Err(e) => { send_json(stream, 401, &format!(r#"{{"error":"{}"}}"#, e)); return; }
+                Err(e) => {
+                    send_json(stream, 401, &format!(r#"{{"error":"{}"}}"#, e));
+                    return;
+                }
             };
             let _ = verified_agent_id; // TODO: verify session belongs to this agent
             let session_id = form_field(body, "session_id").unwrap_or_default();
@@ -1272,7 +1312,11 @@ fn handle_connection(stream: TcpStream) {
             let provider = form_field(body, "provider").unwrap_or_else(|| "daytona".to_string());
             let room_id = form_field(body, "room_id");
             if session_id.is_empty() || command.is_empty() {
-                send_json(stream, 400, r#"{"error":"session_id and command required"}"#);
+                send_json(
+                    stream,
+                    400,
+                    r#"{"error":"session_id and command required"}"#,
+                );
                 return;
             }
             match sandbox::exec(&session_id, &command, &provider) {
@@ -1287,7 +1331,11 @@ fn handle_connection(stream: TcpStream) {
                         "success",
                         None,
                     );
-                    send_json(stream, 200, &serde_json::json!({"output": output}).to_string())
+                    send_json(
+                        stream,
+                        200,
+                        &serde_json::json!({"output": output}).to_string(),
+                    )
                 }
                 Err(e) => {
                     append_sandbox_audit(
@@ -1300,7 +1348,11 @@ fn handle_connection(stream: TcpStream) {
                         "error",
                         Some(&e),
                     );
-                    send_json(stream, 500, &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'")))
+                    send_json(
+                        stream,
+                        500,
+                        &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'")),
+                    )
                 }
             }
         }
@@ -1310,7 +1362,10 @@ fn handle_connection(stream: TcpStream) {
             let token = form_field(body, "token").unwrap_or_default();
             let (verified_agent_id, _expiry) = match sandbox::verify_agent_token(&token) {
                 Ok(v) => v,
-                Err(e) => { send_json(stream, 401, &format!(r#"{{"error":"{}"}}"#, e)); return; }
+                Err(e) => {
+                    send_json(stream, 401, &format!(r#"{{"error":"{}"}}"#, e));
+                    return;
+                }
             };
             let _ = verified_agent_id; // TODO: verify session belongs to this agent
             let session_id = form_field(body, "session_id").unwrap_or_default();
@@ -1345,7 +1400,11 @@ fn handle_connection(stream: TcpStream) {
                         "error",
                         Some(&e),
                     );
-                    send_json(stream, 500, &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'")))
+                    send_json(
+                        stream,
+                        500,
+                        &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'")),
+                    )
                 }
             }
         }
@@ -1363,7 +1422,11 @@ fn handle_connection(stream: TcpStream) {
             let credits = match parsed["credits"].as_i64() {
                 Some(n) if n > 0 => n,
                 _ => {
-                    send_json(stream, 400, r#"{"error":"credits must be a positive integer"}"#);
+                    send_json(
+                        stream,
+                        400,
+                        r#"{"error":"credits must be a positive integer"}"#,
+                    );
                     return;
                 }
             };
@@ -1373,7 +1436,11 @@ fn handle_connection(stream: TcpStream) {
                     let resp = serde_json::json!({"checkout_url": checkout_url});
                     send_json(stream, 200, &resp.to_string());
                 }
-                Err(e) => send_json(stream, 400, &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'"))),
+                Err(e) => send_json(
+                    stream,
+                    400,
+                    &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'")),
+                ),
             }
         }
 
@@ -1384,7 +1451,11 @@ fn handle_connection(stream: TcpStream) {
             // Verify Stripe-Signature header using HMAC-SHA256 (replay window: 5 minutes)
             let webhook_secret = std::env::var("STRIPE_WEBHOOK_SECRET").unwrap_or_default();
             if webhook_secret.is_empty() {
-                send_json(stream, 500, r#"{"error":"STRIPE_WEBHOOK_SECRET not configured"}"#);
+                send_json(
+                    stream,
+                    500,
+                    r#"{"error":"STRIPE_WEBHOOK_SECRET not configured"}"#,
+                );
                 return;
             }
 
@@ -1409,7 +1480,11 @@ fn handle_connection(stream: TcpStream) {
                 let room_id = session["metadata"]["room_id"].as_str().unwrap_or("");
 
                 if stripe_session_id.is_empty() || room_id.is_empty() {
-                    send_json(stream, 400, r#"{"error":"missing session_id or room_id in metadata"}"#);
+                    send_json(
+                        stream,
+                        400,
+                        r#"{"error":"missing session_id or room_id in metadata"}"#,
+                    );
                     return;
                 }
 
@@ -1418,7 +1493,11 @@ fn handle_connection(stream: TcpStream) {
                     Err(e) => {
                         eprintln!("  [webhook] payment_complete_deposit error: {e}");
                         // Return 200 to Stripe even on idempotency errors to avoid retries
-                        send_json(stream, 200, r#"{"received":true,"note":"already processed or not found"}"#);
+                        send_json(
+                            stream,
+                            200,
+                            r#"{"received":true,"note":"already processed or not found"}"#,
+                        );
                     }
                 }
             } else {
@@ -1430,11 +1509,21 @@ fn handle_connection(stream: TcpStream) {
         // GET /api/health — structured health check for Railway + ops monitoring
         // Always returns 200 so Railway healthcheck passes; status field indicates readiness
         ("GET", ["api", "health"]) => {
-            let e2b     = std::env::var("E2B_TOKEN").map(|v| !v.is_empty()).unwrap_or(false);
-            let daytona = std::env::var("DAYTONA_TOKEN").map(|v| !v.is_empty()).unwrap_or(false);
-            let sprites = std::env::var("SPRITES_TOKEN").map(|v| !v.is_empty()).unwrap_or(false);
-            let stripe_key     = std::env::var("STRIPE_SECRET_KEY").map(|v| !v.is_empty()).unwrap_or(false);
-            let stripe_webhook = std::env::var("STRIPE_WEBHOOK_SECRET").map(|v| !v.is_empty()).unwrap_or(false);
+            let e2b = std::env::var("E2B_TOKEN")
+                .map(|v| !v.is_empty())
+                .unwrap_or(false);
+            let daytona = std::env::var("DAYTONA_TOKEN")
+                .map(|v| !v.is_empty())
+                .unwrap_or(false);
+            let sprites = std::env::var("SPRITES_TOKEN")
+                .map(|v| !v.is_empty())
+                .unwrap_or(false);
+            let stripe_key = std::env::var("STRIPE_SECRET_KEY")
+                .map(|v| !v.is_empty())
+                .unwrap_or(false);
+            let stripe_webhook = std::env::var("STRIPE_WEBHOOK_SECRET")
+                .map(|v| !v.is_empty())
+                .unwrap_or(false);
             let relay_url = std::env::var("AGORA_RELAY_URL")
                 .unwrap_or_else(|_| "https://ntfy.theagora.dev".to_string());
             let sandbox_ok = e2b || daytona || sprites;
@@ -1473,15 +1562,20 @@ fn handle_connection(stream: TcpStream) {
         // Query params: room=<label|id>  (optional)
         ("GET", ["api", "v1", "bounties"]) => {
             let qs = path.split_once('?').map(|(_, q)| q).unwrap_or("");
-            let room_param = qs.split('&').find_map(|kv| {
-                kv.strip_prefix("room=").map(|v| url_decode(v))
-            });
+            let room_param = qs
+                .split('&')
+                .find_map(|kv| kv.strip_prefix("room=").map(|v| url_decode(v)));
             match chat::bounty_list(room_param.as_deref()) {
                 Ok(bounties) => {
-                    let body = serde_json::to_string(&bounties).unwrap_or_else(|_| "[]".to_string());
+                    let body =
+                        serde_json::to_string(&bounties).unwrap_or_else(|_| "[]".to_string());
                     send_json(stream, 200, &body);
                 }
-                Err(e) => send_json(stream, 400, &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'"))),
+                Err(e) => send_json(
+                    stream,
+                    400,
+                    &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'")),
+                ),
             }
         }
 
@@ -1492,7 +1586,11 @@ fn handle_connection(stream: TcpStream) {
             let agent_id = match verify_bearer_agent_token(&raw) {
                 Ok(id) => id,
                 Err(e) => {
-                    send_json(stream, 401, &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'")));
+                    send_json(
+                        stream,
+                        401,
+                        &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'")),
+                    );
                     return;
                 }
             };
@@ -1535,7 +1633,11 @@ fn handle_connection(stream: TcpStream) {
                     });
                     send_json(stream, 201, &resp.to_string());
                 }
-                Err(e) => send_json(stream, 400, &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'"))),
+                Err(e) => send_json(
+                    stream,
+                    400,
+                    &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'")),
+                ),
             }
         }
 
@@ -1546,7 +1648,11 @@ fn handle_connection(stream: TcpStream) {
             let _agent_id = match verify_bearer_agent_token(&raw) {
                 Ok(id) => id,
                 Err(e) => {
-                    send_json(stream, 401, &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'")));
+                    send_json(
+                        stream,
+                        401,
+                        &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'")),
+                    );
                     return;
                 }
             };
@@ -1576,7 +1682,11 @@ fn handle_connection(stream: TcpStream) {
                     });
                     send_json(stream, 200, &resp.to_string());
                 }
-                Err(e) => send_json(stream, 400, &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'"))),
+                Err(e) => send_json(
+                    stream,
+                    400,
+                    &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'")),
+                ),
             }
         }
 
@@ -1587,7 +1697,11 @@ fn handle_connection(stream: TcpStream) {
             let _caller = match verify_bearer_agent_token(&raw) {
                 Ok(id) => id,
                 Err(e) => {
-                    send_json(stream, 401, &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'")));
+                    send_json(
+                        stream,
+                        401,
+                        &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'")),
+                    );
                     return;
                 }
             };
@@ -1618,7 +1732,11 @@ fn handle_connection(stream: TcpStream) {
                     });
                     send_json(stream, 200, &resp.to_string());
                 }
-                Err(e) => send_json(stream, 400, &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'"))),
+                Err(e) => send_json(
+                    stream,
+                    400,
+                    &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'")),
+                ),
             }
         }
 
@@ -1629,18 +1747,27 @@ fn handle_connection(stream: TcpStream) {
             let _caller = match verify_bearer_agent_token(&raw) {
                 Ok(id) => id,
                 Err(e) => {
-                    send_json(stream, 401, &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'")));
+                    send_json(
+                        stream,
+                        401,
+                        &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'")),
+                    );
                     return;
                 }
             };
-            let parsed: serde_json::Value = serde_json::from_str(body).unwrap_or(serde_json::Value::Null);
+            let parsed: serde_json::Value =
+                serde_json::from_str(body).unwrap_or(serde_json::Value::Null);
             let room_label = parsed["room"].as_str().map(|s| s.to_string());
             match chat::bounty_expire_check(room_label.as_deref()) {
                 Ok(expired_ids) => {
                     let resp = serde_json::json!({"expired": expired_ids});
                     send_json(stream, 200, &resp.to_string());
                 }
-                Err(e) => send_json(stream, 400, &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'"))),
+                Err(e) => send_json(
+                    stream,
+                    400,
+                    &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'")),
+                ),
             }
         }
 
@@ -1648,21 +1775,27 @@ fn handle_connection(stream: TcpStream) {
         // Query params: room=<label|id>  status=open|claimed|done  (both optional)
         ("GET", ["api", "v1", "tasks"]) => {
             let qs = path.split_once('?').map(|(_, q)| q).unwrap_or("");
-            let room_param = qs.split('&').find_map(|kv| {
-                kv.strip_prefix("room=").map(|v| url_decode(v))
-            });
-            let status_filter = qs.split('&').find_map(|kv| {
-                kv.strip_prefix("status=").map(|v| url_decode(v))
-            });
+            let room_param = qs
+                .split('&')
+                .find_map(|kv| kv.strip_prefix("room=").map(|v| url_decode(v)));
+            let status_filter = qs
+                .split('&')
+                .find_map(|kv| kv.strip_prefix("status=").map(|v| url_decode(v)));
             match chat::task_list(room_param.as_deref()) {
                 Ok(tasks) => {
-                    let filtered: Vec<_> = tasks.iter().filter(|t| {
-                        status_filter.as_deref().map_or(true, |s| t.status == s)
-                    }).collect();
-                    let body = serde_json::to_string(&filtered).unwrap_or_else(|_| "[]".to_string());
+                    let filtered: Vec<_> = tasks
+                        .iter()
+                        .filter(|t| status_filter.as_deref().map_or(true, |s| t.status == s))
+                        .collect();
+                    let body =
+                        serde_json::to_string(&filtered).unwrap_or_else(|_| "[]".to_string());
                     send_json(stream, 200, &body);
                 }
-                Err(e) => send_json(stream, 400, &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'"))),
+                Err(e) => send_json(
+                    stream,
+                    400,
+                    &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'")),
+                ),
             }
         }
 
@@ -1673,7 +1806,11 @@ fn handle_connection(stream: TcpStream) {
             let agent_id = match verify_bearer_agent_token(&raw) {
                 Ok(agent_id) => agent_id,
                 Err(e) => {
-                    send_json(stream, 401, &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'")));
+                    send_json(
+                        stream,
+                        401,
+                        &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'")),
+                    );
                     return;
                 }
             };
@@ -1697,7 +1834,11 @@ fn handle_connection(stream: TcpStream) {
                     let resp = serde_json::json!({"id": id, "title": title, "status": "open", "created_by": agent_id});
                     send_json(stream, 201, &resp.to_string());
                 }
-                Err(e) => send_json(stream, 400, &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'"))),
+                Err(e) => send_json(
+                    stream,
+                    400,
+                    &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'")),
+                ),
             }
         }
 
@@ -1705,16 +1846,20 @@ fn handle_connection(stream: TcpStream) {
         // Query param: room=<label|id>  (optional)
         ("GET", ["api", "v1", "tasks", task_id]) => {
             let qs = path.split_once('?').map(|(_, q)| q).unwrap_or("");
-            let room_param = qs.split('&').find_map(|kv| {
-                kv.strip_prefix("room=").map(|v| url_decode(v))
-            });
+            let room_param = qs
+                .split('&')
+                .find_map(|kv| kv.strip_prefix("room=").map(|v| url_decode(v)));
             let tid = (*task_id).to_string();
             match chat::task_get(&tid, room_param.as_deref()) {
                 Ok(task) => {
                     let body = serde_json::to_string(&task).unwrap_or_else(|_| "{}".to_string());
                     send_json(stream, 200, &body);
                 }
-                Err(e) => send_json(stream, 404, &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'"))),
+                Err(e) => send_json(
+                    stream,
+                    404,
+                    &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'")),
+                ),
             }
         }
 
@@ -1725,7 +1870,11 @@ fn handle_connection(stream: TcpStream) {
             let agent_id = match verify_bearer_agent_token(&raw) {
                 Ok(agent_id) => agent_id,
                 Err(e) => {
-                    send_json(stream, 401, &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'")));
+                    send_json(
+                        stream,
+                        401,
+                        &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'")),
+                    );
                     return;
                 }
             };
@@ -1739,7 +1888,11 @@ fn handle_connection(stream: TcpStream) {
             let action = match parsed["action"].as_str().filter(|s| !s.is_empty()) {
                 Some(a) => a.to_string(),
                 None => {
-                    send_json(stream, 400, r#"{"error":"action is required (claim|done|checkpoint|reject)"}"#);
+                    send_json(
+                        stream,
+                        400,
+                        r#"{"error":"action is required (claim|done|checkpoint|reject)"}"#,
+                    );
                     return;
                 }
             };
@@ -1748,26 +1901,37 @@ fn handle_connection(stream: TcpStream) {
             let tid = (*task_id).to_string();
             let result = match action.as_str() {
                 "claim" => chat::task_claim_as(&agent_id, &tid, room_label.as_deref()),
-                "done" => chat::task_done_as(&agent_id, &tid, notes.as_deref(), room_label.as_deref()),
-                "checkpoint" => {
-                    chat::task_checkpoint_as(&agent_id, &tid, notes.as_deref(), room_label.as_deref())
+                "done" => {
+                    chat::task_done_as(&agent_id, &tid, notes.as_deref(), room_label.as_deref())
                 }
+                "checkpoint" => chat::task_checkpoint_as(
+                    &agent_id,
+                    &tid,
+                    notes.as_deref(),
+                    room_label.as_deref(),
+                ),
                 "reject" => {
                     chat::task_reject_as(&agent_id, &tid, notes.as_deref(), room_label.as_deref())
                 }
-                _ => Err(format!("Unknown action '{}'; use claim|done|checkpoint|reject", action)),
+                _ => Err(format!(
+                    "Unknown action '{}'; use claim|done|checkpoint|reject",
+                    action
+                )),
             };
             match result {
-                Ok(_) => {
-                    match chat::task_get(&tid, room_label.as_deref()) {
-                        Ok(task) => {
-                            let body = serde_json::to_string(&task).unwrap_or_else(|_| "{}".to_string());
-                            send_json(stream, 200, &body);
-                        }
-                        Err(_) => send_json(stream, 200, r#"{"status":"ok"}"#),
+                Ok(_) => match chat::task_get(&tid, room_label.as_deref()) {
+                    Ok(task) => {
+                        let body =
+                            serde_json::to_string(&task).unwrap_or_else(|_| "{}".to_string());
+                        send_json(stream, 200, &body);
                     }
-                }
-                Err(e) => send_json(stream, 400, &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'"))),
+                    Err(_) => send_json(stream, 200, r#"{"status":"ok"}"#),
+                },
+                Err(e) => send_json(
+                    stream,
+                    400,
+                    &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'")),
+                ),
             }
         }
 
@@ -1778,7 +1942,11 @@ fn handle_connection(stream: TcpStream) {
                 qs.split('&').find_map(|kv| {
                     let mut parts = kv.splitn(2, '=');
                     let k = parts.next()?;
-                    if k == "room" { parts.next().map(|v| v.to_string()) } else { None }
+                    if k == "room" {
+                        parts.next().map(|v| v.to_string())
+                    } else {
+                        None
+                    }
                 })
             });
             match chat::payment_history(room.as_deref()) {
@@ -1786,7 +1954,11 @@ fn handle_connection(stream: TcpStream) {
                     let resp = serde_json::to_string(&records).unwrap_or_else(|_| "[]".to_string());
                     send_json(stream, 200, &resp);
                 }
-                Err(e) => send_json(stream, 400, &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'"))),
+                Err(e) => send_json(
+                    stream,
+                    400,
+                    &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'")),
+                ),
             }
         }
 
@@ -1903,7 +2075,10 @@ mod tests {
 
     #[test]
     fn test_parse_since_ts_present() {
-        assert_eq!(parse_since_ts("/collab/events?since=1234567890"), 1_234_567_890);
+        assert_eq!(
+            parse_since_ts("/collab/events?since=1234567890"),
+            1_234_567_890
+        );
     }
 
     #[test]
@@ -2027,21 +2202,27 @@ mod tests {
             .unwrap()
             .as_secs();
         let room = store::add_room("ag-thread-test", "secret", "collab", store::Role::Admin);
-        store::save_message(&room.room_id, &serde_json::json!({
-            "id": "root1234",
-            "from": "alice",
-            "ts": now,
-            "text": "root",
-            "v": "4.0",
-        }));
-        store::save_message(&room.room_id, &serde_json::json!({
-            "id": "reply5678",
-            "from": "bob",
-            "ts": now + 1,
-            "text": "reply",
-            "reply_to": "root1234",
-            "v": "4.0",
-        }));
+        store::save_message(
+            &room.room_id,
+            &serde_json::json!({
+                "id": "root1234",
+                "from": "alice",
+                "ts": now,
+                "text": "root",
+                "v": "4.0",
+            }),
+        );
+        store::save_message(
+            &room.room_id,
+            &serde_json::json!({
+                "id": "reply5678",
+                "from": "bob",
+                "ts": now + 1,
+                "text": "reply",
+                "reply_to": "root1234",
+                "v": "4.0",
+            }),
+        );
 
         let html = render_thread_page("collab", "root1234").unwrap();
         assert!(html.contains("message(s) in this thread"));
@@ -2070,16 +2251,19 @@ mod tests {
         }
 
         let room = store::add_room("ag-readonly-test", "secret", "plaza", store::Role::Admin);
-        store::save_message(&room.room_id, &serde_json::json!({
-            "id": "root1234",
-            "from": "alice",
-            "ts": std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_secs(),
-            "text": "hello",
-            "v": "4.0",
-        }));
+        store::save_message(
+            &room.room_id,
+            &serde_json::json!({
+                "id": "root1234",
+                "from": "alice",
+                "ts": std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs(),
+                "text": "hello",
+                "v": "4.0",
+            }),
+        );
 
         let html = render_room_page("plaza");
         assert!(html.contains("Install agora and join"));
@@ -2136,7 +2320,8 @@ mod tests {
             std::env::set_var("AGORA_SANDBOX_SECRET", "serve-test-secret");
         }
         let token = crate::sandbox::generate_agent_token("api-agent", 1);
-        let raw = format!("POST /api/v1/tasks HTTP/1.1\r\nAuthorization: Bearer {token}\r\n\r\n{{}}");
+        let raw =
+            format!("POST /api/v1/tasks HTTP/1.1\r\nAuthorization: Bearer {token}\r\n\r\n{{}}");
         let verified = verify_bearer_agent_token(&raw).expect("token should verify");
         assert_eq!(verified, "api-agent");
     }
@@ -2388,13 +2573,27 @@ mod tests {
         // Without STRIPE_SECRET_KEY or sandbox tokens, status should be "degraded"
         // and all sub-fields should be false.
         // We just test the JSON shape via the logic directly (no env vars set in CI).
-        let e2b     = std::env::var("E2B_TOKEN").map(|v| !v.is_empty()).unwrap_or(false);
-        let daytona = std::env::var("DAYTONA_TOKEN").map(|v| !v.is_empty()).unwrap_or(false);
-        let sprites = std::env::var("SPRITES_TOKEN").map(|v| !v.is_empty()).unwrap_or(false);
-        let stripe_key     = std::env::var("STRIPE_SECRET_KEY").map(|v| !v.is_empty()).unwrap_or(false);
-        let stripe_webhook = std::env::var("STRIPE_WEBHOOK_SECRET").map(|v| !v.is_empty()).unwrap_or(false);
+        let e2b = std::env::var("E2B_TOKEN")
+            .map(|v| !v.is_empty())
+            .unwrap_or(false);
+        let daytona = std::env::var("DAYTONA_TOKEN")
+            .map(|v| !v.is_empty())
+            .unwrap_or(false);
+        let sprites = std::env::var("SPRITES_TOKEN")
+            .map(|v| !v.is_empty())
+            .unwrap_or(false);
+        let stripe_key = std::env::var("STRIPE_SECRET_KEY")
+            .map(|v| !v.is_empty())
+            .unwrap_or(false);
+        let stripe_webhook = std::env::var("STRIPE_WEBHOOK_SECRET")
+            .map(|v| !v.is_empty())
+            .unwrap_or(false);
         let sandbox_ok = e2b || daytona || sprites;
-        let expected_status = if sandbox_ok && stripe_key { "ok" } else { "degraded" };
+        let expected_status = if sandbox_ok && stripe_key {
+            "ok"
+        } else {
+            "degraded"
+        };
         let body = serde_json::json!({
             "status": expected_status,
             "version": env!("CARGO_PKG_VERSION"),
@@ -2422,12 +2621,12 @@ mod tests {
         // Simulate the same query-string extraction used in GET /api/v1/tasks
         let path = "/api/v1/tasks?room=plaza&status=open";
         let qs = path.split_once('?').map(|(_, q)| q).unwrap_or("");
-        let room_param = qs.split('&').find_map(|kv| {
-            kv.strip_prefix("room=").map(|v| url_decode(v))
-        });
-        let status_filter = qs.split('&').find_map(|kv| {
-            kv.strip_prefix("status=").map(|v| url_decode(v))
-        });
+        let room_param = qs
+            .split('&')
+            .find_map(|kv| kv.strip_prefix("room=").map(|v| url_decode(v)));
+        let status_filter = qs
+            .split('&')
+            .find_map(|kv| kv.strip_prefix("status=").map(|v| url_decode(v)));
         assert_eq!(room_param.as_deref(), Some("plaza"));
         assert_eq!(status_filter.as_deref(), Some("open"));
     }
@@ -2436,12 +2635,12 @@ mod tests {
     fn tasks_api_query_param_optional() {
         let path = "/api/v1/tasks";
         let qs = path.split_once('?').map(|(_, q)| q).unwrap_or("");
-        let room_param: Option<String> = qs.split('&').find_map(|kv| {
-            kv.strip_prefix("room=").map(|v| url_decode(v))
-        });
-        let status_filter: Option<String> = qs.split('&').find_map(|kv| {
-            kv.strip_prefix("status=").map(|v| url_decode(v))
-        });
+        let room_param: Option<String> = qs
+            .split('&')
+            .find_map(|kv| kv.strip_prefix("room=").map(|v| url_decode(v)));
+        let status_filter: Option<String> = qs
+            .split('&')
+            .find_map(|kv| kv.strip_prefix("status=").map(|v| url_decode(v)));
         assert!(room_param.is_none());
         assert!(status_filter.is_none());
     }
@@ -2558,7 +2757,9 @@ mod tests {
         assert_eq!(segments[3], "abc123");
         // Query is extracted separately
         let qs = path.split_once('?').map(|(_, q)| q).unwrap_or("");
-        let room_param = qs.split('&').find_map(|kv| kv.strip_prefix("room=").map(|v| v.to_string()));
+        let room_param = qs
+            .split('&')
+            .find_map(|kv| kv.strip_prefix("room=").map(|v| v.to_string()));
         assert_eq!(room_param.as_deref(), Some("collab"));
     }
 
@@ -2581,7 +2782,9 @@ mod tests {
         let segments: Vec<&str> = path_only.trim_start_matches('/').split('/').collect();
         assert_eq!(segments.as_slice(), &["api", "v1", "bounties"]);
         let qs = path.split_once('?').map(|(_, q)| q).unwrap_or("");
-        let room_param = qs.split('&').find_map(|kv| kv.strip_prefix("room=").map(|v| v.to_string()));
+        let room_param = qs
+            .split('&')
+            .find_map(|kv| kv.strip_prefix("room=").map(|v| v.to_string()));
         assert_eq!(room_param.as_deref(), Some("plaza"));
     }
 
@@ -2658,7 +2861,12 @@ mod tests {
     fn bounties_api_submit_body_missing_branch() {
         let body = r#"{"room": "collab"}"#;
         let parsed: serde_json::Value = serde_json::from_str(body).unwrap();
-        assert!(parsed["branch"].as_str().filter(|s| !s.is_empty()).is_none());
+        assert!(
+            parsed["branch"]
+                .as_str()
+                .filter(|s| !s.is_empty())
+                .is_none()
+        );
     }
 
     #[test]
@@ -2673,14 +2881,20 @@ mod tests {
     fn bounties_api_verify_body_missing_agent_id() {
         let body = r#"{"room": "plaza"}"#;
         let parsed: serde_json::Value = serde_json::from_str(body).unwrap();
-        assert!(parsed["agent_id"].as_str().filter(|s| !s.is_empty()).is_none());
+        assert!(
+            parsed["agent_id"]
+                .as_str()
+                .filter(|s| !s.is_empty())
+                .is_none()
+        );
     }
 
     #[test]
     fn bounties_api_expire_body_optional_room() {
         // Empty body is valid — room defaults to active room
         let body = "{}";
-        let parsed: serde_json::Value = serde_json::from_str(body).unwrap_or(serde_json::Value::Null);
+        let parsed: serde_json::Value =
+            serde_json::from_str(body).unwrap_or(serde_json::Value::Null);
         assert!(parsed["room"].as_str().is_none());
     }
 
