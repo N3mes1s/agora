@@ -1809,6 +1809,7 @@ fn task_add_with_oracle(
 pub fn bounty_submit(task_id: &str, branch: &str, room_label: Option<&str>) -> Result<String, String> {
     let room = resolve_room(room_label)?;
     let me = store::get_agent_id();
+    let now_ts = now();
     let mut tasks = store::load_tasks(&room.room_id);
 
     // If not in local store, reconstruct from room messages (cross-session support).
@@ -1843,6 +1844,18 @@ pub fn bounty_submit(task_id: &str, branch: &str, room_label: Option<&str>) -> R
     let task = tasks.iter_mut()
         .find(|t| t.id.starts_with(task_id))
         .ok_or_else(|| format!("No task matching '{task_id}'"))?;
+    if task.status != "open" && task.status != "claimed" {
+        return Err(format!(
+            "Cannot submit to bounty '{}': status is '{}'",
+            task.id, task.status
+        ));
+    }
+    if task.expires_at.is_some_and(|exp| now_ts >= exp) {
+        return Err(format!(
+            "Cannot submit to bounty '{}': deadline has passed",
+            task.id
+        ));
+    }
 
     // Prevent bounty poster from submitting to their own bounty (anti-self-dealing)
     if task.created_by == me {
@@ -1960,10 +1973,23 @@ fn run_oracle_on_branch(branch: &str, oracle_cmd: &str) -> Result<bool, String> 
 /// Verify an existing submission by running the oracle now (useful for deferred verification).
 pub fn bounty_verify(task_id: &str, agent_id: &str, room_label: Option<&str>) -> Result<String, String> {
     let room = resolve_room(room_label)?;
+    let now_ts = now();
     let mut tasks = store::load_tasks(&room.room_id);
     let task = tasks.iter_mut()
         .find(|t| t.id.starts_with(task_id))
         .ok_or_else(|| format!("No task matching '{task_id}'"))?;
+    if task.status != "open" && task.status != "claimed" {
+        return Err(format!(
+            "Cannot verify bounty '{}': status is '{}'",
+            task.id, task.status
+        ));
+    }
+    if task.expires_at.is_some_and(|exp| now_ts >= exp) {
+        return Err(format!(
+            "Cannot verify bounty '{}': deadline has passed",
+            task.id
+        ));
+    }
     let oracle = task.acceptance_oracle.clone()
         .ok_or_else(|| "Task has no acceptance_oracle configured".to_string())?;
     let sub = task.submissions.iter_mut()
@@ -2095,7 +2121,7 @@ pub fn bounty_expire_check(room_label: Option<&str>) -> Result<Vec<String>, Stri
     let mut expired_ids: Vec<String> = Vec::new();
 
     for task in tasks.iter_mut() {
-        if task.status != "open" {
+        if task.status == "done" || task.status == "expired" {
             continue;
         }
         let Some(exp) = task.expires_at else { continue };
@@ -2975,20 +3001,25 @@ pub fn task_get(task_id: &str, room_label: Option<&str>) -> Result<store::Task, 
 
 /// Claim an open task.
 pub fn task_claim(task_id: &str, room_label: Option<&str>) -> Result<String, String> {
-    let room = resolve_room(room_label)?;
     let me = store::get_agent_id();
+    task_claim_as(&me, task_id, room_label)
+}
+
+/// Claim an open task on behalf of a verified agent.
+pub fn task_claim_as(agent_id: &str, task_id: &str, room_label: Option<&str>) -> Result<String, String> {
+    let room = resolve_room(room_label)?;
     let mut tasks = store::load_tasks(&room.room_id);
     let task = tasks.iter_mut().find(|t| t.id.starts_with(task_id) && t.status == "open")
         .ok_or_else(|| format!("No open task matching '{task_id}'"))?;
     task.status = "claimed".to_string();
-    task.claimed_by = Some(me.clone());
+    task.claimed_by = Some(agent_id.to_string());
     task.updated_at = now();
     let title = task.title.clone();
     let tid = task.id.clone();
     store::save_tasks(&room.room_id, &tasks);
 
     let room_key = crypto::derive_room_key(&room.secret, &room.room_id);
-    let env = make_envelope(&format!("[task] Claimed by {me}: {title}"), None);
+    let env = make_envelope_from(agent_id, &format!("[task] Claimed by {agent_id}: {title}"), None);
     let encrypted = encrypt_envelope(&env, &room_key, &room.room_id);
     transport::publish(&room.room_id, &encrypted);
     store::save_message(&room.room_id, &env);
@@ -2997,8 +3028,18 @@ pub fn task_claim(task_id: &str, room_label: Option<&str>) -> Result<String, Str
 
 /// Mark a task as done.
 pub fn task_done(task_id: &str, notes: Option<&str>, room_label: Option<&str>) -> Result<String, String> {
-    let room = resolve_room(room_label)?;
     let me = store::get_agent_id();
+    task_done_as(&me, task_id, notes, room_label)
+}
+
+/// Mark a task as done on behalf of a verified agent.
+pub fn task_done_as(
+    agent_id: &str,
+    task_id: &str,
+    notes: Option<&str>,
+    room_label: Option<&str>,
+) -> Result<String, String> {
+    let room = resolve_room(room_label)?;
     let mut tasks = store::load_tasks(&room.room_id);
     let task = tasks.iter_mut().find(|t| t.id.starts_with(task_id))
         .ok_or_else(|| format!("No task matching '{task_id}'"))?;
@@ -3012,7 +3053,7 @@ pub fn task_done(task_id: &str, notes: Option<&str>, room_label: Option<&str>) -
 
     let note_str = notes.map(|n| format!(" — {n}")).unwrap_or_default();
     let room_key = crypto::derive_room_key(&room.secret, &room.room_id);
-    let env = make_envelope(&format!("[task] Done by {me}: {title}{note_str}"), None);
+    let env = make_envelope_from(agent_id, &format!("[task] Done by {agent_id}: {title}{note_str}"), None);
     let encrypted = encrypt_envelope(&env, &room_key, &room.room_id);
     transport::publish(&room.room_id, &encrypted);
     store::save_message(&room.room_id, &env);
@@ -3020,7 +3061,7 @@ pub fn task_done(task_id: &str, notes: Option<&str>, room_label: Option<&str>) -
     publish_task_receipt(
         &room,
         &task_snapshot,
-        &me,
+        agent_id,
         "done",
         task_snapshot.notes.as_deref(),
         task_snapshot.updated_at,
@@ -3030,8 +3071,18 @@ pub fn task_done(task_id: &str, notes: Option<&str>, room_label: Option<&str>) -
 
 /// Record partial progress on a task without marking it done.
 pub fn task_checkpoint(task_id: &str, notes: Option<&str>, room_label: Option<&str>) -> Result<String, String> {
-    let room = resolve_room(room_label)?;
     let me = store::get_agent_id();
+    task_checkpoint_as(&me, task_id, notes, room_label)
+}
+
+/// Record partial progress on a task on behalf of a verified agent.
+pub fn task_checkpoint_as(
+    agent_id: &str,
+    task_id: &str,
+    notes: Option<&str>,
+    room_label: Option<&str>,
+) -> Result<String, String> {
+    let room = resolve_room(room_label)?;
     let mut tasks = store::load_tasks(&room.room_id);
     let task = tasks
         .iter_mut()
@@ -3039,12 +3090,12 @@ pub fn task_checkpoint(task_id: &str, notes: Option<&str>, room_label: Option<&s
         .ok_or_else(|| format!("No active task matching '{task_id}'"))?;
 
     if let Some(claimed_by) = task.claimed_by.as_deref() {
-        if claimed_by != me {
+        if claimed_by != agent_id {
             return Err(format!("Task '{}' is currently claimed by '{}'.", task.id, claimed_by));
         }
     } else {
         task.status = "claimed".to_string();
-        task.claimed_by = Some(me.clone());
+        task.claimed_by = Some(agent_id.to_string());
     }
 
     task.updated_at = now();
@@ -3062,7 +3113,11 @@ pub fn task_checkpoint(task_id: &str, notes: Option<&str>, room_label: Option<&s
         .map(|note| format!(" — {note}"))
         .unwrap_or_default();
     let room_key = crypto::derive_room_key(&room.secret, &room.room_id);
-    let env = make_envelope(&format!("[task] Checkpoint by {me}: {title}{note_str}"), None);
+    let env = make_envelope_from(
+        agent_id,
+        &format!("[task] Checkpoint by {agent_id}: {title}{note_str}"),
+        None,
+    );
     let encrypted = encrypt_envelope(&env, &room_key, &room.room_id);
     transport::publish(&room.room_id, &encrypted);
     store::save_message(&room.room_id, &env);
@@ -3070,7 +3125,7 @@ pub fn task_checkpoint(task_id: &str, notes: Option<&str>, room_label: Option<&s
     publish_task_receipt(
         &room,
         &task_snapshot,
-        &me,
+        agent_id,
         "checkpoint",
         checkpoint_notes.as_deref(),
         task_snapshot.updated_at,
@@ -4290,7 +4345,8 @@ mod tests {
         seed_plaza_rate_limit_state, send_watch_heartbeat,
         should_display_message, signing_message_bytes, soma_churn_decay, soma_correct,
         bounty_expire_check, bounty_post, bounty_submit, bounty_verify, stale_claim_weight,
-        task_add, task_add_as, task_add_with_oracle,
+        task_add, task_add_as, task_add_with_oracle, task_checkpoint_as, task_claim_as,
+        task_done_as,
         task_checkpoint, task_done, unpin,
         verified_solana_deposit_from_tx, SignedWirePayload, VerifiedSolanaDeposit,
         SIGNED_WIRE_VERSION, BASE64, DISCOVERY_POSITIVE_HALF_LIFE_SECS,
@@ -5348,6 +5404,78 @@ mod tests {
     }
 
     #[test]
+    fn bounty_submit_rejects_expired_bounty() {
+        let _guard = store::test_env_lock().lock().unwrap();
+        let submitter_id = "bounty-expired-submit-worker";
+        let (_home, room) = setup_plaza_room(submitter_id, Role::Admin);
+
+        let task_id = task_add_with_oracle(
+            "Expired submit bounty",
+            None,
+            Some(20),
+            None,
+            Some(1),
+            None,
+        )
+        .expect("task should exist");
+
+        let mut tasks = store::load_tasks(&room.room_id);
+        let task = tasks.iter_mut().find(|t| t.id == task_id).expect("task exists");
+        task.status = "expired".to_string();
+        store::save_tasks(&room.room_id, &tasks);
+
+        unsafe {
+            std::env::set_var("AGORA_AGENT_ID", submitter_id);
+        }
+        let result = bounty_submit(&task_id, "some-branch", None);
+        assert!(result.is_err(), "expired bounties must reject submissions");
+        assert!(
+            result.unwrap_err().contains("status is 'expired'"),
+            "error should mention expired status"
+        );
+    }
+
+    #[test]
+    fn bounty_verify_rejects_expired_bounty_without_payout() {
+        let _guard = store::test_env_lock().lock().unwrap();
+        let submitter_id = "bounty-expired-verify-worker";
+        let (_home, room) = setup_plaza_room(submitter_id, Role::Admin);
+
+        let task_id = task_add_with_oracle(
+            "Expired verify bounty",
+            Some("true"),
+            Some(30),
+            None,
+            Some(1),
+            None,
+        )
+        .expect("task should exist");
+
+        let mut tasks = store::load_tasks(&room.room_id);
+        let task = tasks.iter_mut().find(|t| t.id == task_id).expect("task exists");
+        task.status = "expired".to_string();
+        task.submissions.push(store::BountySubmission {
+            agent_id: submitter_id.to_string(),
+            branch: "does-not-matter".to_string(),
+            submitted_at: 0,
+            oracle_passed: None,
+        });
+        store::save_tasks(&room.room_id, &tasks);
+
+        let result = bounty_verify(&task_id, submitter_id, None);
+        assert!(result.is_err(), "expired bounties must reject verify");
+        assert!(
+            result.unwrap_err().contains("status is 'expired'"),
+            "error should mention expired status"
+        );
+        assert_eq!(
+            store::credit_balance(&room.room_id, submitter_id),
+            0,
+            "verify on expired bounty must not mint payout"
+        );
+    }
+
+    #[test]
     fn agent_leaderboard_output_is_valid_json_array() {
         // agent_leaderboard reads from whatever rooms are locally joined.
         // We just verify the function runs without panicking and returns
@@ -5387,6 +5515,46 @@ mod tests {
             .or_else(|| messages.iter().find(|m| m["text"].as_str().unwrap_or("").contains("Ship API auth")))
             .expect("task message saved");
         assert_eq!(msg["from"].as_str(), Some("api-agent"));
+    }
+
+    #[test]
+    fn task_lifecycle_as_uses_verified_agent_identity() {
+        let _guard = store::test_env_lock().lock().unwrap();
+        let (_home, room) = setup_plaza_room("server-host", Role::Admin);
+
+        let task_id = task_add_as("api-agent", "Ship API auth", None).unwrap();
+        let claimed = task_claim_as("api-agent", &task_id, None).unwrap();
+        assert_eq!(claimed, task_id);
+
+        let checkpointed = task_checkpoint_as("api-agent", &task_id, Some("progress"), None).unwrap();
+        assert_eq!(checkpointed, task_id);
+
+        let done = task_done_as("api-agent", &task_id, Some("done"), None).unwrap();
+        assert_eq!(done, task_id);
+
+        let tasks = store::load_tasks(&room.room_id);
+        let task = tasks.iter().find(|t| t.id == task_id).expect("task saved");
+        assert_eq!(task.claimed_by.as_deref(), Some("api-agent"));
+        assert_eq!(task.status, "done");
+
+        let messages = store::load_messages(&room.room_id, 3600);
+        let task_messages: Vec<_> = messages
+            .iter()
+            .filter(|m| {
+                m["text"]
+                    .as_str()
+                    .unwrap_or("")
+                    .contains("Ship API auth")
+                    || m["text"].as_str().unwrap_or("").contains("progress")
+                    || m["text"].as_str().unwrap_or("").contains("done")
+            })
+            .collect();
+        assert!(
+            task_messages
+                .iter()
+                .all(|m| m["from"].as_str() == Some("api-agent")),
+            "task lifecycle messages should use verified caller identity"
+        );
     }
 
     /// Medium seeds now reward 50 credits (10x from the old 5).
@@ -5453,6 +5621,45 @@ mod tests {
         // Running again should find nothing new.
         let expired2 = bounty_expire_check(None).expect("second expire check should succeed");
         assert!(expired2.is_empty(), "no more expired bounties on second run");
+    }
+
+    #[test]
+    fn bounty_expire_check_refunds_claimed_bounties_too() {
+        let _guard = store::test_env_lock().lock().unwrap();
+        let poster_id = "bounty-expire-claimed-poster";
+        let claimer_id = "bounty-expire-claimed-worker";
+        let (_home, room) = setup_plaza_room(poster_id, Role::Admin);
+
+        store::credit_add(&room.room_id, poster_id, 100, "test setup");
+        store::credit_add(&room.room_id, poster_id, -40, "simulate escrow");
+
+        let task_id = task_add_with_oracle(
+            "Claimed deadline bounty",
+            None,
+            Some(40),
+            None,
+            Some(0),
+            None,
+        )
+        .expect("task should exist");
+
+        let mut tasks = store::load_tasks(&room.room_id);
+        for t in tasks.iter_mut() {
+            if t.id == task_id {
+                t.status = "claimed".to_string();
+                t.claimed_by = Some(claimer_id.to_string());
+                t.expires_at = Some(1);
+            }
+        }
+        store::save_tasks(&room.room_id, &tasks);
+
+        let expired = bounty_expire_check(None).expect("expire check should succeed");
+        assert_eq!(expired, vec![task_id]);
+        assert_eq!(
+            store::credit_balance(&room.room_id, poster_id),
+            100,
+            "poster should be refunded even when bounty was claimed at expiry"
+        );
     }
 
     /// A fresh agent (trust ≈ 1.0) cannot post a bounty — trust threshold is 2.0.
