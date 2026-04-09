@@ -326,6 +326,14 @@ enum Commands {
         yes: bool,
     },
 
+    /// Contribute credits to an existing open bounty (crowdfunding)
+    Contribute {
+        /// Bounty ID (or prefix)
+        bounty_id: String,
+        /// Amount of credits to contribute
+        amount: i64,
+    },
+
     /// Resolve a bet (admin only)
     Resolve {
         /// Bet ID
@@ -2254,6 +2262,18 @@ fn main() {
                 process::exit(1);
             }
         },
+
+        Commands::Contribute { bounty_id, amount } => {
+            match chat::bounty_contribute(&bounty_id, amount, room) {
+                Ok(pool) => println!(
+                    "  Contributed {amount} credits to bounty {bounty_id}. New pool: ~{pool} credits."
+                ),
+                Err(e) => {
+                    eprintln!("  Error: {e}");
+                    process::exit(1);
+                }
+            }
+        }
 
         Commands::Resolve { bet_id, yes } => match chat::bet_resolve(&bet_id, yes, room) {
             Ok(msg) => println!("  {msg}"),

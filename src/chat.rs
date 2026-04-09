@@ -2020,6 +2020,7 @@ fn task_add_with_oracle(
         reward_trust,
         submissions: vec![],
         expires_at,
+        contributors: vec![],
     });
     store::save_tasks(&room.room_id, &tasks);
     Ok(id)
@@ -2063,6 +2064,7 @@ pub fn bounty_submit(
                     reward_trust: msg["reward_trust"].as_i64(),
                     submissions: vec![],
                     expires_at: msg["expires_at"].as_u64(),
+                    contributors: vec![],
                 });
                 break;
             }
@@ -2250,6 +2252,9 @@ pub fn bounty_verify(
     let task_title = task.title.clone();
     let task_poster = task.created_by.clone();
     let task_id_short = task_id[..6.min(task_id.len())].to_string();
+    // Capture crowdfunding contributions before saving tasks
+    let contributors = task.contributors.clone();
+    let crowdfund_total: i64 = contributors.iter().map(|(_, a)| a).sum();
     if passed {
         task.status = "done".to_string();
         task.claimed_by = Some(agent_id.to_string());
@@ -2275,6 +2280,7 @@ pub fn bounty_verify(
             reward_trust,
             submissions: vec![],
             expires_at: None,
+            contributors: vec![],
         };
         publish_task_receipt(
             &room,
@@ -2288,29 +2294,46 @@ pub fn bounty_verify(
 
     if let Some(credits) = reward_credits {
         if passed {
+            // Total payout = original reward + all crowdfunding contributions
+            let total_payout = credits + crowdfund_total;
             store::credit_add(
                 &room.room_id,
                 agent_id,
-                credits,
-                &format!("bounty oracle PASS: {task_title} ({task_id_short})"),
+                total_payout,
+                &format!("bounty oracle PASS: {task_title} ({task_id_short}), pool: {credits}+{crowdfund_total}"),
             );
             let balance = store::credit_balance(&room.room_id, agent_id);
             let credit_env = make_envelope(
                 &format!(
-                    "[bounty reward] +{credits} credits to {agent_id} for bounty '{task_title}' (balance: {balance})"
+                    "[bounty reward] +{total_payout} credits to {agent_id} for bounty '{task_title}' ({} base + {} crowdfunded, balance: {balance})",
+                    credits, crowdfund_total
                 ),
                 None,
             );
             let enc = encrypt_envelope(&credit_env, &room_key, &room.room_id);
             transport::publish(&room.room_id, &enc);
             store::save_message(&room.room_id, &credit_env);
-        } else if !task_poster.is_empty() {
-            store::credit_add(
-                &room.room_id,
-                &task_poster,
-                credits,
-                &format!("bounty escrow refund: {task_title} ({task_id_short}) — oracle FAIL"),
-            );
+        } else {
+            // Oracle failed: refund original poster
+            if !task_poster.is_empty() {
+                store::credit_add(
+                    &room.room_id,
+                    &task_poster,
+                    credits,
+                    &format!("bounty escrow refund: {task_title} ({task_id_short}) — oracle FAIL"),
+                );
+            }
+            // Refund crowdfunding contributors
+            for (contributor, amount) in &contributors {
+                if *amount > 0 {
+                    store::credit_add(
+                        &room.room_id,
+                        contributor,
+                        *amount,
+                        &format!("bounty contribution refund: {task_id_short} — oracle FAIL"),
+                    );
+                }
+            }
         }
     }
 
@@ -2362,6 +2385,121 @@ pub fn bounty_list(room_label: Option<&str>) -> Result<Vec<serde_json::Value>, S
     Ok(bounties)
 }
 
+/// Contribute credits to an existing open bounty (crowdfunding).
+///
+/// The calling agent pledges `amount` credits towards bounty `bounty_id`.
+/// Credits are escrowed immediately (deducted from the contributor's balance).
+/// When the bounty is verified/completed, the total pool (original reward +
+/// all contributions) is paid to the winner.
+/// If the bounty expires, all contributors receive a full refund.
+///
+/// Returns the new total reward pool on success.
+pub fn bounty_contribute(
+    bounty_id: &str,
+    amount: i64,
+    room_label: Option<&str>,
+) -> Result<i64, String> {
+    if amount <= 0 {
+        return Err(format!("Contribution amount must be positive, got {amount}"));
+    }
+    let room = resolve_room(room_label)?;
+    let me = store::get_agent_id();
+    let room_key = crypto::derive_room_key(&room.secret, &room.room_id);
+
+    // Find the open bounty task — tasks are the canonical record.
+    let tasks_snapshot = store::load_tasks(&room.room_id);
+    let task_ref = tasks_snapshot
+        .iter()
+        .find(|t| {
+            (t.id.starts_with(bounty_id) || bounty_id.starts_with(&t.id))
+                && (t.status == "open" || t.status == "claimed")
+        })
+        .ok_or_else(|| format!("Open bounty '{bounty_id}' not found"))?;
+
+    let bounty_full_id = task_ref.id.clone();
+    let title = task_ref.title.clone();
+    let poster = task_ref.created_by.clone();
+    let orig_reward = task_ref.reward_credits.unwrap_or(0);
+
+    // Prevent the original poster from "contributing" to their own bounty
+    // (they already escrowed the original reward).
+    if poster == me {
+        return Err(
+            "The bounty poster cannot contribute additional credits to their own bounty via crowdfunding; increase the original reward instead."
+                .to_string(),
+        );
+    }
+
+    // Check and debit contributor's credits atomically.
+    let _guard = store::credit_lock().lock().unwrap();
+    let balance = store::credit_balance(&room.room_id, &me);
+    if balance < amount {
+        return Err(format!(
+            "Insufficient credits: need {amount}, have {balance}"
+        ));
+    }
+    store::credit_add(
+        &room.room_id,
+        &me,
+        -amount,
+        &format!(
+            "bounty contribution escrow: {} ({})",
+            &bounty_full_id[..6.min(bounty_full_id.len())],
+            title
+        ),
+    );
+
+    // Reload tasks under the lock and update contributor list.
+    let mut tasks = store::load_tasks(&room.room_id);
+    let task = tasks
+        .iter_mut()
+        .find(|t| t.id == bounty_full_id)
+        .ok_or_else(|| format!("Task '{}' disappeared under lock", bounty_full_id))?;
+
+    if let Some(entry) = task.contributors.iter_mut().find(|(a, _)| a == &me) {
+        entry.1 += amount;
+    } else {
+        task.contributors.push((me.clone(), amount));
+    }
+    let contributed: i64 = task.contributors.iter().map(|(_, a)| a).sum();
+    let new_total = orig_reward + contributed;
+    task.updated_at = now();
+    store::save_tasks(&room.room_id, &tasks);
+
+    // Broadcast the contribution.
+    let env = make_envelope(
+        &format!(
+            "[bounty crowdfund] {me} contributed {amount} credits to bounty {} ({}). New pool: ~{new_total}",
+            &bounty_full_id[..6.min(bounty_full_id.len())],
+            title
+        ),
+        None,
+    );
+    let encrypted = encrypt_envelope(&env, &room_key, &room.room_id);
+    transport::publish(&room.room_id, &encrypted);
+    store::save_message(&room.room_id, &env);
+
+    Ok(new_total)
+}
+
+/// Refund all crowdfunding contributors for a bounty when it expires or is cancelled.
+/// Called automatically from `bounty_expire_check`.
+pub fn refund_contributors(room_id: &str, task: &store::Task) {
+    for (agent_id, amount) in &task.contributors {
+        if *amount > 0 {
+            store::credit_add(
+                room_id,
+                agent_id,
+                *amount,
+                &format!(
+                    "bounty contribution refund: {} (expired/cancelled)",
+                    &task.id[..6.min(task.id.len())]
+                ),
+            );
+        }
+    }
+}
+
 /// Check for expired bounties and refund escrowed credits to posters.
 /// Returns a list of bounty IDs that were expired and refunded.
 pub fn bounty_expire_check(room_label: Option<&str>) -> Result<Vec<String>, String> {
@@ -2395,12 +2533,26 @@ pub fn bounty_expire_check(room_label: Option<&str>) -> Result<Vec<String>, Stri
             );
         }
 
+        // Refund crowdfunding contributors
+        let contrib_total: i64 = task.contributors.iter().map(|(_, a)| a).sum();
+        for (agent_id, amount) in &task.contributors {
+            if *amount > 0 {
+                store::credit_add(
+                    &room.room_id,
+                    agent_id,
+                    *amount,
+                    &format!("bounty contribution refund: {} (expired)", task_id_short),
+                );
+            }
+        }
+
         let msg = format!(
-            "[bounty expired] '{}' ({}) — deadline reached, {} credits refunded to {}",
+            "[bounty expired] '{}' ({}) — deadline reached, {} credits refunded to poster, {} crowdfunded credits refunded to {} contributors",
             task.title,
             task_id_short,
             task.reward_credits.unwrap_or(0),
-            &task.created_by[..8.min(task.created_by.len())],
+            contrib_total,
+            task.contributors.len(),
         );
         let env = make_envelope(&msg, None);
         let enc = encrypt_envelope(&env, &room_key, &room.room_id);
@@ -3281,6 +3433,7 @@ pub fn task_add_as(
         reward_trust: None,
         submissions: vec![],
         expires_at: None,
+        contributors: vec![],
     };
     let mut tasks = store::load_tasks(&room.room_id);
     tasks.push(task);
@@ -3743,6 +3896,7 @@ pub fn seed_verify(seed_id: &str, answer: &str, room_label: Option<&str>) -> Res
         reward_trust: None,
         submissions: vec![],
         expires_at: None,
+        contributors: vec![],
     };
 
     publish_task_receipt(
@@ -3819,6 +3973,7 @@ pub fn task_list(room_label: Option<&str>) -> Result<Vec<store::Task>, String> {
                         reward_trust: None,
                         submissions: vec![],
                         expires_at: None,
+                        contributors: vec![],
                     });
                 }
             }
@@ -4914,7 +5069,7 @@ mod tests {
         BASE64, DISCOVERY_POSITIVE_HALF_LIFE_SECS, PLAZA_RATE_LIMIT_WINDOW_SECS,
         SIGNED_WIRE_VERSION, SOLANA_TOKEN_PROGRAM, SOLANA_TREASURY_WALLET, SOLANA_USDC_MINT,
         SignedWirePayload, VerifiedSolanaDeposit, allow_incoming_message, annotate_soma_message,
-        bounty_expire_check, bounty_post, bounty_submit, bounty_verify,
+        bounty_contribute, bounty_expire_check, bounty_post, bounty_submit, bounty_verify,
         count_invite_redemptions_in_envs, decrypt_payload, discover, discovery_decay_weight,
         encrypt_envelope, enforce_outbound_plaza_rate_limit, infer_soma_subject_path,
         ingest_auxiliary_event, list_role_leases, list_work_receipts, make_envelope,
@@ -5468,6 +5623,7 @@ mod tests {
                 reward_trust: None,
                 submissions: vec![],
                 expires_at: None,
+                contributors: vec![],
             }],
         );
 
@@ -6447,6 +6603,239 @@ mod tests {
         assert!(
             err.contains("Trust score too low"),
             "error must mention trust score, got: {err}"
+        );
+    }
+
+    #[test]
+    fn bounty_crowdfund_contribute_escrows_credits() {
+        let _guard = store::test_env_lock().lock().unwrap();
+        let poster_id = "crowdfund-poster";
+        let contributor_id = "crowdfund-contributor";
+        let (_home, room) = setup_plaza_room(poster_id, Role::Admin);
+
+        // Poster has enough credits and trust to create the bounty.
+        store::credit_add(&room.room_id, poster_id, 100, "test setup");
+        seed_agent_trust(&room.room_id, poster_id);
+        bounty_post("Crowdfund test bounty", 1, Some("true"), Some(30), None, None)
+            .expect("bounty_post should succeed");
+        assert_eq!(store::credit_balance(&room.room_id, poster_id), 70);
+
+        // Give contributor some credits.
+        store::credit_add(&room.room_id, contributor_id, 50, "test setup");
+
+        // Find the bounty task id.
+        let tasks = store::load_tasks(&room.room_id);
+        let task_id = tasks
+            .iter()
+            .find(|t| t.title == "Crowdfund test bounty")
+            .expect("bounty task must exist")
+            .id
+            .clone();
+
+        // Switch identity to contributor and pledge 20 credits.
+        unsafe { std::env::set_var("AGORA_AGENT_ID", contributor_id) };
+        let pool = bounty_contribute(&task_id, 20, None).expect("contribute should succeed");
+        assert_eq!(pool, 50, "pool should be 30 (original) + 20 (contrib) = 50");
+        assert_eq!(
+            store::credit_balance(&room.room_id, contributor_id),
+            30,
+            "contributor should have 30 credits left after pledging 20"
+        );
+    }
+
+    #[test]
+    fn bounty_crowdfund_verify_pays_full_pool_to_winner() {
+        let _guard = store::test_env_lock().lock().unwrap();
+        let _cwd = enter_manifest_dir();
+        let poster_id = "crowdfund-poster-verify";
+        let contributor_id = "crowdfund-contributor-verify";
+        let winner_id = "crowdfund-winner-verify";
+        let (_home, room) = setup_plaza_room(poster_id, Role::Admin);
+
+        store::credit_add(&room.room_id, poster_id, 100, "test setup");
+        store::credit_add(&room.room_id, contributor_id, 50, "test setup");
+        seed_agent_trust(&room.room_id, poster_id);
+
+        bounty_post("Pool payout test", 1, Some("true"), Some(40), None, None)
+            .expect("bounty_post should succeed");
+
+        let tasks = store::load_tasks(&room.room_id);
+        let task_id = tasks
+            .iter()
+            .find(|t| t.title == "Pool payout test")
+            .expect("task must exist")
+            .id
+            .clone();
+
+        // Switch to contributor and pledge 25 + 10 credits.
+        unsafe { std::env::set_var("AGORA_AGENT_ID", contributor_id) };
+        bounty_contribute(&task_id, 25, None).expect("first contribution");
+        bounty_contribute(&task_id, 10, None).expect("second contribution (same contributor)");
+        unsafe { std::env::set_var("AGORA_AGENT_ID", poster_id) };
+
+        // Pool = 40 (original) + 25 + 10 = 75
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let branch = format!("test-crowdfund-verify-{ts}");
+        let _ = run_git(Path::new(env!("CARGO_MANIFEST_DIR")), &["branch", &branch]);
+
+        let mut tasks = store::load_tasks(&room.room_id);
+        let task = tasks
+            .iter_mut()
+            .find(|t| t.id == task_id)
+            .expect("task must exist");
+        task.submissions.push(store::BountySubmission {
+            agent_id: winner_id.to_string(),
+            branch: branch.clone(),
+            submitted_at: 0,
+            oracle_passed: None,
+        });
+        store::save_tasks(&room.room_id, &tasks);
+
+        let result =
+            bounty_verify(&task_id, winner_id, None).expect("bounty_verify should succeed");
+        assert!(result.starts_with("PASS"), "oracle 'true' must PASS: {result}");
+
+        // Winner receives full pool: 40 + 25 + 10 = 75
+        assert_eq!(
+            store::credit_balance(&room.room_id, winner_id),
+            75,
+            "winner must receive full crowdfunded pool (40 + 25 + 10 = 75)"
+        );
+
+        let _ = run_git(
+            Path::new(env!("CARGO_MANIFEST_DIR")),
+            &["branch", "-D", &branch],
+        );
+    }
+
+    #[test]
+    fn bounty_crowdfund_verify_fail_refunds_contributors() {
+        let _guard = store::test_env_lock().lock().unwrap();
+        let _cwd = enter_manifest_dir();
+        let poster_id = "crowdfund-poster-fail";
+        let contributor_id = "crowdfund-contributor-fail";
+        let submitter_id = "crowdfund-submitter-fail";
+        let (_home, room) = setup_plaza_room(poster_id, Role::Admin);
+
+        store::credit_add(&room.room_id, poster_id, 100, "test setup");
+        store::credit_add(&room.room_id, contributor_id, 50, "test setup");
+        seed_agent_trust(&room.room_id, poster_id);
+
+        bounty_post("Fail refund test", 1, Some("false"), Some(30), None, None)
+            .expect("bounty_post should succeed");
+
+        let tasks = store::load_tasks(&room.room_id);
+        let task_id = tasks
+            .iter()
+            .find(|t| t.title == "Fail refund test")
+            .expect("task must exist")
+            .id
+            .clone();
+
+        unsafe { std::env::set_var("AGORA_AGENT_ID", contributor_id) };
+        bounty_contribute(&task_id, 20, None).expect("contribution");
+        unsafe { std::env::set_var("AGORA_AGENT_ID", poster_id) };
+
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let branch = format!("test-crowdfund-fail-{ts}");
+        let _ = run_git(Path::new(env!("CARGO_MANIFEST_DIR")), &["branch", &branch]);
+
+        let mut tasks = store::load_tasks(&room.room_id);
+        let task = tasks
+            .iter_mut()
+            .find(|t| t.id == task_id)
+            .expect("task must exist");
+        task.submissions.push(store::BountySubmission {
+            agent_id: submitter_id.to_string(),
+            branch: branch.clone(),
+            submitted_at: 0,
+            oracle_passed: None,
+        });
+        store::save_tasks(&room.room_id, &tasks);
+
+        let result =
+            bounty_verify(&task_id, submitter_id, None).expect("bounty_verify should return FAIL");
+        assert!(
+            result.starts_with("FAIL"),
+            "oracle 'false' must FAIL: {result}"
+        );
+
+        // Poster gets back 30 credits.
+        assert_eq!(store::credit_balance(&room.room_id, poster_id), 100);
+        // Contributor gets back 20 credits.
+        assert_eq!(store::credit_balance(&room.room_id, contributor_id), 50);
+        // Submitter gets nothing.
+        assert_eq!(store::credit_balance(&room.room_id, submitter_id), 0);
+
+        let _ = run_git(
+            Path::new(env!("CARGO_MANIFEST_DIR")),
+            &["branch", "-D", &branch],
+        );
+    }
+
+    #[test]
+    fn bounty_crowdfund_rejects_poster_contribution() {
+        let _guard = store::test_env_lock().lock().unwrap();
+        let poster_id = "crowdfund-self-deal";
+        let (_home, room) = setup_plaza_room(poster_id, Role::Admin);
+
+        store::credit_add(&room.room_id, poster_id, 200, "test setup");
+        seed_agent_trust(&room.room_id, poster_id);
+
+        bounty_post("Self-contribute test", 1, Some("true"), Some(30), None, None)
+            .expect("bounty_post should succeed");
+
+        let tasks = store::load_tasks(&room.room_id);
+        let task_id = tasks
+            .iter()
+            .find(|t| t.title == "Self-contribute test")
+            .expect("task must exist")
+            .id
+            .clone();
+
+        // Still running as poster — self-contribution must be rejected.
+        let result = bounty_contribute(&task_id, 10, None);
+        assert!(result.is_err(), "poster should not be able to crowdfund own bounty");
+        assert!(
+            result.unwrap_err().contains("poster cannot contribute"),
+            "error must mention poster restriction"
+        );
+    }
+
+    #[test]
+    fn bounty_crowdfund_rejects_zero_amount() {
+        let _guard = store::test_env_lock().lock().unwrap();
+        let poster_id = "crowdfund-zero-poster";
+        let contributor_id = "crowdfund-zero-contrib";
+        let (_home, room) = setup_plaza_room(poster_id, Role::Admin);
+
+        store::credit_add(&room.room_id, poster_id, 100, "test setup");
+        store::credit_add(&room.room_id, contributor_id, 50, "test setup");
+        seed_agent_trust(&room.room_id, poster_id);
+        bounty_post("Zero amount test", 1, None, Some(20), None, None)
+            .expect("bounty_post should succeed");
+
+        let tasks = store::load_tasks(&room.room_id);
+        let task_id = tasks
+            .iter()
+            .find(|t| t.title == "Zero amount test")
+            .expect("task must exist")
+            .id
+            .clone();
+
+        // Zero amount is rejected before identity matters.
+        unsafe { std::env::set_var("AGORA_AGENT_ID", contributor_id) };
+        let result = bounty_contribute(&task_id, 0, None);
+        assert!(result.is_err(), "zero contribution should be rejected");
+        assert!(
+            result.unwrap_err().contains("must be positive"),
+            "error must mention positive amount requirement"
         );
     }
 }
