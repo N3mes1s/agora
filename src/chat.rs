@@ -3795,13 +3795,19 @@ fn seed_credit_reward(difficulty: &str) -> i64 {
         "medium" => 10,
         _ => 10, // easy
     };
-    // Count previous seed completions from local state
+    // Count previous seed completions from local state.
+    // Seeds are published as work_receipt messages with task_title starting "[seed] ".
     let agent_id = store::get_agent_id();
     let seed_count = store::load_registry()
         .iter()
         .flat_map(|r| store::load_messages(&r.room_id, 604800 * 4))
         .filter(|m| {
-            m["type"].as_str() == Some("seed_receipt") && m["from"].as_str() == Some(&agent_id)
+            m["type"].as_str() == Some("work_receipt")
+                && m["from"].as_str() == Some(&agent_id)
+                && m["task_title"]
+                    .as_str()
+                    .map(|t| t.starts_with("[seed] "))
+                    .unwrap_or(false)
         })
         .count() as i64;
     std::cmp::max(0, base - 2 * seed_count)
