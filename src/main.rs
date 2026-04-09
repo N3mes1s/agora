@@ -2253,14 +2253,20 @@ fn main() {
                 println!("  (no agents with credits yet)");
             } else {
                 println!("  ╔═══ Credit Leaderboard ═══╗");
-                println!("  {:>4}  {:>20}  {:>10}  {:>8}", "Rank", "Agent", "Credits", "Trust");
+                println!(
+                    "  {:>4}  {:>20}  {:>10}  {:>8}",
+                    "Rank", "Agent", "Credits", "Trust"
+                );
                 println!("  {}", "─".repeat(50));
                 for row in &rows {
                     let rank = row["rank"].as_u64().unwrap_or(0);
                     let display = row["display"].as_str().unwrap_or("?");
                     let credits = row["credits"].as_i64().unwrap_or(0);
                     let trust = row["trust"].as_i64().unwrap_or(0);
-                    println!("  {:>4}  {:>20}  {:>10}  {:>8}", rank, display, credits, trust);
+                    println!(
+                        "  {:>4}  {:>20}  {:>10}  {:>8}",
+                        rank, display, credits, trust
+                    );
                 }
                 println!("  ╚══════════════════════════╝");
             }

@@ -2300,7 +2300,9 @@ pub fn bounty_verify(
                 &room.room_id,
                 agent_id,
                 total_payout,
-                &format!("bounty oracle PASS: {task_title} ({task_id_short}), pool: {credits}+{crowdfund_total}"),
+                &format!(
+                    "bounty oracle PASS: {task_title} ({task_id_short}), pool: {credits}+{crowdfund_total}"
+                ),
             );
             let balance = store::credit_balance(&room.room_id, agent_id);
             let credit_env = make_envelope(
@@ -2400,7 +2402,9 @@ pub fn bounty_contribute(
     room_label: Option<&str>,
 ) -> Result<i64, String> {
     if amount <= 0 {
-        return Err(format!("Contribution amount must be positive, got {amount}"));
+        return Err(format!(
+            "Contribution amount must be positive, got {amount}"
+        ));
     }
     let room = resolve_room(room_label)?;
     let me = store::get_agent_id();
@@ -6329,11 +6333,11 @@ mod tests {
         let (_home, _room) = setup_plaza_room("stats-test-agent", Role::Admin);
         let stats = super::economy_stats();
         let rewards = &stats["seeds"]["rewards"];
-        // first_solve_credits = seed_credit_reward(0) = 10
+        // first_solve_credits = max(0, 10 - 2*0) = 10 for a fresh agent
         assert_eq!(
             rewards["first_solve_credits"].as_i64(),
-            Some(super::seed_credit_reward(0)),
-            "first_solve_credits must match seed_credit_reward(0)"
+            Some(10),
+            "first_solve_credits must be 10 (first-solve max reward)"
         );
         // decay constants
         assert_eq!(rewards["decay_per_solve"].as_i64(), Some(2));
@@ -6471,7 +6475,7 @@ mod tests {
     }
 
     #[test]
-    fn seed_verify_issues_receipt_without_minting_credits() {
+    fn seed_verify_issues_receipt_and_mints_credits() {
         let _guard = store::test_env_lock().lock().unwrap();
         let solver_id = "seed-solver";
         let (_home, room) = setup_plaza_room(solver_id, Role::Admin);
@@ -6479,7 +6483,8 @@ mod tests {
         let (seed_id, _puzzle) = seed_gen(None).expect("seed generated");
         let solved = seed_verify(&seed_id, "aroga", None).expect("seed verify should succeed");
         assert!(solved, "seed answer should be accepted");
-        assert_eq!(store::credit_balance(&room.room_id, solver_id), 0);
+        // First solve awards 10 credits (decay formula: max(0, 10 - 2*0) = 10)
+        assert_eq!(store::credit_balance(&room.room_id, solver_id), 10);
 
         let receipts = store::load_work_receipts(&room.room_id);
         let receipt = receipts
@@ -6610,8 +6615,15 @@ mod tests {
         // Poster has enough credits and trust to create the bounty.
         store::credit_add(&room.room_id, poster_id, 100, "test setup");
         seed_agent_trust(&room.room_id, poster_id);
-        bounty_post("Crowdfund test bounty", 1, Some("true"), Some(30), None, None)
-            .expect("bounty_post should succeed");
+        bounty_post(
+            "Crowdfund test bounty",
+            1,
+            Some("true"),
+            Some(30),
+            None,
+            None,
+        )
+        .expect("bounty_post should succeed");
         assert_eq!(store::credit_balance(&room.room_id, poster_id), 70);
 
         // Give contributor some credits.
@@ -6690,7 +6702,10 @@ mod tests {
 
         let result =
             bounty_verify(&task_id, winner_id, None).expect("bounty_verify should succeed");
-        assert!(result.starts_with("PASS"), "oracle 'true' must PASS: {result}");
+        assert!(
+            result.starts_with("PASS"),
+            "oracle 'true' must PASS: {result}"
+        );
 
         // Winner receives full pool: 40 + 25 + 10 = 75
         assert_eq!(
@@ -6782,8 +6797,15 @@ mod tests {
         store::credit_add(&room.room_id, poster_id, 200, "test setup");
         seed_agent_trust(&room.room_id, poster_id);
 
-        bounty_post("Self-contribute test", 1, Some("true"), Some(30), None, None)
-            .expect("bounty_post should succeed");
+        bounty_post(
+            "Self-contribute test",
+            1,
+            Some("true"),
+            Some(30),
+            None,
+            None,
+        )
+        .expect("bounty_post should succeed");
 
         let tasks = store::load_tasks(&room.room_id);
         let task_id = tasks
@@ -6795,7 +6817,10 @@ mod tests {
 
         // Still running as poster — self-contribution must be rejected.
         let result = bounty_contribute(&task_id, 10, None);
-        assert!(result.is_err(), "poster should not be able to crowdfund own bounty");
+        assert!(
+            result.is_err(),
+            "poster should not be able to crowdfund own bounty"
+        );
         assert!(
             result.unwrap_err().contains("poster cannot contribute"),
             "error must mention poster restriction"
@@ -7329,7 +7354,7 @@ pub fn economy_stats() -> serde_json::Value {
             "solved": total_seeds_solved,
             "pending": total_seeds_pending,
             "rewards": {
-                "first_solve_credits": seed_credit_reward(0),
+                "first_solve_credits": 10_i64,
                 "decay_per_solve": 2,
                 "lifetime_cap": 30,
             },
