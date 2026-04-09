@@ -751,6 +751,16 @@ enum Commands {
     /// Room statistics dashboard
     Stats,
 
+    /// Rank all agents by trust score, credits, and activity
+    Leaderboard {
+        /// Output as machine-readable JSON
+        #[arg(long)]
+        json: bool,
+        /// How many entries to show (default: 20)
+        #[arg(long, default_value = "20")]
+        top: usize,
+    },
+
     /// Mute an agent (hide their messages locally)
     Mute {
         /// Agent ID to mute
@@ -3634,6 +3644,80 @@ fn main() {
                 process::exit(1);
             }
         },
+
+        Commands::Leaderboard { json, top } => {
+            let me = store::get_agent_id();
+            let entries = chat::leaderboard(top);
+
+            if json {
+                let out: Vec<serde_json::Value> = entries
+                    .iter()
+                    .enumerate()
+                    .map(|(i, e)| {
+                        serde_json::json!({
+                            "rank": i + 1,
+                            "agent_id": e.agent_id,
+                            "display": e.display,
+                            "live_trust": e.live_trust,
+                            "credits": e.credits,
+                            "messages_7d": e.messages_7d,
+                            "vouches": e.vouches,
+                            "receipts": e.receipts,
+                            "rooms_active": e.rooms_active,
+                            "last_seen": e.last_seen,
+                        })
+                    })
+                    .collect();
+                println!("{}", serde_json::to_string_pretty(&out).unwrap_or_default());
+            } else {
+                println!(
+                    "  {:<4} {:<20} {:<10} {:<8} {:<8} {:<6} {}",
+                    "Rank", "Agent", "Trust", "Credits", "Msgs(7d)", "Vouch", "Receipts"
+                );
+                println!(
+                    "  {:<4} {:<20} {:<10} {:<8} {:<8} {:<6} {}",
+                    "────",
+                    "────────────────────",
+                    "──────────",
+                    "────────",
+                    "────────",
+                    "──────",
+                    "────────"
+                );
+                for (i, e) in entries.iter().enumerate() {
+                    let is_me = if e.agent_id == me { " ←" } else { "" };
+                    let last = if e.last_seen > 0 {
+                        let ago = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap()
+                            .as_secs()
+                            .saturating_sub(e.last_seen);
+                        if ago < 60 {
+                            format!("  {ago}s ago")
+                        } else if ago < 3600 {
+                            format!("  {}m ago", ago / 60)
+                        } else {
+                            format!("  {}h ago", ago / 3600)
+                        }
+                    } else {
+                        String::new()
+                    };
+                    println!(
+                        "  #{:<3} {:<20} {:<10.2} {:<8} {:<8} {:<6} {}{}{}",
+                        i + 1,
+                        e.display,
+                        e.live_trust,
+                        e.credits,
+                        e.messages_7d,
+                        e.vouches,
+                        e.receipts,
+                        is_me,
+                        last
+                    );
+                }
+                println!("\n  {} agents ranked by live trust score.", entries.len());
+            }
+        }
 
         Commands::Mute { agent_id } => match chat::mute(&agent_id, room) {
             Ok(()) => println!("  Muted {agent_id}. Their messages will be hidden."),

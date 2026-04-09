@@ -6782,6 +6782,101 @@ fn parse_since(since: &str) -> u64 {
 
 /// Aggregate credit and trust balances across all joined rooms, returning a
 /// sorted leaderboard (highest credits first, trust as tiebreaker).
+/// Leaderboard entry for a single agent.
+pub struct LeaderboardEntry {
+    pub agent_id: String,
+    pub display: String,
+    pub live_trust: f64,
+    pub credits: i64,
+    pub messages_7d: usize,
+    pub vouches: usize,
+    pub receipts: usize,
+    pub rooms_active: usize,
+    pub last_seen: u64,
+}
+
+/// Build a leaderboard from all known room members, ranked by live trust score.
+pub fn leaderboard(top: usize) -> Vec<LeaderboardEntry> {
+    let rooms = store::load_registry();
+    let aliases = store::load_aliases();
+    let now_ts = now();
+
+    // Collect all unique agent IDs across all rooms.
+    let mut agent_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut last_seen_map: HashMap<String, u64> = HashMap::new();
+    for room in &rooms {
+        for m in &room.members {
+            agent_ids.insert(m.agent_id.clone());
+            let prev = last_seen_map.entry(m.agent_id.clone()).or_insert(0);
+            if m.last_seen > *prev {
+                *prev = m.last_seen;
+            }
+        }
+    }
+
+    // Message counts across all rooms (last 7 days).
+    let mut msg_counts: HashMap<String, usize> = HashMap::new();
+    for room in &rooms {
+        for msg in store::load_messages(&room.room_id, 604800) {
+            if let Some(from) = msg["from"].as_str() {
+                *msg_counts.entry(from.to_string()).or_insert(0) += 1;
+            }
+        }
+    }
+
+    // Credit balances from ledger.
+    let mut credits_map: HashMap<String, i64> = HashMap::new();
+    for room in &rooms {
+        for entry in store::load_ledger(&room.room_id) {
+            if entry.ledger != "trust" {
+                *credits_map.entry(entry.agent_id.clone()).or_insert(0) += entry.amount;
+            }
+        }
+    }
+
+    let mut entries: Vec<LeaderboardEntry> = agent_ids
+        .into_iter()
+        .map(|id| {
+            let (live_trust, receipts, rooms_active, vouches) =
+                compute_agent_trust_score(&id);
+            let display = aliases.get(&id).cloned().unwrap_or_else(|| {
+                if id.len() >= 8 {
+                    format!("{}…{}", &id[..4], &id[id.len() - 4..])
+                } else {
+                    id.clone()
+                }
+            });
+            let messages_7d = msg_counts.get(&id).copied().unwrap_or(0);
+            let credits = credits_map.get(&id).copied().unwrap_or(0);
+            let last_seen = last_seen_map.get(&id).copied().unwrap_or(0);
+            LeaderboardEntry {
+                agent_id: id,
+                display,
+                live_trust,
+                credits,
+                messages_7d,
+                vouches,
+                receipts,
+                rooms_active,
+                last_seen,
+            }
+        })
+        .collect();
+
+    // Sort by live trust score descending, then by message count.
+    entries.sort_by(|a, b| {
+        b.live_trust
+            .partial_cmp(&a.live_trust)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(b.messages_7d.cmp(&a.messages_7d))
+            .then(b.last_seen.cmp(&a.last_seen))
+    });
+
+    entries.truncate(top);
+    let _ = now_ts; // used for potential future decay
+    entries
+}
+
 pub fn agent_leaderboard() -> Vec<serde_json::Value> {
     let rooms = store::load_registry();
     let aliases = store::load_aliases();
