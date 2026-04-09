@@ -1396,6 +1396,170 @@ fn handle_connection(stream: TcpStream) {
             }
         }
 
+        // ── Bounties REST API ────────────────────────────────────────────────────
+
+        // GET /api/v1/bounties — list open bounties in a room (JSON)
+        // Query params: room=<label|id>  (optional)
+        ("GET", ["api", "v1", "bounties"]) => {
+            let qs = path.split_once('?').map(|(_, q)| q).unwrap_or("");
+            let room_param = qs.split('&').find_map(|kv| {
+                kv.strip_prefix("room=").map(|v| url_decode(v))
+            });
+            match chat::bounty_list(room_param.as_deref()) {
+                Ok(bounties) => {
+                    let body = serde_json::to_string(&bounties).unwrap_or_else(|_| "[]".to_string());
+                    send_json(stream, 200, &body);
+                }
+                Err(e) => send_json(stream, 400, &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'"))),
+            }
+        }
+
+        // POST /api/v1/bounties — post a new bounty (Bearer auth required)
+        // JSON body: {"title":"...", "priority":1, "reward_credits":100, "acceptance_oracle":"cargo test",
+        //             "deadline_hours":48, "room":"plaza"}
+        // Returns: {"id":"<bounty-id>", "title":"...", "priority":..., "status":"open"}
+        ("POST", ["api", "v1", "bounties"]) => {
+            let agent_id = match verify_bearer_agent_token(&raw) {
+                Ok(id) => id,
+                Err(e) => {
+                    send_json(stream, 401, &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'")));
+                    return;
+                }
+            };
+            let _ = agent_id; // stored in room context via token; bounty_post uses get_agent_id()
+            let parsed: serde_json::Value = match serde_json::from_str(body) {
+                Ok(v) => v,
+                Err(_) => {
+                    send_json(stream, 400, r#"{"error":"invalid JSON body"}"#);
+                    return;
+                }
+            };
+            let title = match parsed["title"].as_str().filter(|s| !s.is_empty()) {
+                Some(t) => t.to_string(),
+                None => {
+                    send_json(stream, 400, r#"{"error":"title is required"}"#);
+                    return;
+                }
+            };
+            let priority = parsed["priority"].as_u64().unwrap_or(1) as u32;
+            let oracle = parsed["acceptance_oracle"].as_str().map(|s| s.to_string());
+            let reward_credits = parsed["reward_credits"].as_i64();
+            let deadline_hours = parsed["deadline_hours"].as_u64();
+            let room_label = parsed["room"].as_str().map(|s| s.to_string());
+            match chat::bounty_post(
+                &title,
+                priority,
+                oracle.as_deref(),
+                reward_credits,
+                deadline_hours,
+                room_label.as_deref(),
+            ) {
+                Ok(id) => {
+                    let resp = serde_json::json!({
+                        "id": id,
+                        "title": title,
+                        "priority": priority,
+                        "status": "open",
+                        "reward_credits": reward_credits,
+                        "acceptance_oracle": oracle,
+                        "deadline_hours": deadline_hours,
+                        "posted_by": store::get_agent_id(),
+                    });
+                    send_json(stream, 201, &resp.to_string());
+                }
+                Err(e) => send_json(stream, 400, &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'"))),
+            }
+        }
+
+        // GET /api/v1/bounties/:id — fetch a single bounty/task by ID prefix
+        // Query param: room=<label|id>  (optional)
+        ("GET", ["api", "v1", "bounties", bounty_id]) => {
+            let qs = path.split_once('?').map(|(_, q)| q).unwrap_or("");
+            let room_param = qs.split('&').find_map(|kv| {
+                kv.strip_prefix("room=").map(|v| url_decode(v))
+            });
+            let bid = (*bounty_id).to_string();
+            match chat::task_get(&bid, room_param.as_deref()) {
+                Ok(task) => {
+                    let body = serde_json::to_string(&task).unwrap_or_else(|_| "{}".to_string());
+                    send_json(stream, 200, &body);
+                }
+                Err(e) => send_json(stream, 404, &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'"))),
+            }
+        }
+
+        // POST /api/v1/bounties/:id/submit — submit a branch as a solution (Bearer auth)
+        // JSON body: {"branch":"<git-branch>", "room":"plaza"}
+        // Returns: {"status":"submitted", "result":"..."}
+        ("POST", ["api", "v1", "bounties", bounty_id, "submit"]) => {
+            let _agent_id = match verify_bearer_agent_token(&raw) {
+                Ok(id) => id,
+                Err(e) => {
+                    send_json(stream, 401, &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'")));
+                    return;
+                }
+            };
+            let parsed: serde_json::Value = match serde_json::from_str(body) {
+                Ok(v) => v,
+                Err(_) => {
+                    send_json(stream, 400, r#"{"error":"invalid JSON body"}"#);
+                    return;
+                }
+            };
+            let branch = match parsed["branch"].as_str().filter(|s| !s.is_empty()) {
+                Some(b) => b.to_string(),
+                None => {
+                    send_json(stream, 400, r#"{"error":"branch is required"}"#);
+                    return;
+                }
+            };
+            let room_label = parsed["room"].as_str().map(|s| s.to_string());
+            let bid = (*bounty_id).to_string();
+            match chat::bounty_submit(&bid, &branch, room_label.as_deref()) {
+                Ok(result) => {
+                    let resp = serde_json::json!({"status": "submitted", "result": result});
+                    send_json(stream, 200, &resp.to_string());
+                }
+                Err(e) => send_json(stream, 400, &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'"))),
+            }
+        }
+
+        // POST /api/v1/bounties/:id/verify — run oracle on a submission (Bearer auth)
+        // JSON body: {"agent_id":"<submitter>", "room":"plaza"}
+        // Returns: {"status":"verified", "result":"PASS|FAIL: ..."}
+        ("POST", ["api", "v1", "bounties", bounty_id, "verify"]) => {
+            let _caller = match verify_bearer_agent_token(&raw) {
+                Ok(id) => id,
+                Err(e) => {
+                    send_json(stream, 401, &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'")));
+                    return;
+                }
+            };
+            let parsed: serde_json::Value = match serde_json::from_str(body) {
+                Ok(v) => v,
+                Err(_) => {
+                    send_json(stream, 400, r#"{"error":"invalid JSON body"}"#);
+                    return;
+                }
+            };
+            let agent_id = match parsed["agent_id"].as_str().filter(|s| !s.is_empty()) {
+                Some(a) => a.to_string(),
+                None => {
+                    send_json(stream, 400, r#"{"error":"agent_id is required"}"#);
+                    return;
+                }
+            };
+            let room_label = parsed["room"].as_str().map(|s| s.to_string());
+            let bid = (*bounty_id).to_string();
+            match chat::bounty_verify(&bid, &agent_id, room_label.as_deref()) {
+                Ok(result) => {
+                    let resp = serde_json::json!({"status": "verified", "result": result});
+                    send_json(stream, 200, &resp.to_string());
+                }
+                Err(e) => send_json(stream, 400, &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'"))),
+            }
+        }
+
         // GET /api/payments/history — list payment history for the calling agent
         // Query param: room=plaza
         ("GET", ["api", "payments", "history"]) => {
@@ -1986,5 +2150,150 @@ mod tests {
         let qs = path.split_once('?').map(|(_, q)| q).unwrap_or("");
         let room_param = qs.split('&').find_map(|kv| kv.strip_prefix("room=").map(|v| v.to_string()));
         assert_eq!(room_param.as_deref(), Some("collab"));
+    }
+
+    // ── Bounties API route tests ─────────────────────────────────────────────
+
+    #[test]
+    fn bounties_api_get_list_route_segments() {
+        let path = "/api/v1/bounties";
+        let path_only = path.split('?').next().unwrap_or(path);
+        let segments: Vec<&str> = path_only.trim_start_matches('/').split('/').collect();
+        assert_eq!(segments, vec!["api", "v1", "bounties"]);
+    }
+
+    #[test]
+    fn bounties_api_get_list_with_room_query() {
+        let path = "/api/v1/bounties?room=plaza";
+        let qs = path.split_once('?').map(|(_, q)| q).unwrap_or("");
+        let room_param = qs.split('&').find_map(|kv| kv.strip_prefix("room=").map(|v| url_decode(v)));
+        assert_eq!(room_param.as_deref(), Some("plaza"));
+    }
+
+    #[test]
+    fn bounties_api_post_body_parsing() {
+        let body = r#"{"title":"Add rate limiting","priority":2,"reward_credits":500,"acceptance_oracle":"cargo test","deadline_hours":48,"room":"plaza"}"#;
+        let parsed: serde_json::Value = serde_json::from_str(body).unwrap();
+        assert_eq!(parsed["title"].as_str(), Some("Add rate limiting"));
+        assert_eq!(parsed["priority"].as_u64(), Some(2));
+        assert_eq!(parsed["reward_credits"].as_i64(), Some(500));
+        assert_eq!(parsed["acceptance_oracle"].as_str(), Some("cargo test"));
+        assert_eq!(parsed["deadline_hours"].as_u64(), Some(48));
+        assert_eq!(parsed["room"].as_str(), Some("plaza"));
+    }
+
+    #[test]
+    fn bounties_api_post_body_missing_title() {
+        let body = r#"{"priority":1,"reward_credits":100}"#;
+        let parsed: serde_json::Value = serde_json::from_str(body).unwrap();
+        let title = parsed["title"].as_str().filter(|s| !s.is_empty());
+        assert!(title.is_none(), "missing title should be detected");
+    }
+
+    #[test]
+    fn bounties_api_post_body_empty_title() {
+        let body = r#"{"title":"","reward_credits":100}"#;
+        let parsed: serde_json::Value = serde_json::from_str(body).unwrap();
+        let title = parsed["title"].as_str().filter(|s| !s.is_empty());
+        assert!(title.is_none(), "empty title should be treated as missing");
+    }
+
+    #[test]
+    fn bounties_api_post_body_optional_fields() {
+        // Only title is required; priority defaults to 1
+        let body = r#"{"title":"Fix memory leak"}"#;
+        let parsed: serde_json::Value = serde_json::from_str(body).unwrap();
+        assert_eq!(parsed["title"].as_str(), Some("Fix memory leak"));
+        let priority = parsed["priority"].as_u64().unwrap_or(1) as u32;
+        assert_eq!(priority, 1);
+        assert!(parsed["reward_credits"].as_i64().is_none());
+        assert!(parsed["acceptance_oracle"].as_str().is_none());
+        assert!(parsed["deadline_hours"].as_u64().is_none());
+    }
+
+    #[test]
+    fn bounties_api_get_single_route_segments() {
+        let path = "/api/v1/bounties/abc123def456";
+        let path_only = path.split('?').next().unwrap_or(path);
+        let segments: Vec<&str> = path_only.trim_start_matches('/').split('/').collect();
+        // ["api", "v1", "bounties", "abc123def456"]
+        assert_eq!(segments.len(), 4);
+        assert_eq!(segments[0], "api");
+        assert_eq!(segments[1], "v1");
+        assert_eq!(segments[2], "bounties");
+        assert_eq!(segments[3], "abc123def456");
+    }
+
+    #[test]
+    fn bounties_api_submit_route_segments() {
+        let path = "/api/v1/bounties/abc123/submit";
+        let path_only = path.split('?').next().unwrap_or(path);
+        let segments: Vec<&str> = path_only.trim_start_matches('/').split('/').collect();
+        // ["api", "v1", "bounties", "abc123", "submit"]
+        assert_eq!(segments.len(), 5);
+        assert_eq!(segments[4], "submit");
+    }
+
+    #[test]
+    fn bounties_api_verify_route_segments() {
+        let path = "/api/v1/bounties/abc123/verify";
+        let path_only = path.split('?').next().unwrap_or(path);
+        let segments: Vec<&str> = path_only.trim_start_matches('/').split('/').collect();
+        assert_eq!(segments.len(), 5);
+        assert_eq!(segments[4], "verify");
+    }
+
+    #[test]
+    fn bounties_api_submit_body_parsing() {
+        let body = r#"{"branch":"builder/my-feature","room":"plaza"}"#;
+        let parsed: serde_json::Value = serde_json::from_str(body).unwrap();
+        assert_eq!(parsed["branch"].as_str(), Some("builder/my-feature"));
+        assert_eq!(parsed["room"].as_str(), Some("plaza"));
+    }
+
+    #[test]
+    fn bounties_api_submit_body_missing_branch() {
+        let body = r#"{"room":"plaza"}"#;
+        let parsed: serde_json::Value = serde_json::from_str(body).unwrap();
+        let branch = parsed["branch"].as_str().filter(|s| !s.is_empty());
+        assert!(branch.is_none(), "missing branch should be detected");
+    }
+
+    #[test]
+    fn bounties_api_verify_body_parsing() {
+        let body = r#"{"agent_id":"deadbeef1234","room":"plaza"}"#;
+        let parsed: serde_json::Value = serde_json::from_str(body).unwrap();
+        assert_eq!(parsed["agent_id"].as_str(), Some("deadbeef1234"));
+        assert_eq!(parsed["room"].as_str(), Some("plaza"));
+    }
+
+    #[test]
+    fn bounties_api_verify_body_missing_agent_id() {
+        let body = r#"{"room":"plaza"}"#;
+        let parsed: serde_json::Value = serde_json::from_str(body).unwrap();
+        let agent_id = parsed["agent_id"].as_str().filter(|s| !s.is_empty());
+        assert!(agent_id.is_none(), "missing agent_id should be detected");
+    }
+
+    #[test]
+    fn bounties_api_post_requires_bearer() {
+        let raw = "POST /api/v1/bounties HTTP/1.1\r\n\r\n{}";
+        // No authorization header — bearer_token should return None
+        let token = bearer_token(raw);
+        assert!(token.is_none(), "unauthenticated request should have no bearer token");
+    }
+
+    #[test]
+    fn bounties_api_submit_requires_bearer() {
+        let raw = "POST /api/v1/bounties/abc123/submit HTTP/1.1\r\n\r\n{}";
+        let token = bearer_token(raw);
+        assert!(token.is_none());
+    }
+
+    #[test]
+    fn bounties_api_verify_requires_bearer() {
+        let raw = "POST /api/v1/bounties/abc123/verify HTTP/1.1\r\n\r\n{}";
+        let token = bearer_token(raw);
+        assert!(token.is_none());
     }
 }
