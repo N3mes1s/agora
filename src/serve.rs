@@ -1590,6 +1590,251 @@ fn handle_connection(stream: TcpStream) {
             }
         }
 
+        // ── Prediction Market (Bets) ──────────────────────────────────────────
+
+        // GET /api/v1/bets — list bets in a room (JSON)
+        // Query params: room=<label|id>  status=open|resolved_yes|resolved_no  (both optional)
+        ("GET", ["api", "v1", "bets"]) => {
+            let qs = path.split_once('?').map(|(_, q)| q).unwrap_or("");
+            let room_param = qs.split('&').find_map(|kv| {
+                kv.strip_prefix("room=").map(|v| url_decode(v))
+            });
+            let status_filter = qs.split('&').find_map(|kv| {
+                kv.strip_prefix("status=").map(|v| url_decode(v))
+            });
+            match chat::bet_list(room_param.as_deref()) {
+                Ok(bets) => {
+                    let filtered: Vec<_> = bets.iter().filter(|b| {
+                        status_filter.as_deref().map_or(true, |s| b.status == s)
+                    }).collect();
+                    let body = serde_json::to_string(&filtered).unwrap_or_else(|_| "[]".to_string());
+                    send_json(stream, 200, &body);
+                }
+                Err(e) => send_json(stream, 400, &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'"))),
+            }
+        }
+
+        // POST /api/v1/bets — create a new bet (requires auth)
+        // JSON body: {"question": "...", "room": "..."}
+        // Returns: {"id": "<bet-id>", "question": "..."}
+        ("POST", ["api", "v1", "bets"]) => {
+            let agent_id = match verify_bearer_agent_token(&raw) {
+                Ok(id) => id,
+                Err(e) => {
+                    send_json(stream, 401, &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'")));
+                    return;
+                }
+            };
+            let parsed: serde_json::Value = match serde_json::from_str(body) {
+                Ok(v) => v,
+                Err(_) => {
+                    send_json(stream, 400, r#"{"error":"invalid JSON body"}"#);
+                    return;
+                }
+            };
+            let question = match parsed["question"].as_str().filter(|s| !s.is_empty()) {
+                Some(q) => q.to_string(),
+                None => {
+                    send_json(stream, 400, r#"{"error":"question is required"}"#);
+                    return;
+                }
+            };
+            let room_label = parsed["room"].as_str().map(|s| s.to_string());
+            let _ = agent_id; // agent_id validated; bet_create uses session agent_id
+            match chat::bet_create(&question, room_label.as_deref()) {
+                Ok(id) => {
+                    let resp = serde_json::json!({"id": id, "question": question, "status": "open"});
+                    send_json(stream, 201, &resp.to_string());
+                }
+                Err(e) => send_json(stream, 400, &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'"))),
+            }
+        }
+
+        // POST /api/v1/bets/:id/stake — place a stake on a bet (requires auth)
+        // JSON body: {"side": true|false, "amount": <credits>, "room": "..."}
+        // Returns: {"ok": true}
+        ("POST", ["api", "v1", "bets", bet_id, "stake"]) => {
+            let _agent_id = match verify_bearer_agent_token(&raw) {
+                Ok(id) => id,
+                Err(e) => {
+                    send_json(stream, 401, &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'")));
+                    return;
+                }
+            };
+            let parsed: serde_json::Value = match serde_json::from_str(body) {
+                Ok(v) => v,
+                Err(_) => {
+                    send_json(stream, 400, r#"{"error":"invalid JSON body"}"#);
+                    return;
+                }
+            };
+            let side = match parsed["side"].as_bool() {
+                Some(s) => s,
+                None => {
+                    send_json(stream, 400, r#"{"error":"side (true=YES, false=NO) is required"}"#);
+                    return;
+                }
+            };
+            let amount = match parsed["amount"].as_i64().filter(|&a| a > 0) {
+                Some(a) => a,
+                None => {
+                    send_json(stream, 400, r#"{"error":"amount must be a positive integer"}"#);
+                    return;
+                }
+            };
+            let room_label = parsed["room"].as_str().map(|s| s.to_string());
+            let bid = (*bet_id).to_string();
+            match chat::bet_stake(&bid, side, amount, room_label.as_deref()) {
+                Ok(()) => send_json(stream, 200, r#"{"ok":true}"#),
+                Err(e) => send_json(stream, 400, &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'"))),
+            }
+        }
+
+        // POST /api/v1/bets/:id/resolve — resolve a bet (admin only, requires auth)
+        // JSON body: {"outcome": true|false, "room": "..."}
+        // Returns: {"result": "...", "ok": true}
+        ("POST", ["api", "v1", "bets", bet_id, "resolve"]) => {
+            let _agent_id = match verify_bearer_agent_token(&raw) {
+                Ok(id) => id,
+                Err(e) => {
+                    send_json(stream, 401, &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'")));
+                    return;
+                }
+            };
+            let parsed: serde_json::Value = match serde_json::from_str(body) {
+                Ok(v) => v,
+                Err(_) => {
+                    send_json(stream, 400, r#"{"error":"invalid JSON body"}"#);
+                    return;
+                }
+            };
+            let outcome = match parsed["outcome"].as_bool() {
+                Some(o) => o,
+                None => {
+                    send_json(stream, 400, r#"{"error":"outcome (true=YES, false=NO) is required"}"#);
+                    return;
+                }
+            };
+            let room_label = parsed["room"].as_str().map(|s| s.to_string());
+            let bid = (*bet_id).to_string();
+            match chat::bet_resolve(&bid, outcome, room_label.as_deref()) {
+                Ok(result) => {
+                    let resp = serde_json::json!({"ok": true, "result": result});
+                    send_json(stream, 200, &resp.to_string());
+                }
+                Err(e) => send_json(stream, 400, &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'"))),
+            }
+        }
+
+        // ── Soma Knowledge Graph ──────────────────────────────────────────────
+
+        // GET /api/v1/soma — query soma beliefs for a subject
+        // Query params: subject=<text>  room=<label|id>  (subject required)
+        ("GET", ["api", "v1", "soma"]) => {
+            let qs = path.split_once('?').map(|(_, q)| q).unwrap_or("");
+            let subject = qs.split('&').find_map(|kv| {
+                kv.strip_prefix("subject=").map(|v| url_decode(v))
+            });
+            let subject = match subject.filter(|s| !s.is_empty()) {
+                Some(s) => s,
+                None => {
+                    send_json(stream, 400, r#"{"error":"subject query parameter is required"}"#);
+                    return;
+                }
+            };
+            let room_param = qs.split('&').find_map(|kv| {
+                kv.strip_prefix("room=").map(|v| url_decode(v))
+            });
+            match chat::soma_query(&subject, room_param.as_deref()) {
+                Ok(beliefs) => {
+                    let body = serde_json::to_string(&beliefs).unwrap_or_else(|_| "[]".to_string());
+                    send_json(stream, 200, &body);
+                }
+                Err(e) => send_json(stream, 400, &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'"))),
+            }
+        }
+
+        // POST /api/v1/soma — assert a new belief (requires auth)
+        // JSON body: {"subject": "...", "predicate": "...", "confidence": 0.9, "git_ref": "...", "room": "..."}
+        // Returns: {"id": "<belief-id>"}
+        ("POST", ["api", "v1", "soma"]) => {
+            let _agent_id = match verify_bearer_agent_token(&raw) {
+                Ok(id) => id,
+                Err(e) => {
+                    send_json(stream, 401, &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'")));
+                    return;
+                }
+            };
+            let parsed: serde_json::Value = match serde_json::from_str(body) {
+                Ok(v) => v,
+                Err(_) => {
+                    send_json(stream, 400, r#"{"error":"invalid JSON body"}"#);
+                    return;
+                }
+            };
+            let subject = match parsed["subject"].as_str().filter(|s| !s.is_empty()) {
+                Some(s) => s.to_string(),
+                None => {
+                    send_json(stream, 400, r#"{"error":"subject is required"}"#);
+                    return;
+                }
+            };
+            let predicate = match parsed["predicate"].as_str().filter(|s| !s.is_empty()) {
+                Some(p) => p.to_string(),
+                None => {
+                    send_json(stream, 400, r#"{"error":"predicate is required"}"#);
+                    return;
+                }
+            };
+            let confidence = parsed["confidence"].as_f64();
+            let git_ref = parsed["git_ref"].as_str().map(|s| s.to_string());
+            let room_label = parsed["room"].as_str().map(|s| s.to_string());
+            match chat::soma_assert(&subject, &predicate, confidence, git_ref.as_deref(), room_label.as_deref()) {
+                Ok(id) => {
+                    let resp = serde_json::json!({"id": id, "subject": subject, "predicate": predicate});
+                    send_json(stream, 201, &resp.to_string());
+                }
+                Err(e) => send_json(stream, 400, &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'"))),
+            }
+        }
+
+        // POST /api/v1/soma/:id/correct — correct an existing belief (requires auth)
+        // JSON body: {"predicate": "...", "reason": "...", "room": "..."}
+        // Returns: {"id": "<correction-id>", "corrects": "<belief-id>"}
+        ("POST", ["api", "v1", "soma", belief_id, "correct"]) => {
+            let _agent_id = match verify_bearer_agent_token(&raw) {
+                Ok(id) => id,
+                Err(e) => {
+                    send_json(stream, 401, &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'")));
+                    return;
+                }
+            };
+            let parsed: serde_json::Value = match serde_json::from_str(body) {
+                Ok(v) => v,
+                Err(_) => {
+                    send_json(stream, 400, r#"{"error":"invalid JSON body"}"#);
+                    return;
+                }
+            };
+            let predicate = match parsed["predicate"].as_str().filter(|s| !s.is_empty()) {
+                Some(p) => p.to_string(),
+                None => {
+                    send_json(stream, 400, r#"{"error":"predicate is required"}"#);
+                    return;
+                }
+            };
+            let reason = parsed["reason"].as_str().map(|s| s.to_string());
+            let room_label = parsed["room"].as_str().map(|s| s.to_string());
+            let bid = (*belief_id).to_string();
+            match chat::soma_correct(&bid, &predicate, reason.as_deref(), room_label.as_deref()) {
+                Ok(id) => {
+                    let resp = serde_json::json!({"id": id, "corrects": bid});
+                    send_json(stream, 201, &resp.to_string());
+                }
+                Err(e) => send_json(stream, 400, &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'"))),
+            }
+        }
+
         _ => {
             send_response(
                 stream,
@@ -2292,5 +2537,158 @@ mod tests {
         let fail_result = "FAIL: oracle 'cargo test' on branch 'bad'";
         assert!(pass_result.starts_with("PASS"));
         assert!(!fail_result.starts_with("PASS"));
+    }
+
+    // ── Bets REST API route tests ─────────────────────────────────────────────
+
+    #[test]
+    fn bets_api_list_route_segments() {
+        let path = "/api/v1/bets";
+        let segments: Vec<&str> = path.trim_start_matches('/').split('/').collect();
+        assert_eq!(segments, vec!["api", "v1", "bets"]);
+    }
+
+    #[test]
+    fn bets_api_list_with_status_filter() {
+        let path = "/api/v1/bets?room=plaza&status=open";
+        let qs = path.split_once('?').map(|(_, q)| q).unwrap_or("");
+        let status = qs.split('&').find_map(|kv| kv.strip_prefix("status=").map(|v| v.to_string()));
+        assert_eq!(status.as_deref(), Some("open"));
+    }
+
+    #[test]
+    fn bets_api_post_body_parsing() {
+        let body = r#"{"question": "Will the build pass?", "room": "plaza"}"#;
+        let parsed: serde_json::Value = serde_json::from_str(body).unwrap();
+        assert_eq!(parsed["question"].as_str(), Some("Will the build pass?"));
+        assert_eq!(parsed["room"].as_str(), Some("plaza"));
+    }
+
+    #[test]
+    fn bets_api_post_body_missing_question() {
+        let body = r#"{"room": "plaza"}"#;
+        let parsed: serde_json::Value = serde_json::from_str(body).unwrap();
+        assert!(parsed["question"].as_str().filter(|s| !s.is_empty()).is_none());
+    }
+
+    #[test]
+    fn bets_api_stake_body_parsing() {
+        let body = r#"{"side": true, "amount": 100, "room": "plaza"}"#;
+        let parsed: serde_json::Value = serde_json::from_str(body).unwrap();
+        assert_eq!(parsed["side"].as_bool(), Some(true));
+        assert_eq!(parsed["amount"].as_i64(), Some(100));
+    }
+
+    #[test]
+    fn bets_api_stake_body_invalid_amount() {
+        let body = r#"{"side": false, "amount": -50}"#;
+        let parsed: serde_json::Value = serde_json::from_str(body).unwrap();
+        // amount must be > 0
+        assert!(parsed["amount"].as_i64().filter(|&a| a > 0).is_none());
+    }
+
+    #[test]
+    fn bets_api_stake_route_segments() {
+        let path = "/api/v1/bets/abc123/stake";
+        let segments: Vec<&str> = path.trim_start_matches('/').split('/').collect();
+        assert_eq!(segments, vec!["api", "v1", "bets", "abc123", "stake"]);
+        assert_eq!(segments[3], "abc123"); // bet_id
+    }
+
+    #[test]
+    fn bets_api_resolve_body_parsing() {
+        let body = r#"{"outcome": false, "room": "collab"}"#;
+        let parsed: serde_json::Value = serde_json::from_str(body).unwrap();
+        assert_eq!(parsed["outcome"].as_bool(), Some(false));
+        assert_eq!(parsed["room"].as_str(), Some("collab"));
+    }
+
+    #[test]
+    fn bets_api_resolve_body_missing_outcome() {
+        let body = r#"{"room": "plaza"}"#;
+        let parsed: serde_json::Value = serde_json::from_str(body).unwrap();
+        assert!(parsed["outcome"].as_bool().is_none());
+    }
+
+    #[test]
+    fn bets_api_resolve_route_segments() {
+        let path = "/api/v1/bets/def456/resolve";
+        let segments: Vec<&str> = path.trim_start_matches('/').split('/').collect();
+        assert_eq!(segments, vec!["api", "v1", "bets", "def456", "resolve"]);
+        assert_eq!(segments[4], "resolve");
+    }
+
+    // ── Soma REST API route tests ─────────────────────────────────────────────
+
+    #[test]
+    fn soma_api_query_route_segments() {
+        let path = "/api/v1/soma?subject=authentication";
+        let segments: Vec<&str> = path.split_once('?').map(|(p, _)| p).unwrap_or(path)
+            .trim_start_matches('/').split('/').collect();
+        assert_eq!(segments, vec!["api", "v1", "soma"]);
+    }
+
+    #[test]
+    fn soma_api_query_subject_required() {
+        let path = "/api/v1/soma?room=plaza";
+        let qs = path.split_once('?').map(|(_, q)| q).unwrap_or("");
+        let subject = qs.split('&').find_map(|kv| kv.strip_prefix("subject=").map(|v| v.to_string()));
+        assert!(subject.filter(|s| !s.is_empty()).is_none());
+    }
+
+    #[test]
+    fn soma_api_assert_body_parsing() {
+        let body = r#"{"subject": "cargo-test", "predicate": "passes in CI", "confidence": 0.95, "room": "plaza"}"#;
+        let parsed: serde_json::Value = serde_json::from_str(body).unwrap();
+        assert_eq!(parsed["subject"].as_str(), Some("cargo-test"));
+        assert_eq!(parsed["predicate"].as_str(), Some("passes in CI"));
+        assert!((parsed["confidence"].as_f64().unwrap() - 0.95).abs() < 0.001);
+    }
+
+    #[test]
+    fn soma_api_assert_body_missing_subject() {
+        let body = r#"{"predicate": "is fast"}"#;
+        let parsed: serde_json::Value = serde_json::from_str(body).unwrap();
+        assert!(parsed["subject"].as_str().filter(|s| !s.is_empty()).is_none());
+    }
+
+    #[test]
+    fn soma_api_assert_body_missing_predicate() {
+        let body = r#"{"subject": "auth"}"#;
+        let parsed: serde_json::Value = serde_json::from_str(body).unwrap();
+        assert!(parsed["predicate"].as_str().filter(|s| !s.is_empty()).is_none());
+    }
+
+    #[test]
+    fn soma_api_assert_confidence_optional() {
+        let body = r#"{"subject": "tests", "predicate": "pass", "room": "plaza"}"#;
+        let parsed: serde_json::Value = serde_json::from_str(body).unwrap();
+        // confidence is optional — None means use default (0.8)
+        assert!(parsed["confidence"].as_f64().is_none());
+    }
+
+    #[test]
+    fn soma_api_correct_route_segments() {
+        let path = "/api/v1/soma/abc123def456/correct";
+        let segments: Vec<&str> = path.trim_start_matches('/').split('/').collect();
+        assert_eq!(segments, vec!["api", "v1", "soma", "abc123def456", "correct"]);
+        assert_eq!(segments[3], "abc123def456"); // belief_id
+        assert_eq!(segments[4], "correct");
+    }
+
+    #[test]
+    fn soma_api_correct_body_parsing() {
+        let body = r#"{"predicate": "now fails intermittently", "reason": "flaky test discovered", "room": "plaza"}"#;
+        let parsed: serde_json::Value = serde_json::from_str(body).unwrap();
+        assert_eq!(parsed["predicate"].as_str(), Some("now fails intermittently"));
+        assert_eq!(parsed["reason"].as_str(), Some("flaky test discovered"));
+    }
+
+    #[test]
+    fn soma_api_correct_reason_optional() {
+        let body = r#"{"predicate": "deprecated"}"#;
+        let parsed: serde_json::Value = serde_json::from_str(body).unwrap();
+        // reason is optional
+        assert!(parsed["reason"].as_str().is_none());
     }
 }
