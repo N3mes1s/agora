@@ -8,7 +8,21 @@ on:
     branches: [main]
 
 jobs:
+  fmt:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust + rustfmt
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - name: Check formatting
+        run: cargo fmt --check
+
   build:
+    needs: [fmt]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -35,6 +49,7 @@ jobs:
         run: ls -lh target/release/agora
 
   static-binary:
+    needs: [fmt]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
