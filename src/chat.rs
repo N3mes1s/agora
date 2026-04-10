@@ -2153,8 +2153,35 @@ pub fn bounty_submit(
 }
 
 /// Run a shell command in the context of a git branch (stashes current state, checks out branch, runs, restores).
+/// Validate a branch name to prevent flag injection and path traversal.
+fn validate_branch_name(branch: &str) -> Result<(), String> {
+    if branch.is_empty() {
+        return Err("Branch name is empty".to_string());
+    }
+    if branch.starts_with('-') {
+        return Err(format!("Invalid branch name '{branch}': starts with '-'"));
+    }
+    if branch.contains("..") {
+        return Err(format!(
+            "Invalid branch name '{branch}': contains '..'"
+        ));
+    }
+    let valid = branch
+        .chars()
+        .all(|c| c.is_alphanumeric() || matches!(c, '-' | '_' | '.' | '/' | '@' | '+'));
+    if !valid {
+        return Err(format!(
+            "Invalid branch name '{branch}': disallowed characters"
+        ));
+    }
+    Ok(())
+}
+
 fn run_oracle_on_branch(branch: &str, oracle_cmd: &str) -> Result<bool, String> {
     use std::process::Command;
+
+    // Validate branch name before any git operations (prevents flag injection).
+    validate_branch_name(branch)?;
 
     // Verify branch exists
     let check = Command::new("git")
@@ -2175,9 +2202,10 @@ fn run_oracle_on_branch(branch: &str, oracle_cmd: &str) -> Result<bool, String> 
         .map_err(|e| format!("git error: {e}"))?;
     let original_branch = String::from_utf8_lossy(&head.stdout).trim().to_string();
 
-    // Checkout submission branch
+    // Checkout submission branch — use '--' separator to prevent branch name
+    // being interpreted as a git flag (e.g. '--orphan', '-f').
     let checkout = Command::new("git")
-        .args(["checkout", "--quiet", branch])
+        .args(["checkout", "--quiet", "--", branch])
         .output()
         .map_err(|e| format!("git checkout error: {e}"))?;
     if !checkout.status.success() {
@@ -2196,9 +2224,9 @@ fn run_oracle_on_branch(branch: &str, oracle_cmd: &str) -> Result<bool, String> 
             .map_err(|e| format!("Oracle exec error: {e}"))
     };
 
-    // Restore original branch
+    // Restore original branch — use '--' separator for safety
     let _ = Command::new("git")
-        .args(["checkout", "--quiet", &original_branch])
+        .args(["checkout", "--quiet", "--", &original_branch])
         .output();
     let _ = Command::new("git")
         .args(["stash", "pop", "--quiet"])

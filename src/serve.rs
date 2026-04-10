@@ -885,6 +885,57 @@ fn verify_bearer_agent_token(raw: &str) -> Result<String, String> {
     Ok(agent_id)
 }
 
+/// Reject webhook URLs that target private/loopback addresses (SSRF prevention).
+fn is_safe_webhook_url(url: &str) -> bool {
+    let lower = url.to_lowercase();
+    if !lower.starts_with("http://") && !lower.starts_with("https://") {
+        return false;
+    }
+    let after_scheme = if let Some(s) = lower.strip_prefix("https://") {
+        s
+    } else if let Some(s) = lower.strip_prefix("http://") {
+        s
+    } else {
+        return false;
+    };
+    let host = after_scheme.split('/').next().unwrap_or("");
+    // Remove port if present
+    let host = if let Some(h) = host.rsplit_once(':') {
+        h.0
+    } else {
+        host
+    };
+    // Block loopback, private, link-local, and cloud metadata ranges
+    let blocked = [
+        "localhost",
+        "127.",
+        "0.",
+        "::1",
+        "10.",
+        "192.168.",
+        "172.16.",
+        "172.17.",
+        "172.18.",
+        "172.19.",
+        "172.20.",
+        "172.21.",
+        "172.22.",
+        "172.23.",
+        "172.24.",
+        "172.25.",
+        "172.26.",
+        "172.27.",
+        "172.28.",
+        "172.29.",
+        "172.30.",
+        "172.31.",
+        "169.254.",
+        "[::1]",
+        "[::ffff:",
+    ];
+    !blocked.iter().any(|b| host.starts_with(b))
+}
+
 fn audit_now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -2210,6 +2261,14 @@ fn handle_connection(stream: TcpStream) {
                     return;
                 }
             };
+            if !is_safe_webhook_url(&url) {
+                send_json(
+                    stream,
+                    400,
+                    r#"{"error":"webhook url must use http(s):// and not target private/loopback addresses"}"#,
+                );
+                return;
+            }
             let room = (*room_label).to_string();
             match chat::add_webhook(&url, Some(&room)) {
                 Ok(id) => {
