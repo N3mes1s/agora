@@ -1307,6 +1307,68 @@ pub fn recover_stale_leases(room_id: &str) -> Vec<SandboxLease> {
     recovered
 }
 
+// ── Sandbox Session Registry ────────────────────────────────────
+//
+// Global registry mapping session_id → owner agent_id.
+// Stored at ~/.agora/sandbox_sessions.json (not per-room) because
+// exec/destroy requests may not include a room_id.
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SandboxSessionRecord {
+    pub id: String,
+    pub agent_id: String,
+    pub created_at: u64,
+    #[serde(default)]
+    pub destroyed: bool,
+}
+
+fn sandbox_sessions_path() -> PathBuf {
+    agora_dir().join("sandbox_sessions.json")
+}
+
+fn load_sandbox_sessions() -> Vec<SandboxSessionRecord> {
+    if let Ok(data) = fs::read_to_string(sandbox_sessions_path()) {
+        serde_json::from_str(&data).unwrap_or_default()
+    } else {
+        Vec::new()
+    }
+}
+
+fn save_sandbox_sessions(sessions: &[SandboxSessionRecord]) {
+    ensure_dir(&agora_dir());
+    let data = serde_json::to_string_pretty(sessions).unwrap();
+    let _ = fs::write(sandbox_sessions_path(), data);
+}
+
+/// Register a newly created sandbox session with its owning agent.
+pub fn register_sandbox_session(session_id: &str, agent_id: &str) {
+    let mut sessions = load_sandbox_sessions();
+    sessions.push(SandboxSessionRecord {
+        id: session_id.to_string(),
+        agent_id: agent_id.to_string(),
+        created_at: now(),
+        destroyed: false,
+    });
+    save_sandbox_sessions(&sessions);
+}
+
+/// Return the agent_id that owns the given session, if known.
+pub fn sandbox_session_owner(session_id: &str) -> Option<String> {
+    load_sandbox_sessions()
+        .into_iter()
+        .find(|s| s.id == session_id && !s.destroyed)
+        .map(|s| s.agent_id)
+}
+
+/// Mark a session as destroyed so future lookups return None.
+pub fn mark_sandbox_session_destroyed(session_id: &str) {
+    let mut sessions = load_sandbox_sessions();
+    if let Some(s) = sessions.iter_mut().find(|s| s.id == session_id) {
+        s.destroyed = true;
+    }
+    save_sandbox_sessions(&sessions);
+}
+
 // ── Role Leases ────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1983,5 +2045,70 @@ mod tests {
             }
         }
         let _ = fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn sandbox_session_register_and_lookup() {
+        let _guard = test_env_lock().lock().unwrap();
+        let home = test_home("session-register");
+        let _ = fs::remove_dir_all(&home);
+        fs::create_dir_all(home.join(".agora")).unwrap();
+        let old_home = env::var("HOME").ok();
+        unsafe { env::set_var("HOME", &home); }
+
+        register_sandbox_session("sess-1", "agent-alice");
+        assert_eq!(sandbox_session_owner("sess-1"), Some("agent-alice".to_string()));
+        // Unknown session returns None (backward-compat pass-through).
+        assert_eq!(sandbox_session_owner("sess-unknown"), None);
+
+        restore_home(old_home);
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn sandbox_session_destroy_clears_owner() {
+        let _guard = test_env_lock().lock().unwrap();
+        let home = test_home("session-destroy");
+        let _ = fs::remove_dir_all(&home);
+        fs::create_dir_all(home.join(".agora")).unwrap();
+        let old_home = env::var("HOME").ok();
+        unsafe { env::set_var("HOME", &home); }
+
+        register_sandbox_session("sess-2", "agent-bob");
+        mark_sandbox_session_destroyed("sess-2");
+        // Destroyed session owner is no longer returned.
+        assert_eq!(sandbox_session_owner("sess-2"), None);
+
+        restore_home(old_home);
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn sandbox_session_multiple_sessions_independent() {
+        let _guard = test_env_lock().lock().unwrap();
+        let home = test_home("session-multi");
+        let _ = fs::remove_dir_all(&home);
+        fs::create_dir_all(home.join(".agora")).unwrap();
+        let old_home = env::var("HOME").ok();
+        unsafe { env::set_var("HOME", &home); }
+
+        register_sandbox_session("sess-a", "agent-alice");
+        register_sandbox_session("sess-b", "agent-bob");
+        mark_sandbox_session_destroyed("sess-a");
+
+        // sess-a is gone, sess-b remains.
+        assert_eq!(sandbox_session_owner("sess-a"), None);
+        assert_eq!(sandbox_session_owner("sess-b"), Some("agent-bob".to_string()));
+
+        restore_home(old_home);
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    fn restore_home(old: Option<String>) {
+        if let Some(h) = old {
+            unsafe { env::set_var("HOME", h); }
+        } else {
+            unsafe { env::remove_var("HOME"); }
+        }
     }
 }

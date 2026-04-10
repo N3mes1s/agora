@@ -817,9 +817,13 @@ fn render_leaderboard_page(rows: &[serde_json::Value]) -> String {
 fn json_status(code: u16) -> &'static str {
     match code {
         200 => "200 OK",
+        201 => "201 Created",
         400 => "400 Bad Request",
         401 => "401 Unauthorized",
+        402 => "402 Payment Required",
+        403 => "403 Forbidden",
         404 => "404 Not Found",
+        500 => "500 Internal Server Error",
         _ => "500 Internal Server Error",
     }
 }
@@ -1251,6 +1255,8 @@ fn handle_connection(stream: TcpStream) {
             // Bug fix: always use the verified agent_id from the token
             match sandbox::create(&verified_agent_id) {
                 Ok(session) => {
+                    // Register session→owner so exec/destroy can enforce ownership.
+                    store::register_sandbox_session(&session.id, &verified_agent_id);
                     append_sandbox_audit(
                         &verified_agent_id,
                         Some(&room_id),
@@ -1306,7 +1312,6 @@ fn handle_connection(stream: TcpStream) {
                     return;
                 }
             };
-            let _ = verified_agent_id; // TODO: verify session belongs to this agent
             let session_id = form_field(body, "session_id").unwrap_or_default();
             let command = form_field(body, "command").unwrap_or_default();
             let provider = form_field(body, "provider").unwrap_or_else(|| "daytona".to_string());
@@ -1318,6 +1323,14 @@ fn handle_connection(stream: TcpStream) {
                     r#"{"error":"session_id and command required"}"#,
                 );
                 return;
+            }
+            // Ownership check: only the creating agent may exec into a session.
+            // Sessions created before ownership tracking was added pass through.
+            if let Some(owner) = store::sandbox_session_owner(&session_id) {
+                if owner != verified_agent_id {
+                    send_json(stream, 403, r#"{"error":"session belongs to another agent"}"#);
+                    return;
+                }
             }
             match sandbox::exec(&session_id, &command, &provider) {
                 Ok(output) => {
@@ -1367,7 +1380,6 @@ fn handle_connection(stream: TcpStream) {
                     return;
                 }
             };
-            let _ = verified_agent_id; // TODO: verify session belongs to this agent
             let session_id = form_field(body, "session_id").unwrap_or_default();
             let provider = form_field(body, "provider").unwrap_or_else(|| "daytona".to_string());
             let room_id = form_field(body, "room_id");
@@ -1375,8 +1387,18 @@ fn handle_connection(stream: TcpStream) {
                 send_json(stream, 400, r#"{"error":"session_id required"}"#);
                 return;
             }
+            // Ownership check: only the creating agent may destroy a session.
+            // Sessions created before ownership tracking was added pass through.
+            if let Some(owner) = store::sandbox_session_owner(&session_id) {
+                if owner != verified_agent_id {
+                    send_json(stream, 403, r#"{"error":"session belongs to another agent"}"#);
+                    return;
+                }
+            }
             match sandbox::destroy(&session_id, &provider) {
                 Ok(()) => {
+                    // Mark destroyed so the session is excluded from future lookups.
+                    store::mark_sandbox_session_destroyed(&session_id);
                     append_sandbox_audit(
                         &verified_agent_id,
                         room_id.as_deref(),
