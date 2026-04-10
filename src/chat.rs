@@ -1226,9 +1226,12 @@ pub fn credit_grant(
     amount: i64,
     reason: &str,
     room_label: Option<&str>,
+    caller: Option<&str>,
 ) -> Result<i64, String> {
     let room = resolve_room(room_label)?;
-    let me = store::get_agent_id();
+    let session_id = store::get_agent_id();
+    let me = caller.unwrap_or(&session_id).to_string();
+    let me = me.as_str();
     // Bootstrap: if no admin exists, first granter becomes admin
     let has_admin = room.members.iter().any(|m| m.role == store::Role::Admin);
     if !has_admin {
@@ -1316,16 +1319,22 @@ pub fn compute_agent_trust_score(agent_id: &str) -> (f64, usize, usize, usize) {
     (score, total_receipt_count, rooms_active, vouches)
 }
 
-pub fn credit_spend(amount: i64, reason: &str, room_label: Option<&str>) -> Result<i64, String> {
+pub fn credit_spend(
+    amount: i64,
+    reason: &str,
+    room_label: Option<&str>,
+    caller: Option<&str>,
+) -> Result<i64, String> {
     let room = resolve_room(room_label)?;
-    let me = store::get_agent_id();
-    let balance = store::credit_balance(&room.room_id, &me);
+    let session_id = store::get_agent_id();
+    let me = caller.unwrap_or(&session_id);
+    let balance = store::credit_balance(&room.room_id, me);
     if balance < amount {
         return Err(format!(
             "Insufficient credits: have {balance}, need {amount}"
         ));
     }
-    store::credit_add(&room.room_id, &me, -amount, reason);
+    store::credit_add(&room.room_id, me, -amount, reason);
     Ok(balance - amount)
 }
 
@@ -1361,9 +1370,12 @@ pub fn bet_stake(
     side: bool,
     amount: i64,
     room_label: Option<&str>,
+    caller: Option<&str>,
 ) -> Result<(), String> {
     let room = resolve_room(room_label)?;
-    let me = store::get_agent_id();
+    let session_id = store::get_agent_id();
+    let me = caller.unwrap_or(&session_id).to_string();
+    let me = me.as_str();
 
     // Hold credit_lock for balance check + debit to prevent TOCTOU double-spend.
     let _guard = store::credit_lock().lock().unwrap();
@@ -1381,9 +1393,9 @@ pub fn bet_stake(
         .ok_or("Bet not found or already resolved")?;
 
     if side {
-        bet.stakes_yes.push((me.clone(), amount));
+        bet.stakes_yes.push((me.to_string(), amount));
     } else {
-        bet.stakes_no.push((me.clone(), amount));
+        bet.stakes_no.push((me.to_string(), amount));
     }
     store::save_bets(&room.room_id, &bets);
 
@@ -6936,9 +6948,11 @@ pub fn credit_transfer(
     amount: i64,
     reason: Option<&str>,
     room_label: Option<&str>,
+    caller: Option<&str>,
 ) -> Result<(i64, i64), String> {
     let room = resolve_room(room_label)?;
-    let me = store::get_agent_id();
+    let session_id = store::get_agent_id();
+    let me = caller.unwrap_or(&session_id);
     if me == to_agent {
         return Err("Cannot transfer to yourself.".to_string());
     }

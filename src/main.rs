@@ -2194,7 +2194,7 @@ fn main() {
             agent_id,
             amount,
             reason,
-        } => match chat::credit_grant(&agent_id, amount, &reason, room) {
+        } => match chat::credit_grant(&agent_id, amount, &reason, room, None) {
             Ok(balance) => {
                 let name = resolve_display_name(&agent_id);
                 println!("  Granted {amount} credits to {name}. Balance: {balance}");
@@ -2244,7 +2244,7 @@ fn main() {
             bet_id,
             amount,
             yes,
-        } => match chat::bet_stake(&bet_id, yes, amount, room) {
+        } => match chat::bet_stake(&bet_id, yes, amount, room, None) {
             Ok(()) => println!(
                 "  Staked {amount} on {} (bet {bet_id})",
                 if yes { "YES" } else { "NO" }
@@ -2460,7 +2460,7 @@ fn main() {
         }
 
         Commands::Transfer { to, amount, reason } => {
-            match chat::credit_transfer(&to, amount, reason.as_deref(), room) {
+            match chat::credit_transfer(&to, amount, reason.as_deref(), room, None) {
                 Ok((my_bal, their_bal)) => {
                     let name = resolve_display_name(&to);
                     println!("  Sent {amount} credits to {name}.");

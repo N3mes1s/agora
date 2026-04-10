@@ -2329,7 +2329,7 @@ fn handle_connection(stream: TcpStream) {
         // JSON body: {"side": true|false, "amount": <credits>, "room": "..."}
         // Returns: {"ok": true}
         ("POST", ["api", "v1", "bets", bet_id, "stake"]) => {
-            let _agent_id = match verify_bearer_agent_token(&raw) {
+            let agent_id = match verify_bearer_agent_token(&raw) {
                 Ok(id) => id,
                 Err(e) => {
                     send_json(
@@ -2371,7 +2371,7 @@ fn handle_connection(stream: TcpStream) {
             };
             let room_label = parsed["room"].as_str().map(|s| s.to_string());
             let bid = (*bet_id).to_string();
-            match chat::bet_stake(&bid, side, amount, room_label.as_deref()) {
+            match chat::bet_stake(&bid, side, amount, room_label.as_deref(), Some(&agent_id)) {
                 Ok(()) => send_json(stream, 200, r#"{"ok":true}"#),
                 Err(e) => send_json(
                     stream,
@@ -2742,7 +2742,6 @@ fn handle_connection(stream: TcpStream) {
                     return;
                 }
             };
-            let _ = agent_id;
             let parsed: serde_json::Value = match serde_json::from_str(body) {
                 Ok(v) => v,
                 Err(_) => {
@@ -2770,7 +2769,7 @@ fn handle_connection(stream: TcpStream) {
             };
             let reason = parsed["reason"].as_str().unwrap_or("API grant").to_string();
             let room_label = parsed["room"].as_str().map(|s| s.to_string());
-            match chat::credit_grant(&target, amount, &reason, room_label.as_deref()) {
+            match chat::credit_grant(&target, amount, &reason, room_label.as_deref(), Some(&agent_id)) {
                 Ok(balance) => {
                     let resp = serde_json::json!({"agent_id": target, "amount": amount, "balance": balance});
                     send_json(stream, 200, &resp.to_string());
@@ -2798,7 +2797,6 @@ fn handle_connection(stream: TcpStream) {
                     return;
                 }
             };
-            let _ = agent_id;
             let parsed: serde_json::Value = match serde_json::from_str(body) {
                 Ok(v) => v,
                 Err(_) => {
@@ -2819,7 +2817,7 @@ fn handle_connection(stream: TcpStream) {
             };
             let reason = parsed["reason"].as_str().unwrap_or("API spend").to_string();
             let room_label = parsed["room"].as_str().map(|s| s.to_string());
-            match chat::credit_spend(amount, &reason, room_label.as_deref()) {
+            match chat::credit_spend(amount, &reason, room_label.as_deref(), Some(&agent_id)) {
                 Ok(balance) => {
                     let resp = serde_json::json!({"amount": amount, "balance": balance});
                     send_json(stream, 200, &resp.to_string());
@@ -2847,7 +2845,6 @@ fn handle_connection(stream: TcpStream) {
                     return;
                 }
             };
-            let _ = agent_id;
             let parsed: serde_json::Value = match serde_json::from_str(body) {
                 Ok(v) => v,
                 Err(_) => {
@@ -2875,7 +2872,7 @@ fn handle_connection(stream: TcpStream) {
             };
             let reason = parsed["reason"].as_str().map(|s| s.to_string());
             let room_label = parsed["room"].as_str().map(|s| s.to_string());
-            match chat::credit_transfer(&to_agent, amount, reason.as_deref(), room_label.as_deref())
+            match chat::credit_transfer(&to_agent, amount, reason.as_deref(), room_label.as_deref(), Some(&agent_id))
             {
                 Ok((from_bal, to_bal)) => {
                     let resp = serde_json::json!({"to": to_agent, "amount": amount, "from_balance": from_bal, "to_balance": to_bal});
@@ -4384,5 +4381,112 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_str(body).unwrap();
         let to = parsed["to"].as_str().filter(|s| !s.is_empty());
         assert!(to.is_none());
+    }
+
+    // ── Caller identity fix tests ──────────────────────────────────
+
+    fn make_temp_env(tag: &str) -> std::path::PathBuf {
+        let home = std::env::temp_dir().join(format!(
+            "agora-caller-{}-{}",
+            tag,
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&home).unwrap();
+        unsafe {
+            std::env::set_var("HOME", &home);
+            std::env::set_var("AGORA_AGENT_ID", "server-agent");
+            std::env::set_var("AGORA_SANDBOX_SECRET", "test-secret-caller");
+        }
+        home
+    }
+
+    #[test]
+    fn credits_spend_deducts_from_bearer_caller_not_server() {
+        let _guard = crate::store::test_env_lock().lock().unwrap();
+        let _home = make_temp_env("spend");
+
+        let room = store::add_room("ag-spend-test", "spend-secret", "plaza", store::Role::Admin);
+        // Give api-caller some credits
+        store::credit_add(&room.room_id, "api-caller", 100, "test seed");
+        // Server starts with 0
+
+        let token = crate::sandbox::generate_agent_token("api-caller", 1);
+        let body = format!(r#"{{"amount":30,"reason":"test spend","room":"{}"}}"#, room.room_id);
+        let raw = format!(
+            "POST /api/v1/credits/spend HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {token}\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        );
+        let response = serve_once(&raw);
+        assert!(
+            response.starts_with("HTTP/1.1 200 OK"),
+            "expected 200, got: {response}"
+        );
+
+        // api-caller's balance should decrease, server's should be unchanged (0)
+        let caller_bal = store::credit_balance(&room.room_id, "api-caller");
+        let server_bal = store::credit_balance(&room.room_id, "server-agent");
+        assert_eq!(caller_bal, 70, "api-caller should have 70 (100-30)");
+        assert_eq!(server_bal, 0, "server-agent balance must not be touched");
+    }
+
+    #[test]
+    fn credits_transfer_sends_from_bearer_caller_not_server() {
+        let _guard = crate::store::test_env_lock().lock().unwrap();
+        let _home = make_temp_env("transfer");
+
+        let room = store::add_room("ag-xfer-test", "xfer-secret", "plaza", store::Role::Admin);
+        store::credit_add(&room.room_id, "api-sender", 200, "test seed");
+        // recipient starts at 0, server starts at 0
+
+        let token = crate::sandbox::generate_agent_token("api-sender", 1);
+        let body = format!(
+            r#"{{"to":"recipient-agent","amount":50,"reason":"tip","room":"{}"}}"#,
+            room.room_id
+        );
+        let raw = format!(
+            "POST /api/v1/credits/transfer HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {token}\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        );
+        let response = serve_once(&raw);
+        assert!(
+            response.starts_with("HTTP/1.1 200 OK"),
+            "expected 200, got: {response}"
+        );
+
+        let sender_bal = store::credit_balance(&room.room_id, "api-sender");
+        let recipient_bal = store::credit_balance(&room.room_id, "recipient-agent");
+        let server_bal = store::credit_balance(&room.room_id, "server-agent");
+        assert_eq!(sender_bal, 150, "api-sender should have 150 (200-50)");
+        assert_eq!(recipient_bal, 50, "recipient-agent should have 50");
+        assert_eq!(server_bal, 0, "server-agent balance must not be touched");
+    }
+
+    #[test]
+    fn credits_grant_checks_caller_admin_role_not_server_role() {
+        let _guard = crate::store::test_env_lock().lock().unwrap();
+        let _home = make_temp_env("grant");
+
+        // Room where server-agent is admin but api-non-admin is not
+        let room = store::add_room("ag-grant-test", "grant-secret", "plaza", store::Role::Admin);
+        // server-agent is already admin from add_room; do NOT grant api-non-admin admin role
+
+        let token = crate::sandbox::generate_agent_token("api-non-admin", 1);
+        let body = format!(
+            r#"{{"agent_id":"some-target","amount":10,"reason":"test","room":"{}"}}"#,
+            room.room_id
+        );
+        let raw = format!(
+            "POST /api/v1/credits/grant HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {token}\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        );
+        let response = serve_once(&raw);
+        // Non-admin caller should be rejected (400), not succeed using server's admin role
+        assert!(
+            response.contains("Only admins"),
+            "non-admin bearer should be rejected, got: {response}"
+        );
     }
 }
