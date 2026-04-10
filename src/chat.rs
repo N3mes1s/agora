@@ -2152,13 +2152,44 @@ pub fn bounty_submit(
     ))
 }
 
+/// Validate a branch name: must match `[a-zA-Z0-9][a-zA-Z0-9/_.-]*` and
+/// must not start with `-` (prevents git flag injection) or contain `..`
+/// (prevents ref path traversal).
+fn validate_branch_name(branch: &str) -> Result<(), String> {
+    if branch.is_empty() {
+        return Err("Branch name must not be empty".to_string());
+    }
+    if branch.starts_with('-') {
+        return Err(format!(
+            "Invalid branch name '{branch}': must not start with '-'"
+        ));
+    }
+    if branch.contains("..") {
+        return Err(format!(
+            "Invalid branch name '{branch}': must not contain '..'"
+        ));
+    }
+    let valid = branch
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '_' | '.' | '-'));
+    if !valid {
+        return Err(format!(
+            "Invalid branch name '{branch}': only [a-zA-Z0-9/_.-] allowed"
+        ));
+    }
+    Ok(())
+}
+
 /// Run a shell command in the context of a git branch (stashes current state, checks out branch, runs, restores).
 fn run_oracle_on_branch(branch: &str, oracle_cmd: &str) -> Result<bool, String> {
     use std::process::Command;
 
-    // Verify branch exists
+    // Validate branch name to prevent git flag injection and path traversal.
+    validate_branch_name(branch)?;
+
+    // Verify branch exists — use `--` to prevent any remaining flag confusion.
     let check = Command::new("git")
-        .args(["rev-parse", "--verify", &format!("refs/heads/{branch}")])
+        .args(["rev-parse", "--verify", "--", &format!("refs/heads/{branch}")])
         .output()
         .map_err(|e| format!("git error: {e}"))?;
     if !check.status.success() {
@@ -2175,9 +2206,10 @@ fn run_oracle_on_branch(branch: &str, oracle_cmd: &str) -> Result<bool, String> 
         .map_err(|e| format!("git error: {e}"))?;
     let original_branch = String::from_utf8_lossy(&head.stdout).trim().to_string();
 
-    // Checkout submission branch
+    // Checkout submission branch — `--` separates options from branch name,
+    // preventing any branch name from being interpreted as a git flag.
     let checkout = Command::new("git")
-        .args(["checkout", "--quiet", branch])
+        .args(["checkout", "--quiet", "--", branch])
         .output()
         .map_err(|e| format!("git checkout error: {e}"))?;
     if !checkout.status.success() {
@@ -2196,9 +2228,9 @@ fn run_oracle_on_branch(branch: &str, oracle_cmd: &str) -> Result<bool, String> 
             .map_err(|e| format!("Oracle exec error: {e}"))
     };
 
-    // Restore original branch
+    // Restore original branch — `--` prevents flag injection from branch name.
     let _ = Command::new("git")
-        .args(["checkout", "--quiet", &original_branch])
+        .args(["checkout", "--quiet", "--", &original_branch])
         .output();
     let _ = Command::new("git")
         .args(["stash", "pop", "--quiet"])
@@ -4930,7 +4962,7 @@ mod tests {
         seed_verify, send_watch_heartbeat, should_display_message, signing_message_bytes,
         soma_churn_decay, soma_correct, stale_claim_weight, task_add, task_add_as,
         task_add_with_oracle, task_checkpoint, task_checkpoint_as, task_claim_as, task_done,
-        task_done_as, task_reject_as, unpin, verified_solana_deposit_from_tx,
+        task_done_as, task_reject_as, unpin, validate_branch_name, verified_solana_deposit_from_tx,
     };
     use crate::crypto;
     use crate::store::{self, Role};
@@ -6027,6 +6059,30 @@ mod tests {
             Path::new(env!("CARGO_MANIFEST_DIR")),
             &["branch", "-D", &branch],
         );
+    }
+
+    /// Verify that branch name validation rejects dangerous inputs.
+    #[test]
+    fn validate_branch_name_rejects_flag_injection() {
+        // Must reject names starting with '-' (git flag injection)
+        assert!(validate_branch_name("--orphan").is_err());
+        assert!(validate_branch_name("-b").is_err());
+        assert!(validate_branch_name("-").is_err());
+        // Must reject path traversal via '..'
+        assert!(validate_branch_name("foo/../bar").is_err());
+        assert!(validate_branch_name("../../etc/passwd").is_err());
+        // Must reject empty names
+        assert!(validate_branch_name("").is_err());
+        // Must reject names with shell-special characters
+        assert!(validate_branch_name("foo;rm -rf /").is_err());
+        assert!(validate_branch_name("foo$(evil)").is_err());
+        assert!(validate_branch_name("foo\nevil").is_err());
+        // Must accept normal branch names
+        assert!(validate_branch_name("main").is_ok());
+        assert!(validate_branch_name("feature/my-branch").is_ok());
+        assert!(validate_branch_name("fix.123").is_ok());
+        assert!(validate_branch_name("security/fix-oracle-injection").is_ok());
+        assert!(validate_branch_name("builder/leaderboard-command").is_ok());
     }
 
     /// Verify that a bounty poster cannot submit to their own bounty (anti-self-dealing).

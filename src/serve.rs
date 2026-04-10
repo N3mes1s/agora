@@ -27,11 +27,13 @@ fn html_escape(s: &str) -> String {
         .replace('"', "&quot;")
 }
 
-/// Escape a string for safe embedding inside a single-quoted JS string literal.
-/// Escapes backslashes, single quotes, and newline characters.
+/// Escape a string for safe embedding inside a JS string literal in an HTML
+/// attribute context. Escapes backslashes, single quotes, double quotes
+/// (which delimit the surrounding HTML attribute), and newlines.
 fn js_string_escape(s: &str) -> String {
     s.replace('\\', "\\\\")
         .replace('\'', "\\'")
+        .replace('"', "\\\"")
         .replace('\n', "\\n")
         .replace('\r', "\\r")
 }
