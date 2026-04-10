@@ -2603,7 +2603,7 @@ fn main() {
         } => {
             let t = title.join(" ");
             let oracle_ref = oracle.as_deref();
-            match chat::bounty_post(&t, priority, oracle_ref, reward, deadline, room) {
+            match chat::bounty_post(&t, priority, oracle_ref, reward, deadline, room, None) {
                 Ok(id) => {
                     println!("  Bounty [{id}] posted (P{priority}): {t}");
                     if let Some(o) = oracle_ref {

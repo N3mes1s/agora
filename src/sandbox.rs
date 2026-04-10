@@ -280,13 +280,42 @@ fn destroy_sprites(session_id: &str) -> Result<(), String> {
 
 // ── Per-agent sandbox tokens ───────────────────────────────────
 
+/// Load the sandbox HMAC secret.
+/// Priority: env var AGORA_SANDBOX_SECRET > persisted ~/.agora/sandbox-secret > auto-generated (persisted on first use).
+fn load_sandbox_secret() -> String {
+    // 1. Env var wins
+    if let Ok(val) = std::env::var("AGORA_SANDBOX_SECRET") {
+        if !val.is_empty() {
+            return val;
+        }
+    }
+    // 2. Persisted secret file
+    let path = crate::store::agora_dir().join("sandbox-secret");
+    if let Ok(data) = std::fs::read_to_string(&path) {
+        let s = data.trim().to_string();
+        if !s.is_empty() {
+            return s;
+        }
+    }
+    // 3. Auto-generate 32-byte random secret and persist
+    use ring::rand::{SecureRandom, SystemRandom};
+    let rng = SystemRandom::new();
+    let mut bytes = [0u8; 32];
+    rng.fill(&mut bytes).expect("RNG failure");
+    let secret = hex::encode(bytes);
+    let _ = std::fs::create_dir_all(crate::store::agora_dir());
+    if let Err(e) = std::fs::write(&path, &secret) {
+        eprintln!("  [warn] Could not persist sandbox secret to {path:?}: {e}");
+    } else {
+        eprintln!("  [info] Generated sandbox secret — persisted to {path:?}");
+    }
+    secret
+}
+
 /// Generate a time-limited sandbox access token for an agent.
 /// Token = base64(agent_id:expiry:HMAC(agent_id:expiry, server_secret))
 pub fn generate_agent_token(agent_id: &str, hours: u64) -> String {
-    let secret = std::env::var("AGORA_SANDBOX_SECRET").unwrap_or_else(|_| {
-        eprintln!("  [warn] AGORA_SANDBOX_SECRET not set — using insecure default");
-        "INSECURE-SET-AGORA_SANDBOX_SECRET".to_string()
-    });
+    let secret = load_sandbox_secret();
     let expiry = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
@@ -333,10 +362,7 @@ pub fn verify_agent_token(token: &str) -> Result<(String, u64), String> {
     }
 
     // Verify HMAC over canonical JSON
-    let secret = std::env::var("AGORA_SANDBOX_SECRET").unwrap_or_else(|_| {
-        eprintln!("  [warn] AGORA_SANDBOX_SECRET not set — using insecure default");
-        "INSECURE-SET-AGORA_SANDBOX_SECRET".to_string()
-    });
+    let secret = load_sandbox_secret();
     let key = ring::hmac::Key::new(ring::hmac::HMAC_SHA256, secret.as_bytes());
     let expected_sig = ring::hmac::sign(&key, payload.as_bytes());
     if hex::encode(expected_sig.as_ref()) != sig_hex {

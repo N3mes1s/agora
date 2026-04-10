@@ -1614,7 +1614,6 @@ fn handle_connection(stream: TcpStream) {
             let deadline = parsed["deadline"].as_u64();
             let room_label = parsed["room"].as_str().map(|s| s.to_string());
             // bounty_post uses the session agent_id; override via store so it posts as the caller
-            let _ = agent_id; // agent_id validated above; bounty_post reads from session store
             match chat::bounty_post(
                 &title,
                 priority,
@@ -1622,6 +1621,7 @@ fn handle_connection(stream: TcpStream) {
                 reward,
                 deadline,
                 room_label.as_deref(),
+                Some(&agent_id),
             ) {
                 Ok(id) => {
                     let resp = serde_json::json!({
