@@ -817,8 +817,11 @@ fn render_leaderboard_page(rows: &[serde_json::Value]) -> String {
 fn json_status(code: u16) -> &'static str {
     match code {
         200 => "200 OK",
+        201 => "201 Created",
         400 => "400 Bad Request",
         401 => "401 Unauthorized",
+        402 => "402 Payment Required",
+        403 => "403 Forbidden",
         404 => "404 Not Found",
         _ => "500 Internal Server Error",
     }
@@ -1261,6 +1264,17 @@ fn handle_connection(stream: TcpStream) {
                         "success",
                         None,
                     );
+                    // Register session ownership so exec/destroy can enforce it.
+                    store::register_sandbox_session(store::SandboxSessionRecord {
+                        session_id: session.id.clone(),
+                        agent_id: verified_agent_id.clone(),
+                        provider: session.provider.clone(),
+                        created_at: std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_secs(),
+                        destroyed: false,
+                    });
                     let resp = serde_json::json!({
                         "id": session.id,
                         "provider": session.provider,
@@ -1306,7 +1320,6 @@ fn handle_connection(stream: TcpStream) {
                     return;
                 }
             };
-            let _ = verified_agent_id; // TODO: verify session belongs to this agent
             let session_id = form_field(body, "session_id").unwrap_or_default();
             let command = form_field(body, "command").unwrap_or_default();
             let provider = form_field(body, "provider").unwrap_or_else(|| "daytona".to_string());
@@ -1318,6 +1331,13 @@ fn handle_connection(stream: TcpStream) {
                     r#"{"error":"session_id and command required"}"#,
                 );
                 return;
+            }
+            // Verify the calling agent owns this session.
+            if let Some(owner) = store::sandbox_session_owner(&session_id) {
+                if owner != verified_agent_id {
+                    send_json(stream, 403, r#"{"error":"session belongs to a different agent"}"#);
+                    return;
+                }
             }
             match sandbox::exec(&session_id, &command, &provider) {
                 Ok(output) => {
@@ -1367,13 +1387,19 @@ fn handle_connection(stream: TcpStream) {
                     return;
                 }
             };
-            let _ = verified_agent_id; // TODO: verify session belongs to this agent
             let session_id = form_field(body, "session_id").unwrap_or_default();
             let provider = form_field(body, "provider").unwrap_or_else(|| "daytona".to_string());
             let room_id = form_field(body, "room_id");
             if session_id.is_empty() {
                 send_json(stream, 400, r#"{"error":"session_id required"}"#);
                 return;
+            }
+            // Verify the calling agent owns this session.
+            if let Some(owner) = store::sandbox_session_owner(&session_id) {
+                if owner != verified_agent_id {
+                    send_json(stream, 403, r#"{"error":"session belongs to a different agent"}"#);
+                    return;
+                }
             }
             match sandbox::destroy(&session_id, &provider) {
                 Ok(()) => {
@@ -1387,6 +1413,7 @@ fn handle_connection(stream: TcpStream) {
                         "success",
                         None,
                     );
+                    store::mark_sandbox_session_destroyed(&session_id);
                     send_json(stream, 200, r#"{"status":"destroyed"}"#)
                 }
                 Err(e) => {
@@ -3431,6 +3458,150 @@ mod tests {
         );
         assert!(response.contains("\"id\":\"audit-1\""));
         assert!(!response.contains("\"id\":\"audit-2\""));
+    }
+
+    // ── Sandbox ownership enforcement tests ────────────────────────
+
+    fn sandbox_test_home(suffix: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!(
+            "agora-serve-sandbox-own-{}-{}",
+            suffix,
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ))
+    }
+
+    #[test]
+    fn sandbox_exec_rejected_for_wrong_owner() {
+        let _guard = crate::store::test_env_lock().lock().unwrap();
+        let home = sandbox_test_home("exec-rej");
+        std::fs::create_dir_all(&home).unwrap();
+        unsafe {
+            std::env::set_var("HOME", &home);
+            std::env::set_var("AGORA_AGENT_ID", "serve-host");
+            std::env::set_var("AGORA_SANDBOX_SECRET", "exec-rej-secret");
+        }
+
+        // Register session owned by "agent-alice"
+        crate::store::register_sandbox_session(crate::store::SandboxSessionRecord {
+            session_id: "sess-exec-1".to_string(),
+            agent_id: "agent-alice".to_string(),
+            provider: "daytona".to_string(),
+            created_at: 1,
+            destroyed: false,
+        });
+
+        // "agent-bob" tries to exec on alice's session
+        let token = crate::sandbox::generate_agent_token("agent-bob", 1);
+        let body = format!("token={token}&session_id=sess-exec-1&command=ls");
+        let raw = format!(
+            "POST /api/sandbox/exec HTTP/1.1\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        );
+        let response = serve_once(&raw);
+        assert!(
+            response.starts_with("HTTP/1.1 403"),
+            "expected 403, got: {response}"
+        );
+        assert!(response.contains("different agent"));
+    }
+
+    #[test]
+    fn sandbox_exec_allowed_for_owner() {
+        let _guard = crate::store::test_env_lock().lock().unwrap();
+        let home = sandbox_test_home("exec-ok");
+        std::fs::create_dir_all(&home).unwrap();
+        unsafe {
+            std::env::set_var("HOME", &home);
+            std::env::set_var("AGORA_AGENT_ID", "serve-host");
+            std::env::set_var("AGORA_SANDBOX_SECRET", "exec-ok-secret");
+        }
+
+        // Register session owned by "agent-carol"
+        crate::store::register_sandbox_session(crate::store::SandboxSessionRecord {
+            session_id: "sess-exec-2".to_string(),
+            agent_id: "agent-carol".to_string(),
+            provider: "daytona".to_string(),
+            created_at: 1,
+            destroyed: false,
+        });
+
+        // "agent-carol" execs on her own session — auth passes, sandbox call will fail
+        // (no real provider configured) but we should NOT get a 403.
+        let token = crate::sandbox::generate_agent_token("agent-carol", 1);
+        let body = format!("token={token}&session_id=sess-exec-2&command=ls");
+        let raw = format!(
+            "POST /api/sandbox/exec HTTP/1.1\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        );
+        let response = serve_once(&raw);
+        assert!(
+            !response.starts_with("HTTP/1.1 403"),
+            "should not get 403 for owner, got: {response}"
+        );
+    }
+
+    #[test]
+    fn sandbox_destroy_rejected_for_wrong_owner() {
+        let _guard = crate::store::test_env_lock().lock().unwrap();
+        let home = sandbox_test_home("destroy-rej");
+        std::fs::create_dir_all(&home).unwrap();
+        unsafe {
+            std::env::set_var("HOME", &home);
+            std::env::set_var("AGORA_AGENT_ID", "serve-host");
+            std::env::set_var("AGORA_SANDBOX_SECRET", "destroy-rej-secret");
+        }
+
+        crate::store::register_sandbox_session(crate::store::SandboxSessionRecord {
+            session_id: "sess-dest-1".to_string(),
+            agent_id: "agent-dave".to_string(),
+            provider: "daytona".to_string(),
+            created_at: 1,
+            destroyed: false,
+        });
+
+        // "agent-eve" tries to destroy dave's session
+        let token = crate::sandbox::generate_agent_token("agent-eve", 1);
+        let body = format!("token={token}&session_id=sess-dest-1");
+        let raw = format!(
+            "POST /api/sandbox/destroy HTTP/1.1\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        );
+        let response = serve_once(&raw);
+        assert!(
+            response.starts_with("HTTP/1.1 403"),
+            "expected 403, got: {response}"
+        );
+        assert!(response.contains("different agent"));
+    }
+
+    #[test]
+    fn sandbox_exec_unknown_session_passes_ownership_check() {
+        // If the session isn't in our registry (e.g., created before this feature),
+        // we allow through (graceful degradation) rather than blocking with 403.
+        let _guard = crate::store::test_env_lock().lock().unwrap();
+        let home = sandbox_test_home("exec-unknown");
+        std::fs::create_dir_all(&home).unwrap();
+        unsafe {
+            std::env::set_var("HOME", &home);
+            std::env::set_var("AGORA_AGENT_ID", "serve-host");
+            std::env::set_var("AGORA_SANDBOX_SECRET", "exec-unknown-secret");
+        }
+
+        let token = crate::sandbox::generate_agent_token("agent-fred", 1);
+        let body = format!("token={token}&session_id=sess-not-registered&command=ls");
+        let raw = format!(
+            "POST /api/sandbox/exec HTTP/1.1\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        );
+        let response = serve_once(&raw);
+        // Should NOT be 403 (no registry entry = no ownership check failure)
+        assert!(
+            !response.starts_with("HTTP/1.1 403"),
+            "should not get 403 for unknown session, got: {response}"
+        );
     }
 
     #[test]

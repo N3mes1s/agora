@@ -1116,6 +1116,68 @@ pub fn append_sandbox_audit(record: &SandboxAuditRecord) {
     let _ = writeln!(file, "{line}");
 }
 
+// ── Sandbox Session Registry ───────────────────────────────────
+
+/// Persistent record of a sandbox session so we can verify ownership on
+/// exec/destroy requests without trusting the caller to supply agent_id.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SandboxSessionRecord {
+    pub session_id: String,
+    pub agent_id: String,
+    pub provider: String,
+    pub created_at: u64,
+    /// Set to true once destroy succeeds.
+    #[serde(default)]
+    pub destroyed: bool,
+}
+
+fn sessions_path() -> PathBuf {
+    agora_dir().join("sandbox_sessions.json")
+}
+
+pub fn load_sandbox_sessions() -> Vec<SandboxSessionRecord> {
+    let path = sessions_path();
+    if let Ok(data) = fs::read_to_string(path) {
+        serde_json::from_str(&data).unwrap_or_default()
+    } else {
+        Vec::new()
+    }
+}
+
+fn save_sandbox_sessions(sessions: &[SandboxSessionRecord]) {
+    let dir = agora_dir();
+    ensure_dir(&dir);
+    let data = serde_json::to_string_pretty(sessions).unwrap_or_default();
+    let _ = fs::write(sessions_path(), data);
+}
+
+/// Register a newly-created sandbox session.
+/// Idempotent: if a record for this session_id already exists it is not duplicated.
+pub fn register_sandbox_session(record: SandboxSessionRecord) {
+    let mut sessions = load_sandbox_sessions();
+    if !sessions.iter().any(|s| s.session_id == record.session_id) {
+        sessions.push(record);
+        save_sandbox_sessions(&sessions);
+    }
+}
+
+/// Return the agent ID that originally created this session, or None if unknown.
+pub fn sandbox_session_owner(session_id: &str) -> Option<String> {
+    load_sandbox_sessions()
+        .into_iter()
+        .find(|s| s.session_id == session_id)
+        .map(|s| s.agent_id)
+}
+
+/// Mark a session as destroyed so future ownership checks can surface stale IDs.
+pub fn mark_sandbox_session_destroyed(session_id: &str) {
+    let mut sessions = load_sandbox_sessions();
+    if let Some(s) = sessions.iter_mut().find(|s| s.session_id == session_id) {
+        s.destroyed = true;
+    }
+    save_sandbox_sessions(&sessions);
+}
+
 // ── Calibration Seeds ──────────────────────────────────────────
 
 /// A calibration seed: a self-verifiable puzzle for trust bootstrapping.
@@ -1972,6 +2034,120 @@ mod tests {
         // Next debit must fail
         let second = atomic_credit_debit("room-1", "agent-1", 1, "sandbox:open");
         assert!(second.is_err());
+
+        if let Some(old) = old_home {
+            unsafe {
+                env::set_var("HOME", old);
+            }
+        } else {
+            unsafe {
+                env::remove_var("HOME");
+            }
+        }
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    // ── Sandbox Session Registry tests ────────────────────────────
+
+    #[test]
+    fn sandbox_session_registry_owner_lookup() {
+        let _guard = test_env_lock().lock().unwrap();
+        let home = test_home("session-owner");
+        let _ = fs::remove_dir_all(&home);
+        fs::create_dir_all(home.join(".agora")).unwrap();
+        let old_home = env::var("HOME").ok();
+        unsafe {
+            env::set_var("HOME", &home);
+        }
+
+        register_sandbox_session(SandboxSessionRecord {
+            session_id: "sess-abc".to_string(),
+            agent_id: "agent-alice".to_string(),
+            provider: "daytona".to_string(),
+            created_at: 1_000_000,
+            destroyed: false,
+        });
+
+        assert_eq!(
+            sandbox_session_owner("sess-abc"),
+            Some("agent-alice".to_string())
+        );
+        assert_eq!(sandbox_session_owner("sess-unknown"), None);
+
+        if let Some(old) = old_home {
+            unsafe {
+                env::set_var("HOME", old);
+            }
+        } else {
+            unsafe {
+                env::remove_var("HOME");
+            }
+        }
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn sandbox_session_registry_idempotent() {
+        let _guard = test_env_lock().lock().unwrap();
+        let home = test_home("session-idem");
+        let _ = fs::remove_dir_all(&home);
+        fs::create_dir_all(home.join(".agora")).unwrap();
+        let old_home = env::var("HOME").ok();
+        unsafe {
+            env::set_var("HOME", &home);
+        }
+
+        let rec = SandboxSessionRecord {
+            session_id: "sess-dup".to_string(),
+            agent_id: "agent-bob".to_string(),
+            provider: "e2b".to_string(),
+            created_at: 2_000_000,
+            destroyed: false,
+        };
+        register_sandbox_session(rec.clone());
+        register_sandbox_session(rec); // second call must not duplicate
+
+        let sessions = load_sandbox_sessions();
+        assert_eq!(sessions.iter().filter(|s| s.session_id == "sess-dup").count(), 1);
+
+        if let Some(old) = old_home {
+            unsafe {
+                env::set_var("HOME", old);
+            }
+        } else {
+            unsafe {
+                env::remove_var("HOME");
+            }
+        }
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn sandbox_session_mark_destroyed() {
+        let _guard = test_env_lock().lock().unwrap();
+        let home = test_home("session-destroy");
+        let _ = fs::remove_dir_all(&home);
+        fs::create_dir_all(home.join(".agora")).unwrap();
+        let old_home = env::var("HOME").ok();
+        unsafe {
+            env::set_var("HOME", &home);
+        }
+
+        register_sandbox_session(SandboxSessionRecord {
+            session_id: "sess-del".to_string(),
+            agent_id: "agent-carol".to_string(),
+            provider: "sprites".to_string(),
+            created_at: 3_000_000,
+            destroyed: false,
+        });
+
+        mark_sandbox_session_destroyed("sess-del");
+
+        let sessions = load_sandbox_sessions();
+        let rec = sessions.iter().find(|s| s.session_id == "sess-del").unwrap();
+        assert!(rec.destroyed);
+        // Owner is still resolvable after destroy (tombstone preserved)
+        assert_eq!(sandbox_session_owner("sess-del"), Some("agent-carol".to_string()));
 
         if let Some(old) = old_home {
             unsafe {
