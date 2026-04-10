@@ -1116,6 +1116,72 @@ pub fn append_sandbox_audit(record: &SandboxAuditRecord) {
     let _ = writeln!(file, "{line}");
 }
 
+// ── Sandbox Sessions ────────────────────────────────────────────
+
+/// Persistent record of a sandbox session, used for ownership enforcement and
+/// for the GET /api/sandbox/sessions listing endpoint.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SandboxSessionRecord {
+    pub id: String,
+    pub agent_id: String,
+    pub room_id: String,
+    pub provider: String,
+    pub created_at: u64,
+    pub status: String, // "running" | "destroyed"
+    #[serde(default)]
+    pub destroyed_at: Option<u64>,
+}
+
+fn sessions_path() -> PathBuf {
+    agora_dir().join("sandbox_sessions.json")
+}
+
+pub fn load_sandbox_sessions() -> Vec<SandboxSessionRecord> {
+    let path = sessions_path();
+    if let Ok(data) = fs::read_to_string(&path) {
+        serde_json::from_str(&data).unwrap_or_default()
+    } else {
+        Vec::new()
+    }
+}
+
+fn save_sandbox_sessions(sessions: &[SandboxSessionRecord]) {
+    let dir = agora_dir();
+    ensure_dir(&dir);
+    let _ = fs::write(
+        sessions_path(),
+        serde_json::to_string_pretty(sessions).unwrap(),
+    );
+}
+
+/// Register a newly created sandbox session. Idempotent: replaces any existing
+/// record with the same id (e.g. after a crash/retry).
+pub fn register_sandbox_session(record: SandboxSessionRecord) {
+    let mut sessions = load_sandbox_sessions();
+    sessions.retain(|s| s.id != record.id);
+    sessions.push(record);
+    save_sandbox_sessions(&sessions);
+}
+
+/// Return the agent_id of the session owner, or None if the session is unknown
+/// (e.g. created before this feature was deployed).
+pub fn sandbox_session_owner(session_id: &str) -> Option<String> {
+    load_sandbox_sessions()
+        .into_iter()
+        .find(|s| s.id == session_id)
+        .map(|s| s.agent_id)
+}
+
+/// Mark a session as destroyed and record the timestamp.
+pub fn mark_sandbox_session_destroyed(session_id: &str) {
+    let mut sessions = load_sandbox_sessions();
+    if let Some(s) = sessions.iter_mut().find(|s| s.id == session_id) {
+        s.status = "destroyed".to_string();
+        s.destroyed_at = Some(now());
+    }
+    save_sandbox_sessions(&sessions);
+}
+
 // ── Calibration Seeds ──────────────────────────────────────────
 
 /// A calibration seed: a self-verifiable puzzle for trust bootstrapping.
@@ -1857,6 +1923,160 @@ mod tests {
         let fresh = persisted.iter().find(|l| l.id == "fresh-sandbox").unwrap();
         assert_eq!(stale.status, LeaseStatus::Closed);
         assert_eq!(fresh.status, LeaseStatus::Active);
+
+        if let Some(old) = old_home {
+            unsafe {
+                env::set_var("HOME", old);
+            }
+        } else {
+            unsafe {
+                env::remove_var("HOME");
+            }
+        }
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn sandbox_session_register_and_owner() {
+        let _guard = test_env_lock().lock().unwrap();
+        let home = test_home("sessions-owner");
+        let agora = home.join(".agora");
+        let _ = fs::remove_dir_all(&home);
+        fs::create_dir_all(&agora).unwrap();
+        let old_home = env::var("HOME").ok();
+        unsafe {
+            env::set_var("HOME", &home);
+        }
+
+        // Unknown session returns None
+        assert!(sandbox_session_owner("unknown-id").is_none());
+
+        // Register a session and verify ownership lookup
+        register_sandbox_session(SandboxSessionRecord {
+            id: "sess-1".to_string(),
+            agent_id: "agent-alice".to_string(),
+            room_id: "plaza".to_string(),
+            provider: "daytona".to_string(),
+            created_at: now(),
+            status: "running".to_string(),
+            destroyed_at: None,
+        });
+        assert_eq!(
+            sandbox_session_owner("sess-1").as_deref(),
+            Some("agent-alice")
+        );
+
+        // A second agent's session should not collide
+        register_sandbox_session(SandboxSessionRecord {
+            id: "sess-2".to_string(),
+            agent_id: "agent-bob".to_string(),
+            room_id: "plaza".to_string(),
+            provider: "e2b".to_string(),
+            created_at: now(),
+            status: "running".to_string(),
+            destroyed_at: None,
+        });
+        assert_eq!(
+            sandbox_session_owner("sess-2").as_deref(),
+            Some("agent-bob")
+        );
+        // Alice's session unchanged
+        assert_eq!(
+            sandbox_session_owner("sess-1").as_deref(),
+            Some("agent-alice")
+        );
+
+        if let Some(old) = old_home {
+            unsafe {
+                env::set_var("HOME", old);
+            }
+        } else {
+            unsafe {
+                env::remove_var("HOME");
+            }
+        }
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn sandbox_session_mark_destroyed() {
+        let _guard = test_env_lock().lock().unwrap();
+        let home = test_home("sessions-destroy");
+        let agora = home.join(".agora");
+        let _ = fs::remove_dir_all(&home);
+        fs::create_dir_all(&agora).unwrap();
+        let old_home = env::var("HOME").ok();
+        unsafe {
+            env::set_var("HOME", &home);
+        }
+
+        register_sandbox_session(SandboxSessionRecord {
+            id: "sess-d".to_string(),
+            agent_id: "agent-x".to_string(),
+            room_id: "plaza".to_string(),
+            provider: "sprites".to_string(),
+            created_at: now(),
+            status: "running".to_string(),
+            destroyed_at: None,
+        });
+
+        // Before destroy: status is running
+        let sessions = load_sandbox_sessions();
+        assert_eq!(sessions[0].status, "running");
+        assert!(sessions[0].destroyed_at.is_none());
+
+        mark_sandbox_session_destroyed("sess-d");
+
+        let sessions = load_sandbox_sessions();
+        assert_eq!(sessions[0].status, "destroyed");
+        assert!(sessions[0].destroyed_at.is_some());
+
+        // Ownership still works after destroy
+        assert_eq!(sandbox_session_owner("sess-d").as_deref(), Some("agent-x"));
+
+        if let Some(old) = old_home {
+            unsafe {
+                env::set_var("HOME", old);
+            }
+        } else {
+            unsafe {
+                env::remove_var("HOME");
+            }
+        }
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn sandbox_session_register_is_idempotent() {
+        let _guard = test_env_lock().lock().unwrap();
+        let home = test_home("sessions-idempotent");
+        let agora = home.join(".agora");
+        let _ = fs::remove_dir_all(&home);
+        fs::create_dir_all(&agora).unwrap();
+        let old_home = env::var("HOME").ok();
+        unsafe {
+            env::set_var("HOME", &home);
+        }
+
+        let record = SandboxSessionRecord {
+            id: "sess-dup".to_string(),
+            agent_id: "agent-y".to_string(),
+            room_id: "collab".to_string(),
+            provider: "daytona".to_string(),
+            created_at: now(),
+            status: "running".to_string(),
+            destroyed_at: None,
+        };
+
+        // Registering the same session twice should not create duplicates
+        register_sandbox_session(record.clone());
+        register_sandbox_session(record);
+        let sessions = load_sandbox_sessions();
+        assert_eq!(
+            sessions.len(),
+            1,
+            "duplicate registration must be deduplicated"
+        );
 
         if let Some(old) = old_home {
             unsafe {
