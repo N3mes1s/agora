@@ -333,12 +333,16 @@ Notable embedder-facing behavior:
 - `api::publish(...) -> Result<(), api::PublishError>` for typed retry/auth/payload decisions
 - `api::publish_ok(...) -> bool` as a compatibility wrapper when you only need success/failure
 - `api::publish_limits()` for conservative relay guidance on the public default relay
+- `api::stream_since(...)` for explicit catchup after a disconnect window
 - `api::stream_with_config(...)` for reconnect-aware SSE consumers
 
 On the public `ntfy.theagora.dev` relay, Agora also applies a conservative
-process-local pacing gate before publishing so embedders do not immediately hit
-known burst limits. Custom relays are left unthrottled unless the embedder
-chooses to layer its own policy on top.
+process-local admission gate before publishing so embedders do not immediately
+hit known burst limits. The current public-relay defaults are `burst=2` and
+`sustained_per_second=2`, and reconnect-aware streams resume from the last seen
+timestamp to catch messages published during short disconnect windows. Custom
+relays are left unthrottled unless the embedder chooses to layer its own policy
+on top.
 
 Lower-level modules remain available for advanced callers, but they are not the recommended stability boundary:
 - `agora::chat`

@@ -132,7 +132,8 @@ pub fn publish_ok(topic: &str, payload: &str) -> bool {
 /// For the public `ntfy.theagora.dev` relay, Agora exposes conservative
 /// defaults intended to help embedders avoid rediscovering rate-limit cliffs by
 /// trial and error, and [`publish`] uses the sustained rate as a local pacing
-/// guard. Custom relays report `None` for unknown values.
+/// guard. Today that public-relay guidance is `burst=2` and
+/// `sustained_per_second=2`. Custom relays report `None` for unknown values.
 pub fn publish_limits() -> PublishLimits {
     transport::publish_limits()
 }
@@ -157,6 +158,8 @@ pub fn fetch(topic: &str, since: &str) -> Vec<(u64, String)> {
 /// Open a streaming SSE connection for `topic` and invoke `on_message` per event.
 ///
 /// This blocks until the stream ends or the relay connection fails.
+/// Callers that need explicit reconnect reasons or replay-after-disconnect
+/// behavior should prefer [`stream_with_config`] or [`stream_since`].
 ///
 /// ```no_run
 /// use agora::api;
@@ -172,11 +175,32 @@ where
     transport::stream(topic, on_message)
 }
 
+/// Open a streaming connection that begins with an explicit catchup cursor.
+///
+/// `since` follows the same syntax as [`fetch`]. This is the simplest way for
+/// embedders to recover events after a known disconnect gap.
+///
+/// ```no_run
+/// use agora::api;
+///
+/// api::stream_since("ag-room-id", "30s", |ts, raw| {
+///     println!("{ts}: {raw}");
+/// });
+/// ```
+pub fn stream_since<F>(topic: &str, since: &str, on_message: F)
+where
+    F: FnMut(u64, &str),
+{
+    transport::stream_since(topic, since, on_message)
+}
+
 /// Open a streaming SSE connection with reconnect/backoff configuration.
 ///
 /// `on_disconnect` is invoked whenever the stream fails or ends. When
 /// `reconnect` is enabled, `next_backoff` reports how long Agora will wait
-/// before trying again.
+/// before trying again. Reconnect attempts automatically resume from the last
+/// seen event timestamp so short disconnect windows do not silently drop
+/// messages.
 ///
 /// ```no_run
 /// use agora::api;
@@ -201,4 +225,18 @@ where
     G: FnMut(StreamDisconnect, Option<Duration>),
 {
     transport::stream_with_config(topic, config, on_message, on_disconnect)
+}
+
+/// Open a reconnect-aware streaming connection with an explicit initial cursor.
+pub fn stream_since_with_config<F, G>(
+    topic: &str,
+    since: &str,
+    config: &StreamConfig,
+    on_message: F,
+    on_disconnect: G,
+) where
+    F: FnMut(u64, &str),
+    G: FnMut(StreamDisconnect, Option<Duration>),
+{
+    transport::stream_since_with_config(topic, since, config, on_message, on_disconnect)
 }

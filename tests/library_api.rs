@@ -1,6 +1,8 @@
 use agora::{api, runtime};
 use serde_json::json;
 
+type StreamSinceFn = fn(&str, &str, fn(u64, &str));
+
 #[test]
 fn stable_embedder_facade_round_trips_signed_payloads() {
     let unique = std::time::SystemTime::now()
@@ -22,6 +24,7 @@ fn stable_embedder_facade_round_trips_signed_payloads() {
     let _: fn(&str) -> Option<String> = api::trusted_signing_key;
     let _: fn(&str, &str) -> api::RoomKey = api::derive_room_key;
     let _: fn() -> api::PublishLimits = api::publish_limits;
+    let _: StreamSinceFn = api::stream_since::<fn(u64, &str)>;
 
     assert_eq!(api::agent_id(), "lib-agent");
     assert_eq!(api::publish(&topic, "payload-1"), Ok(()));

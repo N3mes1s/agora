@@ -17,10 +17,11 @@
 use serde::Deserialize;
 
 use crate::runtime;
+use std::collections::HashSet;
 use std::time::Duration;
 
 #[cfg(not(test))]
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Condvar, Mutex, OnceLock};
 #[cfg(not(test))]
 use std::time::Instant;
 
@@ -65,8 +66,19 @@ pub struct PublishLimits {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StreamDisconnect {
+    Auth(String),
     Connect(String),
     Read(String),
+}
+
+impl std::fmt::Display for StreamDisconnect {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Auth(message) => write!(f, "relay auth failed: {message}"),
+            Self::Connect(message) => write!(f, "relay stream connection failed: {message}"),
+            Self::Read(message) => write!(f, "relay stream read failed: {message}"),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -83,6 +95,55 @@ impl Default for StreamConfig {
             initial_backoff: Duration::from_secs(5),
             max_backoff: Duration::from_secs(30),
         }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum StreamReplayKey {
+    Id(String),
+    Payload(String),
+}
+
+#[derive(Debug, Clone)]
+struct StreamCursor {
+    since_ts: u64,
+    seen_at_since: HashSet<StreamReplayKey>,
+}
+
+impl StreamCursor {
+    fn new(since_ts: u64) -> Self {
+        Self {
+            since_ts,
+            seen_at_since: HashSet::new(),
+        }
+    }
+
+    #[cfg(not(test))]
+    fn reconnect_since(&self) -> String {
+        self.since_ts.to_string()
+    }
+
+    fn should_emit(&mut self, ts: u64, id: Option<&str>, payload: &str) -> bool {
+        if ts < self.since_ts {
+            return false;
+        }
+
+        let key = match id {
+            Some(id) => StreamReplayKey::Id(id.to_string()),
+            None => StreamReplayKey::Payload(payload.to_string()),
+        };
+
+        if ts == self.since_ts && self.seen_at_since.contains(&key) {
+            return false;
+        }
+
+        if ts > self.since_ts {
+            self.since_ts = ts;
+            self.seen_at_since.clear();
+        }
+
+        self.seen_at_since.insert(key);
+        true
     }
 }
 
@@ -121,8 +182,8 @@ fn mirror_url() -> Option<String> {
 pub fn publish_limits() -> PublishLimits {
     if relay_url() == DEFAULT_RELAY {
         PublishLimits {
-            burst: Some(4),
-            sustained_per_second: Some(4),
+            burst: Some(2),
+            sustained_per_second: Some(2),
             body_max_bytes: None,
         }
     } else {
@@ -152,34 +213,102 @@ fn classify_publish_failure(status: u16, retry_after: Option<&str>, body: &str) 
     }
 }
 
-#[cfg(not(test))]
-fn publish_gate() -> &'static Mutex<Option<Instant>> {
-    static GATE: OnceLock<Mutex<Option<Instant>>> = OnceLock::new();
-    GATE.get_or_init(|| Mutex::new(None))
+fn parse_since_cutoff(since: &str, now: u64) -> u64 {
+    if let Some(secs) = since.strip_suffix('s').and_then(|v| v.parse::<u64>().ok()) {
+        return now.saturating_sub(secs);
+    }
+    if let Some(mins) = since.strip_suffix('m').and_then(|v| v.parse::<u64>().ok()) {
+        return now.saturating_sub(mins * 60);
+    }
+    if let Some(hours) = since.strip_suffix('h').and_then(|v| v.parse::<u64>().ok()) {
+        return now.saturating_sub(hours * 3600);
+    }
+    if let Some(days) = since.strip_suffix('d').and_then(|v| v.parse::<u64>().ok()) {
+        return now.saturating_sub(days * 86400);
+    }
+    since.parse::<u64>().unwrap_or(0)
+}
+
+fn classify_stream_connect_failure(status: u16, body: &str) -> StreamDisconnect {
+    let message = format!("HTTP {status}: {}", body.trim());
+    match status {
+        401 | 403 => StreamDisconnect::Auth(message),
+        _ => StreamDisconnect::Connect(message),
+    }
 }
 
 #[cfg(not(test))]
-fn maybe_throttle_publish() {
-    let Some(rate) = publish_limits().sustained_per_second else {
-        return;
-    };
-    if rate == 0 {
-        return;
+#[derive(Debug, Default)]
+struct PublishGateState {
+    next_allowed: Option<Instant>,
+    in_flight: usize,
+}
+
+#[cfg(not(test))]
+fn publish_gate() -> &'static (Mutex<PublishGateState>, Condvar) {
+    static GATE: OnceLock<(Mutex<PublishGateState>, Condvar)> = OnceLock::new();
+    GATE.get_or_init(|| (Mutex::new(PublishGateState::default()), Condvar::new()))
+}
+
+#[cfg(not(test))]
+struct PublishPermit;
+
+#[cfg(not(test))]
+impl Drop for PublishPermit {
+    fn drop(&mut self) {
+        let (lock, cvar) = publish_gate();
+        let mut state = lock.lock().unwrap_or_else(|e| e.into_inner());
+        state.in_flight = state.in_flight.saturating_sub(1);
+        cvar.notify_one();
     }
-    let interval = Duration::from_secs_f64(1.0 / rate as f64);
-    let mut gate = publish_gate().lock().unwrap_or_else(|e| e.into_inner());
-    let now = Instant::now();
-    if let Some(next_allowed) = *gate
-        && next_allowed > now
-    {
-        runtime::sleep(next_allowed.duration_since(now));
+}
+
+#[cfg(not(test))]
+fn acquire_publish_permit() -> Option<PublishPermit> {
+    let limits = publish_limits();
+    let max_in_flight = limits.burst.filter(|burst| *burst > 0);
+    let interval = limits
+        .sustained_per_second
+        .filter(|rate| *rate > 0)
+        .map(|rate| Duration::from_secs_f64(1.0 / rate as f64));
+
+    if max_in_flight.is_none() && interval.is_none() {
+        return None;
     }
-    *gate = Some(Instant::now() + interval);
+
+    let (lock, cvar) = publish_gate();
+    let mut state = lock.lock().unwrap_or_else(|e| e.into_inner());
+    loop {
+        if let Some(limit) = max_in_flight
+            && state.in_flight >= limit
+        {
+            state = cvar.wait(state).unwrap_or_else(|e| e.into_inner());
+            continue;
+        }
+
+        if let Some(interval) = interval {
+            let now = Instant::now();
+            if let Some(next_allowed) = state.next_allowed
+                && next_allowed > now
+            {
+                let delay = next_allowed.duration_since(now);
+                drop(state);
+                runtime::sleep(delay);
+                state = lock.lock().unwrap_or_else(|e| e.into_inner());
+                continue;
+            }
+            state.next_allowed = Some(now + interval);
+        }
+
+        state.in_flight += 1;
+        return Some(PublishPermit);
+    }
 }
 
 #[cfg(not(test))]
 #[derive(Debug, Deserialize)]
 struct NtfyEvent {
+    id: Option<String>,
     event: Option<String>,
     message: Option<String>,
     time: Option<u64>,
@@ -222,17 +351,7 @@ fn test_now() -> u64 {
 
 #[cfg(test)]
 fn test_since_cutoff(since: &str) -> u64 {
-    let now = test_now();
-    if let Some(mins) = since.strip_suffix('m').and_then(|v| v.parse::<u64>().ok()) {
-        return now.saturating_sub(mins * 60);
-    }
-    if let Some(hours) = since.strip_suffix('h').and_then(|v| v.parse::<u64>().ok()) {
-        return now.saturating_sub(hours * 3600);
-    }
-    if let Some(days) = since.strip_suffix('d').and_then(|v| v.parse::<u64>().ok()) {
-        return now.saturating_sub(days * 86400);
-    }
-    since.parse::<u64>().unwrap_or(0)
+    parse_since_cutoff(since, test_now())
 }
 
 #[cfg(test)]
@@ -269,7 +388,7 @@ pub fn publish_detailed(topic: &str, payload: &str) -> Result<(), PublishError> 
 
     #[cfg(not(test))]
     {
-        maybe_throttle_publish();
+        let _permit = acquire_publish_permit();
         let base = relay_url();
         let url = format!("{base}/{topic}");
         let result = match apply_auth(client().post(&url))
@@ -373,9 +492,47 @@ where
     stream_with_config(topic, &StreamConfig::default(), &mut on_message, |_, _| {});
 }
 
+/// Open a streaming connection that starts with an explicit catchup cursor.
+pub fn stream_since<F>(topic: &str, since: &str, mut on_message: F)
+where
+    F: FnMut(u64, &str),
+{
+    stream_since_with_config(
+        topic,
+        since,
+        &StreamConfig::default(),
+        &mut on_message,
+        |_, _| {},
+    );
+}
+
 /// Open a streaming SSE connection with reconnect/backoff configuration.
-pub fn stream_with_config<F, G>(
+pub fn stream_with_config<F, G>(topic: &str, config: &StreamConfig, on_message: F, on_disconnect: G)
+where
+    F: FnMut(u64, &str),
+    G: FnMut(StreamDisconnect, Option<Duration>),
+{
+    stream_from_cursor_with_config(topic, None, config, on_message, on_disconnect);
+}
+
+/// Open a streaming SSE connection with reconnect/backoff configuration and an
+/// explicit initial catchup cursor.
+pub fn stream_since_with_config<F, G>(
     topic: &str,
+    since: &str,
+    config: &StreamConfig,
+    on_message: F,
+    on_disconnect: G,
+) where
+    F: FnMut(u64, &str),
+    G: FnMut(StreamDisconnect, Option<Duration>),
+{
+    stream_from_cursor_with_config(topic, Some(since), config, on_message, on_disconnect);
+}
+
+fn stream_from_cursor_with_config<F, G>(
+    topic: &str,
+    initial_since: Option<&str>,
     config: &StreamConfig,
     mut on_message: F,
     on_disconnect: G,
@@ -387,22 +544,53 @@ pub fn stream_with_config<F, G>(
     {
         let _ = config;
         let _ = on_disconnect;
-        for (ts, payload) in test_fetch(topic, "0") {
+        for (ts, payload) in test_fetch(topic, initial_since.unwrap_or("0")) {
             on_message(ts, &payload);
         }
     }
 
     #[cfg(not(test))]
     {
+        let mut cursor = match initial_since {
+            Some(since) => Some(StreamCursor::new(parse_since_cutoff(
+                since,
+                runtime::unix_now(),
+            ))),
+            None if config.reconnect => Some(StreamCursor::new(runtime::unix_now())),
+            None => None,
+        };
         let mut on_disconnect = on_disconnect;
         let mut backoff = config.initial_backoff;
+        let mut first_request = true;
         loop {
             let base = relay_url();
-            let url = format!("{base}/{topic}/json");
+            let request_since = if first_request {
+                initial_since.map(str::to_string)
+            } else {
+                cursor.as_ref().map(StreamCursor::reconnect_since)
+            };
+            first_request = false;
+            let url = match request_since.as_deref() {
+                Some(since) => format!("{base}/{topic}/json?since={since}"),
+                None => format!("{base}/{topic}/json"),
+            };
             let resp = match apply_auth(streaming_client().get(&url)).send() {
-                Ok(r) => {
+                Ok(r) if r.status().is_success() => {
                     backoff = config.initial_backoff;
                     r
+                }
+                Ok(resp) => {
+                    let status = resp.status().as_u16();
+                    let body = resp.text().unwrap_or_default();
+                    let error = classify_stream_connect_failure(status, &body);
+                    if matches!(error, StreamDisconnect::Auth(_)) || !config.reconnect {
+                        on_disconnect(error, None);
+                        return;
+                    }
+                    on_disconnect(error, Some(backoff));
+                    runtime::sleep(backoff);
+                    backoff = std::cmp::min(backoff.saturating_mul(2), config.max_backoff);
+                    continue;
                 }
                 Err(e) => {
                     let error = StreamDisconnect::Connect(e.to_string());
@@ -436,7 +624,14 @@ pub fn stream_with_config<F, G>(
                     && evt.event.as_deref() == Some("message")
                     && let Some(ref msg) = evt.message
                 {
-                    on_message(evt.time.unwrap_or(0), msg);
+                    let ts = evt.time.unwrap_or(0);
+                    let should_emit = match cursor.as_mut() {
+                        Some(cursor) => cursor.should_emit(ts, evt.id.as_deref(), msg),
+                        None => true,
+                    };
+                    if should_emit {
+                        on_message(ts, msg);
+                    }
                 }
             }
             if !config.reconnect {
@@ -453,8 +648,9 @@ pub fn stream_with_config<F, G>(
 #[cfg(test)]
 mod tests {
     use super::{
-        DEFAULT_RELAY, PublishError, StreamConfig, classify_publish_failure, fetch, mirror_url,
-        publish, publish_detailed, publish_limits, relay_status_label, relay_token, relay_url,
+        DEFAULT_RELAY, PublishError, StreamConfig, StreamCursor, StreamDisconnect,
+        classify_publish_failure, classify_stream_connect_failure, fetch, mirror_url, publish,
+        publish_detailed, publish_limits, relay_status_label, relay_token, relay_url, stream_since,
     };
     use crate::runtime;
     use std::time::Duration;
@@ -542,8 +738,8 @@ mod tests {
         assert_eq!(
             publish_limits(),
             super::PublishLimits {
-                burst: Some(4),
-                sustained_per_second: Some(4),
+                burst: Some(2),
+                sustained_per_second: Some(2),
                 body_max_bytes: None,
             }
         );
@@ -591,6 +787,14 @@ mod tests {
     }
 
     #[test]
+    fn classify_stream_connect_failure_maps_auth() {
+        assert_eq!(
+            classify_stream_connect_failure(403, "blocked"),
+            StreamDisconnect::Auth("HTTP 403: blocked".to_string())
+        );
+    }
+
+    #[test]
     fn stream_config_defaults_are_reconnect_disabled() {
         assert_eq!(
             StreamConfig::default(),
@@ -624,5 +828,42 @@ mod tests {
         assert_eq!(events[1].1, "second");
         assert_eq!(events[2].1, "third");
         let _ = std::fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn stream_since_replays_from_explicit_cursor_in_tests() {
+        let home = std::env::temp_dir().join(format!(
+            "agora-stream-since-test-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&home).unwrap();
+        let _runtime = runtime::TestRuntime::new().home(&home).now(100).enter();
+
+        assert!(publish("room-b", "first"));
+        let _runtime = runtime::TestRuntime::new().home(&home).now(120).enter();
+        assert!(publish("room-b", "second"));
+        let _runtime = runtime::TestRuntime::new().home(&home).now(140).enter();
+        assert!(publish("room-b", "third"));
+
+        let mut events = Vec::new();
+        stream_since("room-b", "121", |ts, payload| {
+            events.push((ts, payload.to_string()));
+        });
+
+        assert_eq!(events, vec![(140, "third".to_string())]);
+        let _ = std::fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn stream_cursor_deduplicates_only_seen_events_at_reconnect_boundary() {
+        let mut cursor = StreamCursor::new(100);
+        assert!(cursor.should_emit(100, Some("a"), "first"));
+        assert!(cursor.should_emit(100, Some("b"), "second"));
+        assert!(!cursor.should_emit(100, Some("a"), "first"));
+        assert!(cursor.should_emit(101, Some("c"), "third"));
+        assert!(!cursor.should_emit(100, Some("b"), "second"));
     }
 }
