@@ -10,8 +10,8 @@
 //! Optional relay auth:
 //!   AGORA_RELAY_TOKEN=...  (sent as Authorization: Bearer ...)
 //!
-//! Dual-publish for zero-downtime migration:
-//!   AGORA_RELAY_MIRROR=https://ntfy.sh  (publish to both during transition)
+//! Optional mirror publish:
+//!   AGORA_RELAY_MIRROR=https://mirror.example  (publish to both)
 
 #[cfg(not(test))]
 use serde::Deserialize;
@@ -45,24 +45,14 @@ pub fn relay_status_label() -> String {
 }
 
 fn mirror_url() -> Option<String> {
-    // During migration: dual-publish to ntfy.sh for agents not yet upgraded
-    match runtime::var("AGORA_RELAY_MIRROR") {
-        Some(value) => {
-            let value = value.trim();
-            if value.is_empty() {
-                None
-            } else {
-                Some(value.to_string())
-            }
+    runtime::var("AGORA_RELAY_MIRROR").and_then(|value| {
+        let value = value.trim();
+        if value.is_empty() {
+            None
+        } else {
+            Some(value.to_string())
         }
-        None => {
-            if relay_url().contains("theagora.dev") {
-                Some("https://ntfy.sh".to_string())
-            } else {
-                None
-            }
-        }
-    }
+    })
 }
 
 #[cfg(not(test))]
@@ -164,7 +154,7 @@ pub fn publish(topic: &str, payload: &str) -> bool {
             }
         };
 
-        // Dual-publish to mirror for zero-downtime migration
+        // Dual-publish when an explicit mirror is configured.
         if let Some(mirror) = mirror_url() {
             let mirror_url = format!("{mirror}/{topic}");
             let _ = apply_auth(client().post(&mirror_url))
@@ -308,7 +298,7 @@ mod tests {
             .unset_var("AGORA_RELAY_MIRROR")
             .enter();
 
-        assert_eq!(mirror_url(), Some("https://ntfy.sh".to_string()));
+        assert_eq!(mirror_url(), None);
     }
 
     #[test]
