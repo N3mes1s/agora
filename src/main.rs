@@ -4,6 +4,7 @@
 //! AES-256-GCM + HKDF-SHA256 + ZKP membership proofs.
 
 mod chat;
+mod commands;
 mod crypto;
 mod mcp;
 mod runtime;
@@ -13,7 +14,7 @@ mod store;
 mod transport;
 
 use base64::Engine;
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 use ring::rand::SecureRandom;
 use serde::{Deserialize, Serialize};
 use std::process;
@@ -78,7 +79,7 @@ struct Cli {
     command: Commands,
 }
 
-#[derive(Subcommand)]
+#[derive(Debug, Subcommand)]
 enum Commands {
     /// Create a new encrypted room
     Create {
@@ -113,22 +114,8 @@ enum Commands {
         token: String,
     },
 
-    /// Open or use a private DM room with another agent
-    Dm {
-        /// Peer agent ID
-        agent_id: String,
-        /// Switch the active room to this DM
-        #[arg(long)]
-        switch: bool,
-        /// Read the DM room after setup or send
-        #[arg(long)]
-        read: bool,
-        /// Limit DM read output to the last N messages
-        #[arg(long)]
-        tail: Option<usize>,
-        /// Optional initial message to send into the DM room
-        message: Vec<String>,
-    },
+    /// Open, list, or use a private DM room
+    Dm(DmCommand),
 
     /// Send an encrypted message
     Send {
@@ -812,6 +799,32 @@ enum Commands {
     Id,
 }
 
+#[derive(Args, Debug, Clone, PartialEq)]
+#[command(args_conflicts_with_subcommands = true, subcommand_negates_reqs = true)]
+struct DmCommand {
+    #[command(subcommand)]
+    action: Option<DmAction>,
+    /// Peer agent ID
+    agent_id: Option<String>,
+    /// Switch the active room to this DM
+    #[arg(long)]
+    switch: bool,
+    /// Read the DM room after setup or send
+    #[arg(long)]
+    read: bool,
+    /// Limit DM read output to the last N messages
+    #[arg(long)]
+    tail: Option<usize>,
+    /// Optional initial message to send into the DM room
+    message: Vec<String>,
+}
+
+#[derive(Subcommand, Debug, Clone, PartialEq)]
+enum DmAction {
+    /// List known DM rooms
+    List,
+}
+
 /// Parse a time argument: "HH:MM" (today), "1h" (relative), or unix timestamp.
 fn parse_time_arg(s: &str) -> Option<u64> {
     let now = std::time::SystemTime::now()
@@ -952,48 +965,6 @@ fn open_dm_room(agent_id: &str, switch_room: bool) -> Result<DmRoomContext, Stri
         created,
         target_key_known: store::get_trusted_signing_key(agent_id).is_some(),
     })
-}
-
-fn print_read_output(room: Option<&str>, tail: Option<usize>) -> Result<(), String> {
-    let msgs = chat::read("2h", 50, room)?;
-    let msgs = if let Some(n) = tail {
-        if msgs.len() > n {
-            &msgs[msgs.len() - n..]
-        } else {
-            &msgs
-        }
-    } else {
-        &msgs
-    };
-    if msgs.is_empty() {
-        println!("  (no messages)");
-        return Ok(());
-    }
-    let header_room = if let Some(target) = room {
-        store::find_room(target)
-    } else {
-        store::get_active_room()
-    };
-    if let Some(header_room) = header_room {
-        println!(
-            "  --- {} ({} messages, AES-256-GCM) ---\n",
-            header_room.label,
-            msgs.len()
-        );
-    }
-    if let Ok(pinned) = chat::pins(room)
-        && !pinned.is_empty()
-    {
-        println!("  --- pinned ({}) ---\n", pinned.len());
-        for p in &pinned {
-            print_msg(p);
-        }
-        println!();
-    }
-    for m in msgs {
-        print_msg(m);
-    }
-    Ok(())
 }
 
 fn invite_id() -> String {
@@ -1523,123 +1494,10 @@ fn main() {
             }
         }
 
-        Commands::Dm {
-            agent_id,
-            switch,
-            read,
-            tail,
-            message,
-        } => {
-            let dm = match open_dm_room(&agent_id, switch) {
-                Ok(dm) => dm,
-                Err(e) => {
-                    eprintln!("  Error: {e}");
-                    process::exit(1);
-                }
-            };
-            let room_entry = dm.room;
-            let read_room = read || tail.is_some();
-
-            let text = message.join(" ");
-            let sent_mid = if text.is_empty() {
-                None
-            } else {
-                match chat::send(&text, None, Some(&room_entry.label)) {
-                    Ok(mid) => Some(mid),
-                    Err(e) => {
-                        eprintln!("  Error: {e}");
-                        process::exit(1);
-                    }
-                }
-            };
-            if dm.created {
-                let token = match targeted_invite_token(&room_entry, &agent_id, "dm") {
-                    Ok(token) => token,
-                    Err(e) => {
-                        eprintln!("  Error: failed to create DM invite token: {e}");
-                        process::exit(1);
-                    }
-                };
-                println!("  DM room '{}' is ready for {}", room_entry.label, agent_id);
-                println!("  Room ID:    {}", room_entry.room_id);
-                if switch {
-                    println!("  Active:     {}", room_entry.label);
-                }
-                println!();
-                println!("  Share this DM invite token with {}:", agent_id);
-                println!("    agora accept {}", token);
-                if dm.target_key_known {
-                    println!(
-                        "  Guardrail:  only the trusted signing key for '{}' will accept this token",
-                        agent_id
-                    );
-                } else {
-                    println!(
-                        "  Guardrail:  only '{}' will accept this token without overriding AGORA_AGENT_ID",
-                        agent_id
-                    );
-                    println!(
-                        "  Note:       no trusted signing key is known for '{}', so binding is still soft",
-                        agent_id
-                    );
-                }
-                if let Some(mid) = sent_mid {
-                    println!();
-                    println!("  Initial message sent [{}]", &mid[..6.min(mid.len())]);
-                }
-            } else if let Some(mid) = sent_mid {
-                println!(
-                    "  Sent [{}] to {} via '{}' (AES-256-GCM encrypted)",
-                    &mid[..6.min(mid.len())],
-                    agent_id,
-                    room_entry.label
-                );
-                if switch {
-                    println!("  Active room: {}", room_entry.label);
-                }
-            } else {
-                println!("  DM room '{}' is ready for {}", room_entry.label, agent_id);
-                if switch {
-                    println!("  Active room: {}", room_entry.label);
-                }
-                if !read_room && !switch {
-                    let token = match targeted_invite_token(&room_entry, &agent_id, "dm") {
-                        Ok(token) => token,
-                        Err(e) => {
-                            eprintln!("  Error: failed to create DM invite token: {e}");
-                            process::exit(1);
-                        }
-                    };
-                    println!("  DM invite token for {}:", agent_id);
-                    println!("    agora accept {}", token);
-                    if dm.target_key_known {
-                        println!(
-                            "  Guardrail:  only the trusted signing key for '{}' will accept this token",
-                            agent_id
-                        );
-                    } else {
-                        println!(
-                            "  Guardrail:  only '{}' will accept this token without overriding AGORA_AGENT_ID",
-                            agent_id
-                        );
-                        println!(
-                            "  Note:       no trusted signing key is known for '{}', so binding is still soft",
-                            agent_id
-                        );
-                    }
-                    println!("  Use it with:");
-                    println!("    agora dm {} <message>", agent_id);
-                    println!("    agora dm {} --read --tail 20", agent_id);
-                    println!("    agora dm {} --switch", agent_id);
-                    println!("    agora --room {} read", room_entry.label);
-                }
-            }
-            if read_room {
-                println!();
-                if let Err(e) = print_read_output(Some(&room_entry.label), tail) {
-                    eprintln!("  Error: {e}");
-                    process::exit(1);
-                }
+        Commands::Dm(command) => {
+            if let Err(e) = commands::dm::handle(&command) {
+                eprintln!("  Error: {e}");
+                process::exit(1);
             }
         }
 
@@ -1662,7 +1520,7 @@ fn main() {
         }
 
         Commands::Read { tail } => {
-            if let Err(e) = print_read_output(room, tail) {
+            if let Err(e) = commands::read::print(room, tail) {
                 eprintln!("  Error: {e}");
                 process::exit(1);
             }
@@ -1685,40 +1543,7 @@ fn main() {
             }
         },
 
-        Commands::Rooms => {
-            let rooms = store::load_registry();
-            if rooms.is_empty() {
-                println!("  No rooms. Run: agora create <label>");
-                return;
-            }
-            let active = store::get_active_room();
-            let active_id = active.map(|r| r.room_id).unwrap_or_default();
-            println!(
-                "  {:<20} {:<22} {:<8} {:<18} {:<8} Joined",
-                "Label", "Room ID", "Kind", "Peer", "Active"
-            );
-            println!(
-                "  {:<20} {:<22} {:<8} {:<18} {:<8} {}",
-                "─".repeat(20),
-                "─".repeat(22),
-                "─".repeat(8),
-                "─".repeat(18),
-                "─".repeat(8),
-                "─".repeat(20)
-            );
-            for r in &rooms {
-                let is_active = if r.room_id == active_id { " *" } else { "" };
-                let joined = chrono::DateTime::from_timestamp(r.joined_at as i64, 0)
-                    .map(|dt| dt.format("%Y-%m-%d %H:%M").to_string())
-                    .unwrap_or_default();
-                let kind = r.purpose.as_deref().unwrap_or("room");
-                let peer = r.dm_peer.as_deref().unwrap_or("");
-                println!(
-                    "  {:<20} {:<22} {:<8} {:<18} {:<8} {joined}",
-                    r.label, r.room_id, kind, peer, is_active
-                );
-            }
-        }
+        Commands::Rooms => commands::rooms::print(),
 
         Commands::Switch { label } => match store::find_room(&label) {
             Some(_) => {
@@ -3925,13 +3750,14 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::{
-        InviteTokenAuth, InviteTokenPayload, default_display_name, dm_room_label, open_dm_room,
-        parse_invite_token, targeted_invite_token,
+        Cli, Commands, DmAction, InviteTokenAuth, InviteTokenPayload, default_display_name,
+        dm_room_label, open_dm_room, parse_invite_token, targeted_invite_token,
     };
     use crate::crypto;
     use crate::runtime;
     use crate::store::{self, RoomEntry};
     use base64::Engine;
+    use clap::Parser;
 
     fn temp_home() -> std::path::PathBuf {
         std::env::temp_dir().join(format!(
@@ -3986,6 +3812,34 @@ mod tests {
     fn dm_room_label_rejects_self_dm() {
         let err = dm_room_label("agent-a", "agent-a").unwrap_err();
         assert_eq!(err, "Cannot open a DM with yourself.");
+    }
+
+    #[test]
+    fn dm_cli_accepts_list_subcommand() {
+        let cli = Cli::try_parse_from(["agora", "dm", "list"]).expect("dm list parses");
+        match cli.command {
+            Commands::Dm(command) => {
+                assert_eq!(command.action, Some(DmAction::List));
+                assert_eq!(command.agent_id, None);
+                assert!(command.message.is_empty());
+            }
+            other => panic!("expected dm command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn dm_cli_accepts_peer_and_message() {
+        let cli = Cli::try_parse_from(["agora", "dm", "agent-b", "--switch", "hello", "there"])
+            .expect("dm peer command parses");
+        match cli.command {
+            Commands::Dm(command) => {
+                assert_eq!(command.action, None);
+                assert_eq!(command.agent_id.as_deref(), Some("agent-b"));
+                assert!(command.switch);
+                assert_eq!(command.message, vec!["hello", "there"]);
+            }
+            other => panic!("expected dm command, got {other:?}"),
+        }
     }
 
     #[test]

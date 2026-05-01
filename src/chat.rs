@@ -1566,6 +1566,100 @@ pub struct RoomInfo {
     pub last_activity: u64,
 }
 
+#[derive(Debug, Clone)]
+pub struct RoomSummary {
+    pub room: store::RoomEntry,
+    pub unread_count: usize,
+    pub last_message_at: u64,
+}
+
+fn visible_room_messages(room: &store::RoomEntry) -> Vec<serde_json::Value> {
+    store::load_messages(&room.room_id, u64::MAX)
+        .into_iter()
+        .filter(should_display_message)
+        .collect()
+}
+
+fn message_position(message: &serde_json::Value) -> Option<(u64, String)> {
+    Some((
+        message["ts"].as_u64()?,
+        message["id"].as_str().unwrap_or("").to_string(),
+    ))
+}
+
+fn room_unread_count(
+    me: &str,
+    cursor: Option<&store::ReadCursor>,
+    messages: &[serde_json::Value],
+) -> usize {
+    messages
+        .iter()
+        .filter(|msg| msg["from"].as_str().unwrap_or("") != me)
+        .filter(|msg| {
+            let ts = msg["ts"].as_u64().unwrap_or(0);
+            let id = msg["id"].as_str().unwrap_or("");
+            cursor.is_none_or(|cursor| (ts, id) > (cursor.ts, cursor.id.as_str()))
+        })
+        .count()
+}
+
+pub fn room_summaries() -> Vec<RoomSummary> {
+    let me = store::get_agent_id();
+    store::load_registry()
+        .into_iter()
+        .map(|room| {
+            let messages = visible_room_messages(&room);
+            let cursor = store::load_read_cursor(&room.room_id);
+            let last_message_at = messages
+                .iter()
+                .map(|msg| msg["ts"].as_u64().unwrap_or(0))
+                .max()
+                .unwrap_or(0);
+            let unread_count = room_unread_count(&me, cursor.as_ref(), &messages);
+            RoomSummary {
+                room,
+                unread_count,
+                last_message_at,
+            }
+        })
+        .collect()
+}
+
+pub fn dm_room_summaries() -> Vec<RoomSummary> {
+    let mut rooms: Vec<_> = room_summaries()
+        .into_iter()
+        .filter(|summary| summary.room.purpose.as_deref() == Some("dm"))
+        .collect();
+    rooms.sort_by(|a, b| {
+        b.last_message_at
+            .cmp(&a.last_message_at)
+            .then(a.room.label.cmp(&b.room.label))
+    });
+    rooms
+}
+
+pub fn mark_displayed_messages_read(room_id: &str, displayed: &[serde_json::Value]) {
+    let Some(first_displayed) = displayed.first().and_then(message_position) else {
+        return;
+    };
+    let me = store::get_agent_id();
+    let cursor = store::load_read_cursor(room_id);
+    let has_skipped_unread = store::load_messages(room_id, u64::MAX)
+        .into_iter()
+        .filter(should_display_message)
+        .filter(|msg| msg["from"].as_str().unwrap_or("") != me)
+        .filter_map(|msg| message_position(&msg))
+        .filter(|(ts, id)| {
+            cursor
+                .as_ref()
+                .is_none_or(|cursor| (*ts, id.as_str()) > (cursor.ts, cursor.id.as_str()))
+        })
+        .any(|position| position < first_displayed);
+    if !has_skipped_unread {
+        store::mark_room_read(room_id, displayed);
+    }
+}
+
 pub fn directory() -> Result<Vec<RoomInfo>, String> {
     let rooms = store::load_registry();
     let now_ts = now();
@@ -4869,14 +4963,15 @@ mod tests {
         SignedWirePayload, VERSION, VerifiedSolanaDeposit, allow_incoming_message,
         annotate_soma_message, bounty_expire_check, bounty_post, bounty_submit, bounty_verify,
         count_invite_redemptions_in_envs, decrypt_payload, discover, discovery_decay_weight,
-        encrypt_envelope, enforce_outbound_plaza_rate_limit, infer_soma_subject_path,
-        ingest_auxiliary_event, list_role_leases, list_work_receipts, make_envelope,
-        make_invite_redemption, payment_complete_solana_deposit, pin, pins, resolve_room,
-        role_claim, role_heartbeat, role_release, seed_gen, seed_plaza_rate_limit_state,
-        seed_verify, send_watch_heartbeat, should_display_message, signing_message_bytes,
-        soma_churn_decay, soma_correct, stale_claim_weight, task_add, task_add_as,
-        task_add_with_oracle, task_checkpoint, task_checkpoint_as, task_claim_as, task_done,
-        task_done_as, task_reject_as, unpin, verified_solana_deposit_from_tx,
+        dm_room_summaries, encrypt_envelope, enforce_outbound_plaza_rate_limit,
+        infer_soma_subject_path, ingest_auxiliary_event, list_role_leases, list_work_receipts,
+        make_envelope, make_invite_redemption, mark_displayed_messages_read,
+        payment_complete_solana_deposit, pin, pins, resolve_room, role_claim, role_heartbeat,
+        role_release, room_summaries, seed_gen, seed_plaza_rate_limit_state, seed_verify,
+        send_watch_heartbeat, should_display_message, signing_message_bytes, soma_churn_decay,
+        soma_correct, stale_claim_weight, task_add, task_add_as, task_add_with_oracle,
+        task_checkpoint, task_checkpoint_as, task_claim_as, task_done, task_done_as,
+        task_reject_as, unpin, verified_solana_deposit_from_tx,
     };
     use crate::crypto;
     use crate::runtime;
@@ -5013,6 +5108,159 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_secs()
+    }
+
+    #[test]
+    fn room_summaries_count_only_unread_visible_messages() {
+        let (home, room) = setup_plaza_room("summary-agent", Role::Admin);
+
+        store::save_message(
+            &room.room_id,
+            &json!({
+                "id": "peer-seen",
+                "from": "peer-agent",
+                "ts": 1,
+                "text": "seen",
+                "v": "3.0",
+            }),
+        );
+        store::mark_room_read(
+            &room.room_id,
+            &store::load_messages(&room.room_id, u64::MAX),
+        );
+        store::save_message(
+            &room.room_id,
+            &json!({
+                "id": "reaction-1",
+                "from": "peer-agent",
+                "ts": 2,
+                "type": "reaction",
+                "target_id": "peer-seen",
+                "emoji": "+1",
+                "text": "",
+                "v": "3.0",
+            }),
+        );
+        store::save_message(
+            &room.room_id,
+            &json!({
+                "id": "mine",
+                "from": "summary-agent",
+                "ts": 3,
+                "text": "mine",
+                "v": "3.0",
+            }),
+        );
+        store::save_message(
+            &room.room_id,
+            &json!({
+                "id": "peer-new",
+                "from": "peer-agent",
+                "ts": 4,
+                "text": "new",
+                "v": "3.0",
+            }),
+        );
+
+        let summary = room_summaries()
+            .into_iter()
+            .find(|summary| summary.room.room_id == room.room_id)
+            .expect("summary exists");
+        assert_eq!(summary.unread_count, 1);
+        assert_eq!(summary.last_message_at, 4);
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn dm_room_summaries_only_include_dm_rooms_and_sort_latest_first() {
+        let home = std::env::temp_dir().join(format!(
+            "agora-dm-summary-test-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&home).unwrap();
+        runtime::TestRuntime::new()
+            .home(&home)
+            .var("AGORA_AGENT_ID", "agent-a")
+            .install();
+
+        let dm_old = store::add_room("ag-dm-old", "secret", "dm-agent-a-agent-b", Role::Admin);
+        store::mark_dm_room(&dm_old.room_id, "agent-b").unwrap();
+        let dm_new = store::add_room("ag-dm-new", "secret", "dm-agent-a-agent-c", Role::Admin);
+        store::mark_dm_room(&dm_new.room_id, "agent-c").unwrap();
+        store::add_room("ag-plaza", "secret", "plaza", Role::Admin);
+
+        store::save_message(
+            &dm_old.room_id,
+            &json!({
+                "id": "older",
+                "from": "agent-b",
+                "ts": 10,
+                "text": "old",
+                "v": "3.0",
+            }),
+        );
+        store::save_message(
+            &dm_new.room_id,
+            &json!({
+                "id": "newer",
+                "from": "agent-c",
+                "ts": 20,
+                "text": "new",
+                "v": "3.0",
+            }),
+        );
+
+        let summaries = dm_room_summaries();
+        assert_eq!(summaries.len(), 2);
+        assert_eq!(summaries[0].room.label, "dm-agent-a-agent-c");
+        assert_eq!(summaries[1].room.label, "dm-agent-a-agent-b");
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn mark_displayed_messages_read_does_not_clear_skipped_unread_messages() {
+        let (home, room) = setup_plaza_room("cursor-agent", Role::Admin);
+
+        store::save_message(
+            &room.room_id,
+            &json!({
+                "id": "peer-1",
+                "from": "peer-agent",
+                "ts": 1,
+                "text": "first",
+                "v": "3.0",
+            }),
+        );
+        store::save_message(
+            &room.room_id,
+            &json!({
+                "id": "peer-2",
+                "from": "peer-agent",
+                "ts": 2,
+                "text": "second",
+                "v": "3.0",
+            }),
+        );
+
+        let displayed = vec![serde_json::json!({
+            "id": "peer-2",
+            "from": "peer-agent",
+            "ts": 2,
+            "text": "second",
+            "v": "3.0",
+        })];
+        mark_displayed_messages_read(&room.room_id, &displayed);
+
+        let summary = room_summaries()
+            .into_iter()
+            .find(|summary| summary.room.room_id == room.room_id)
+            .expect("summary exists");
+        assert_eq!(summary.unread_count, 2);
+        assert!(store::load_read_cursor(&room.room_id).is_none());
+        let _ = std::fs::remove_dir_all(&home);
     }
 
     fn run_git(cwd: &std::path::Path, args: &[&str]) -> std::process::Output {

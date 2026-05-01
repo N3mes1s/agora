@@ -514,6 +514,48 @@ pub fn load_messages(room_id: &str, since_secs: u64) -> Vec<serde_json::Value> {
     msgs
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+pub struct ReadCursor {
+    pub ts: u64,
+    pub id: String,
+}
+
+fn read_cursor_path(room_id: &str) -> PathBuf {
+    let dir = agora_dir().join("rooms").join(room_id);
+    ensure_dir(&dir);
+    dir.join("read_cursor.json")
+}
+
+pub fn load_read_cursor(room_id: &str) -> Option<ReadCursor> {
+    let path = read_cursor_path(room_id);
+    let data = fs::read_to_string(path).ok()?;
+    serde_json::from_str(&data).ok()
+}
+
+pub fn save_read_cursor(room_id: &str, cursor: &ReadCursor) {
+    let path = read_cursor_path(room_id);
+    let data = serde_json::to_string(cursor).unwrap();
+    let _ = fs::write(path, data);
+}
+
+fn cursor_from_message(message: &serde_json::Value) -> Option<ReadCursor> {
+    Some(ReadCursor {
+        ts: message["ts"].as_u64()?,
+        id: message["id"].as_str().unwrap_or("").to_string(),
+    })
+}
+
+pub fn mark_room_read(room_id: &str, messages: &[serde_json::Value]) -> Option<ReadCursor> {
+    let latest = messages.iter().filter_map(cursor_from_message).max()?;
+    if load_read_cursor(room_id)
+        .as_ref()
+        .is_none_or(|cursor| &latest > cursor)
+    {
+        save_read_cursor(room_id, &latest);
+    }
+    Some(latest)
+}
+
 pub fn notify_flag_path(room_id: &str) -> PathBuf {
     let dir = agora_dir().join("rooms").join(room_id);
     ensure_dir(&dir);
@@ -1529,6 +1571,44 @@ mod tests {
         let persisted = find_room("ag-dm-1").unwrap();
         assert_eq!(persisted.purpose.as_deref(), Some("dm"));
         assert_eq!(persisted.dm_peer.as_deref(), Some("agent-b"));
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn mark_room_read_persists_latest_cursor_and_never_rewinds() {
+        let (_runtime, home, _agora) = enter_test_home("read-cursor");
+
+        let first = serde_json::json!({
+            "id": "m1",
+            "ts": 10,
+            "from": "peer",
+            "text": "first",
+        });
+        let second = serde_json::json!({
+            "id": "m2",
+            "ts": 12,
+            "from": "peer",
+            "text": "second",
+        });
+        let older = serde_json::json!({
+            "id": "m0",
+            "ts": 8,
+            "from": "peer",
+            "text": "older",
+        });
+
+        let latest = mark_room_read("ag-room", &[first.clone(), second.clone()]).unwrap();
+        assert_eq!(
+            latest,
+            ReadCursor {
+                ts: 12,
+                id: "m2".to_string()
+            }
+        );
+        assert_eq!(load_read_cursor("ag-room"), Some(latest.clone()));
+
+        mark_room_read("ag-room", &[older]).unwrap();
+        assert_eq!(load_read_cursor("ag-room"), Some(latest));
         let _ = fs::remove_dir_all(&home);
     }
 
