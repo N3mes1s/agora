@@ -74,16 +74,23 @@ fn test_runtime_lookup(name: &str) -> Option<Option<String>> {
     TEST_RUNTIME.with(|state| state.borrow().env.get(name).cloned())
 }
 
+/// Thread-local runtime override used by tests and embedders that need to
+/// inject home, env, or time without mutating global process state.
+///
+/// This is primarily intended for tests, but it is exposed from the library so
+/// integration tests and embedders can exercise Agora deterministically.
 #[derive(Clone, Default)]
 pub struct TestRuntime {
     state: TestRuntimeState,
 }
 
 impl TestRuntime {
+    /// Create an empty override context.
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// Override the effective home directory for Agora state.
     pub fn home(mut self, home: impl Into<PathBuf>) -> Self {
         let home = home.into();
         self.state.home = Some(home.clone());
@@ -93,30 +100,36 @@ impl TestRuntime {
         self
     }
 
+    /// Set an environment variable in the local runtime context.
     pub fn var(mut self, name: &str, value: impl Into<String>) -> Self {
         self.state.env.insert(name.to_string(), Some(value.into()));
         self
     }
 
+    /// Remove an environment variable from the local runtime context.
     pub fn unset_var(mut self, name: &str) -> Self {
         self.state.env.insert(name.to_string(), None);
         self
     }
 
+    /// Override the current Unix timestamp.
     pub fn now(mut self, now: u64) -> Self {
         self.state.now = Some(now);
         self
     }
 
+    /// Make [`sleep`] advance the fake clock instead of blocking the thread.
     pub fn advance_sleep(mut self) -> Self {
         self.state.sleep_advances_time = true;
         self
     }
 
+    /// Install this runtime context for the current thread until replaced.
     pub fn install(self) {
         TEST_RUNTIME.with(|state| *state.borrow_mut() = self.state);
     }
 
+    /// Install this runtime context and restore the previous one on drop.
     pub fn enter(self) -> TestRuntimeGuard {
         let previous = snapshot();
         TEST_RUNTIME.with(|state| *state.borrow_mut() = self.state);
@@ -124,6 +137,7 @@ impl TestRuntime {
     }
 }
 
+/// Guard returned by [`TestRuntime::enter`].
 pub struct TestRuntimeGuard {
     previous: TestRuntimeState,
 }
@@ -142,6 +156,7 @@ fn snapshot() -> TestRuntimeState {
     TEST_RUNTIME.with(|state| state.borrow().clone())
 }
 
+/// Spawn a thread that inherits the current [`TestRuntime`] context.
 pub fn spawn_with_current<F, T>(f: F) -> std::thread::JoinHandle<T>
 where
     F: FnOnce() -> T + Send + 'static,
