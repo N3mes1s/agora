@@ -3,16 +3,12 @@
 //! Single binary, zero runtime dependencies.
 //! AES-256-GCM + HKDF-SHA256 + ZKP membership proofs.
 
-mod chat;
 mod commands;
-mod crypto;
 mod mcp;
-mod runtime;
 mod sandbox;
 mod serve;
-mod store;
-mod transport;
 
+use agora::{chat, crypto, runtime, store};
 use base64::Engine;
 use clap::{Args, Parser, Subcommand};
 use ring::rand::SecureRandom;

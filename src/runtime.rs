@@ -1,13 +1,10 @@
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-#[cfg(test)]
 use std::cell::RefCell;
-#[cfg(test)]
 use std::collections::HashMap;
 
 pub fn var(name: &str) -> Option<String> {
-    #[cfg(test)]
     if let Some(value) = test_runtime_lookup(name) {
         return value;
     }
@@ -16,21 +13,17 @@ pub fn var(name: &str) -> Option<String> {
 }
 
 pub fn home_dir() -> Option<PathBuf> {
-    #[cfg(test)]
-    {
-        if let Some(home) = TEST_RUNTIME.with(|state| state.borrow().home.clone()) {
-            return Some(home);
-        }
-        if let Some(Some(home)) = test_runtime_lookup("HOME") {
-            return Some(PathBuf::from(home));
-        }
+    if let Some(home) = TEST_RUNTIME.with(|state| state.borrow().home.clone()) {
+        return Some(home);
+    }
+    if let Some(Some(home)) = test_runtime_lookup("HOME") {
+        return Some(PathBuf::from(home));
     }
 
     dirs::home_dir()
 }
 
 pub fn unix_now() -> u64 {
-    #[cfg(test)]
     if let Some(now) = TEST_RUNTIME.with(|state| state.borrow().now) {
         return now;
     }
@@ -42,26 +35,22 @@ pub fn unix_now() -> u64 {
 }
 
 pub fn sleep(duration: Duration) {
-    #[cfg(test)]
-    {
-        let advanced = TEST_RUNTIME.with(|state| {
-            let mut state = state.borrow_mut();
-            if !state.sleep_advances_time {
-                return false;
-            }
-            let now = state.now.get_or_insert_with(system_unix_now);
-            *now = now.saturating_add(duration.as_secs());
-            true
-        });
-        if advanced {
-            return;
+    let advanced = TEST_RUNTIME.with(|state| {
+        let mut state = state.borrow_mut();
+        if !state.sleep_advances_time {
+            return false;
         }
+        let now = state.now.get_or_insert_with(system_unix_now);
+        *now = now.saturating_add(duration.as_secs());
+        true
+    });
+    if advanced {
+        return;
     }
 
     std::thread::sleep(duration);
 }
 
-#[cfg(test)]
 fn system_unix_now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -69,7 +58,6 @@ fn system_unix_now() -> u64 {
         .as_secs()
 }
 
-#[cfg(test)]
 #[derive(Clone, Default)]
 struct TestRuntimeState {
     env: HashMap<String, Option<String>>,
@@ -78,23 +66,19 @@ struct TestRuntimeState {
     sleep_advances_time: bool,
 }
 
-#[cfg(test)]
 thread_local! {
     static TEST_RUNTIME: RefCell<TestRuntimeState> = RefCell::new(TestRuntimeState::default());
 }
 
-#[cfg(test)]
 fn test_runtime_lookup(name: &str) -> Option<Option<String>> {
     TEST_RUNTIME.with(|state| state.borrow().env.get(name).cloned())
 }
 
-#[cfg(test)]
 #[derive(Clone, Default)]
 pub struct TestRuntime {
     state: TestRuntimeState,
 }
 
-#[cfg(test)]
 impl TestRuntime {
     pub fn new() -> Self {
         Self::default()
@@ -140,29 +124,24 @@ impl TestRuntime {
     }
 }
 
-#[cfg(test)]
 pub struct TestRuntimeGuard {
     previous: TestRuntimeState,
 }
 
-#[cfg(test)]
 impl Drop for TestRuntimeGuard {
     fn drop(&mut self) {
         TEST_RUNTIME.with(|state| *state.borrow_mut() = self.previous.clone());
     }
 }
 
-#[cfg(test)]
 pub fn clear_test_runtime() {
     TEST_RUNTIME.with(|state| *state.borrow_mut() = TestRuntimeState::default());
 }
 
-#[cfg(test)]
 fn snapshot() -> TestRuntimeState {
     TEST_RUNTIME.with(|state| state.borrow().clone())
 }
 
-#[cfg(test)]
 pub fn spawn_with_current<F, T>(f: F) -> std::thread::JoinHandle<T>
 where
     F: FnOnce() -> T + Send + 'static,

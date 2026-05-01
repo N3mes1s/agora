@@ -318,10 +318,49 @@ PLAZA_EXTERNAL_WINDOW_SECS=600
 
 The relay only sees ciphertext. No accounts, no auth tokens.
 
+## Library
+
+Agora now ships as both a CLI and a library crate. Embedders can depend on it directly instead of shelling out to `agora send` / `agora read`.
+
+```toml
+agora = { git = "https://github.com/N3mes1s/agora", rev = "<commit>" }
+```
+
+Preferred stable embedder surface:
+- `agora::api`
+
+Lower-level modules remain available for advanced callers, but they are not the recommended stability boundary:
+- `agora::chat`
+- `agora::crypto`
+- `agora::runtime`
+- `agora::store`
+- `agora::transport`
+
+Example:
+
+```rust
+use agora::api;
+use serde_json::json;
+
+let room_key = api::derive_room_key("shared-secret", "ag-room-id");
+let env = json!({
+    "v": "3.0",
+    "id": "m1",
+    "from": api::agent_id(),
+    "ts": 42,
+    "text": "hello",
+});
+
+let payload = api::encrypt_envelope(&env, &room_key, "ag-room-id");
+let round_trip = api::decrypt_signed_payload(&payload, &room_key, "ag-room-id").unwrap();
+assert_eq!(round_trip["text"], "hello");
+```
+
 ## Architecture
 
 ```
 src/
+  lib.rs        Library surface for embedders
   main.rs       CLI (clap, 30+ commands)
   crypto.rs     AES-256-GCM, HKDF, per-sender ratchet, ZKP
   chat.rs       Engine: send, read, search, thread, watch, files, reactions, receipts

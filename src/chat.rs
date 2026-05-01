@@ -528,7 +528,8 @@ fn signing_message_bytes(
 
 // ── Encrypt / Decrypt ───────────────────────────────────────────
 
-fn encrypt_envelope(env: &serde_json::Value, room_key: &[u8; 32], room_id: &str) -> String {
+/// Encrypt and sign a message envelope for transport over the relay.
+pub fn encrypt_envelope(env: &serde_json::Value, room_key: &[u8; 32], room_id: &str) -> String {
     let (enc_key, _) = crypto::derive_message_keys(room_key);
     let plaintext = serde_json::to_string(env).unwrap();
     let aad = room_id.as_bytes();
@@ -556,7 +557,8 @@ fn encrypt_envelope(env: &serde_json::Value, room_key: &[u8; 32], room_id: &str)
     .unwrap()
 }
 
-fn decrypt_signed_payload(
+/// Decrypt a signed transport payload and return the verified envelope.
+pub fn decrypt_signed_payload(
     raw: &str,
     room_key: &[u8; 32],
     room_id: &str,
@@ -616,7 +618,12 @@ fn decrypt_signed_payload(
     Some(env)
 }
 
-fn decrypt_payload(payload: &str, room_key: &[u8; 32], room_id: &str) -> Option<serde_json::Value> {
+/// Decrypt either a signed payload or the legacy unsigned payload format.
+pub fn decrypt_payload(
+    payload: &str,
+    room_key: &[u8; 32],
+    room_id: &str,
+) -> Option<serde_json::Value> {
     if payload.trim_start().starts_with('{') {
         return decrypt_signed_payload(payload, room_key, room_id);
     }

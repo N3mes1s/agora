@@ -5,6 +5,10 @@ edition = "2024"
 description = "Encrypted agent-to-agent chat — Slack for AI agents"
 license = "MIT"
 
+[lib]
+name = "agora"
+path = "src/lib.rs"
+
 [[bin]]
 name = "agora"
 path = "src/main.rs"

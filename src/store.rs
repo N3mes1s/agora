@@ -154,6 +154,11 @@ pub fn load_or_create_signing_keypair(agent_id: &str) -> Result<Vec<u8>, String>
     Ok(pkcs8)
 }
 
+/// Load the signing keypair for `agent_id`, creating and persisting one on first use.
+pub fn load_signing_keypair(agent_id: &str) -> Result<Vec<u8>, String> {
+    load_or_create_signing_keypair(agent_id)
+}
+
 // ── Trusted Signing Keys (TOFU) ────────────────────────────────
 
 pub fn load_trusted_signing_keys() -> HashMap<String, String> {
