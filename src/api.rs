@@ -39,6 +39,9 @@
 //! ```
 
 use crate::{chat, crypto, store, transport};
+use std::time::Duration;
+
+pub use crate::transport::{PublishError, PublishLimits, StreamConfig, StreamDisconnect};
 
 /// JSON message envelope exchanged over Agora.
 pub type Envelope = serde_json::Value;
@@ -97,14 +100,41 @@ pub fn decrypt_payload(payload: &str, room_key: &RoomKey, room_id: &str) -> Opti
 
 /// Publish an encrypted payload to the configured relay topic.
 ///
+/// Embedders should prefer this typed variant over [`publish_ok`] so they can
+/// distinguish retryable rate limits from permanent caller or auth failures.
+/// On the public `ntfy.theagora.dev` relay, Agora also applies a conservative
+/// process-local pacing gate before sending.
+///
 /// ```no_run
 /// use agora::api;
 ///
-/// let ok = api::publish("ag-room-id", "{\"payload\":\"...\"}");
-/// assert!(ok);
+/// match api::publish("ag-room-id", "{\"payload\":\"...\"}") {
+///     Ok(()) => {}
+///     Err(api::PublishError::RateLimited { retry_after }) => {
+///         eprintln!("retry later: {retry_after:?}");
+///     }
+///     Err(err) => {
+///         eprintln!("publish failed: {err:?}");
+///     }
+/// }
 /// ```
-pub fn publish(topic: &str, payload: &str) -> bool {
+pub fn publish(topic: &str, payload: &str) -> Result<(), PublishError> {
+    transport::publish_detailed(topic, payload)
+}
+
+/// Compatibility wrapper for callers that only need a success flag.
+pub fn publish_ok(topic: &str, payload: &str) -> bool {
     transport::publish(topic, payload)
+}
+
+/// Return client-side relay guidance for the current transport target.
+///
+/// For the public `ntfy.theagora.dev` relay, Agora exposes conservative
+/// defaults intended to help embedders avoid rediscovering rate-limit cliffs by
+/// trial and error, and [`publish`] uses the sustained rate as a local pacing
+/// guard. Custom relays report `None` for unknown values.
+pub fn publish_limits() -> PublishLimits {
+    transport::publish_limits()
 }
 
 /// Fetch recent raw payloads from the configured relay topic.
@@ -140,4 +170,35 @@ where
     F: FnMut(u64, &str),
 {
     transport::stream(topic, on_message)
+}
+
+/// Open a streaming SSE connection with reconnect/backoff configuration.
+///
+/// `on_disconnect` is invoked whenever the stream fails or ends. When
+/// `reconnect` is enabled, `next_backoff` reports how long Agora will wait
+/// before trying again.
+///
+/// ```no_run
+/// use agora::api;
+/// use std::time::Duration;
+///
+/// let config = api::StreamConfig {
+///     reconnect: true,
+///     initial_backoff: Duration::from_secs(2),
+///     max_backoff: Duration::from_secs(30),
+/// };
+///
+/// api::stream_with_config(
+///     "ag-room-id",
+///     &config,
+///     |ts, raw| println!("{ts}: {raw}"),
+///     |reason, next_backoff| eprintln!("stream dropped: {reason:?}, next={next_backoff:?}"),
+/// );
+/// ```
+pub fn stream_with_config<F, G>(topic: &str, config: &StreamConfig, on_message: F, on_disconnect: G)
+where
+    F: FnMut(u64, &str),
+    G: FnMut(StreamDisconnect, Option<Duration>),
+{
+    transport::stream_with_config(topic, config, on_message, on_disconnect)
 }

@@ -329,6 +329,17 @@ agora = { git = "https://github.com/N3mes1s/agora", rev = "<commit>" }
 Preferred stable embedder surface:
 - `agora::api`
 
+Notable embedder-facing behavior:
+- `api::publish(...) -> Result<(), api::PublishError>` for typed retry/auth/payload decisions
+- `api::publish_ok(...) -> bool` as a compatibility wrapper when you only need success/failure
+- `api::publish_limits()` for conservative relay guidance on the public default relay
+- `api::stream_with_config(...)` for reconnect-aware SSE consumers
+
+On the public `ntfy.theagora.dev` relay, Agora also applies a conservative
+process-local pacing gate before publishing so embedders do not immediately hit
+known burst limits. Custom relays are left unthrottled unless the embedder
+chooses to layer its own policy on top.
+
 Lower-level modules remain available for advanced callers, but they are not the recommended stability boundary:
 - `agora::chat`
 - `agora::crypto`
