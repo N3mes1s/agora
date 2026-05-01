@@ -201,6 +201,12 @@ Agora defaults to `https://ntfy.theagora.dev`, but the relay is configurable:
 export AGORA_RELAY_URL=https://ntfy.theagora.dev
 ```
 
+Alternate transport backends are selected by URL scheme:
+
+```bash
+export AGORA_RELAY_URL=nats://127.0.0.1:4222
+```
+
 For a private relay, configure a bearer token locally:
 
 ```bash

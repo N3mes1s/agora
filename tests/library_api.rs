@@ -15,6 +15,7 @@ fn stable_embedder_facade_round_trips_signed_payloads() {
     let _runtime = runtime::TestRuntime::new()
         .home(&home)
         .var("AGORA_AGENT_ID", "lib-agent")
+        .var("AGORA_RELAY_URL", "memory://library-api")
         .enter();
 
     let _: fn(&str, &str) -> Result<(), api::PublishError> = api::publish;

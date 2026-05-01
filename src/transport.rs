@@ -1,34 +1,29 @@
-//! Agora transport layer — ntfy relay.
+//! Agora transport layer.
 //!
 //! E2E encrypted before hitting the wire. The relay only sees ciphertext.
-//! Transport is pluggable — swap this module for WebSocket, Redis, etc.
+//! The default transport is the public ntfy relay, but alternate backends can
+//! be selected by URL scheme at runtime.
 //!
 //! Relay URL is configurable:
-//!   AGORA_RELAY_URL=https://ntfy.theagora.dev  (custom relay)
-//!   Default: https://ntfy.theagora.dev
+//!   AGORA_RELAY_URL=https://ntfy.theagora.dev  (default ntfy relay)
+//!   AGORA_RELAY_URL=nats://127.0.0.1:4222     (NATS + JetStream)
+//!   AGORA_RELAY_URL=memory://test-suite       (in-memory test relay)
 //!
 //! Optional relay auth:
-//!   AGORA_RELAY_TOKEN=...  (sent as Authorization: Bearer ...)
+//!   AGORA_RELAY_TOKEN=...  (ntfy bearer token or NATS auth token)
 //!
-//! Optional mirror publish:
+//! Optional ntfy mirror publish:
 //!   AGORA_RELAY_MIRROR=https://mirror.example  (publish to both)
 
-#[cfg(not(test))]
-use serde::Deserialize;
+mod memory;
+mod nats;
+mod ntfy;
 
 use crate::runtime;
 use std::collections::HashSet;
 use std::time::Duration;
 
-#[cfg(not(test))]
-use std::sync::{Condvar, Mutex, OnceLock};
-#[cfg(not(test))]
-use std::time::Instant;
-
-const DEFAULT_RELAY: &str = "https://ntfy.theagora.dev";
-
-#[cfg(test)]
-type TestRelayStore = std::collections::HashMap<(String, String), Vec<(u64, String)>>;
+pub(crate) const DEFAULT_RELAY: &str = "https://ntfy.theagora.dev";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PublishError {
@@ -105,25 +100,20 @@ enum StreamReplayKey {
 }
 
 #[derive(Debug, Clone)]
-struct StreamCursor {
-    since_ts: u64,
+pub(crate) struct StreamCursor {
+    pub(crate) since_ts: u64,
     seen_at_since: HashSet<StreamReplayKey>,
 }
 
 impl StreamCursor {
-    fn new(since_ts: u64) -> Self {
+    pub(crate) fn new(since_ts: u64) -> Self {
         Self {
             since_ts,
             seen_at_since: HashSet::new(),
         }
     }
 
-    #[cfg(not(test))]
-    fn reconnect_since(&self) -> String {
-        self.since_ts.to_string()
-    }
-
-    fn should_emit(&mut self, ts: u64, id: Option<&str>, payload: &str) -> bool {
+    pub(crate) fn should_emit(&mut self, ts: u64, id: Option<&str>, payload: &str) -> bool {
         if ts < self.since_ts {
             return false;
         }
@@ -147,25 +137,72 @@ impl StreamCursor {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TransportKind {
+    Memory,
+    Nats,
+    Ntfy,
+}
+
+#[derive(Debug, Clone)]
+struct TransportConfig {
+    relay_url: String,
+    relay_token: Option<String>,
+    relay_mirror: Option<String>,
+}
+
+impl TransportConfig {
+    fn current() -> Self {
+        Self {
+            relay_url: relay_url(),
+            relay_token: relay_token(),
+            relay_mirror: mirror_url(),
+        }
+    }
+
+    fn kind(&self) -> TransportKind {
+        if self.relay_url.starts_with("memory://") {
+            return TransportKind::Memory;
+        }
+
+        if let Ok(url) = url::Url::parse(&self.relay_url) {
+            return match url.scheme() {
+                "nats" | "tls" => TransportKind::Nats,
+                _ => TransportKind::Ntfy,
+            };
+        }
+
+        TransportKind::Ntfy
+    }
+}
+
+trait Transport {
+    fn relay_status_label(&self, config: &TransportConfig) -> String;
+    fn publish_limits(&self, config: &TransportConfig) -> PublishLimits;
+    fn publish(
+        &self,
+        config: &TransportConfig,
+        topic: &str,
+        payload: &str,
+    ) -> Result<(), PublishError>;
+    fn fetch(&self, config: &TransportConfig, topic: &str, since: &str) -> Vec<(u64, String)>;
+    fn stream(
+        &self,
+        config: &TransportConfig,
+        topic: &str,
+        initial_since: Option<&str>,
+        stream_config: &StreamConfig,
+        on_message: &mut dyn FnMut(u64, &str),
+        on_disconnect: &mut dyn FnMut(StreamDisconnect, Option<Duration>),
+    );
+}
+
 fn relay_url() -> String {
     runtime::var("AGORA_RELAY_URL").unwrap_or_else(|| DEFAULT_RELAY.to_string())
 }
 
 fn relay_token() -> Option<String> {
     runtime::var("AGORA_RELAY_TOKEN")
-}
-
-#[cfg(not(test))]
-fn apply_auth(builder: reqwest::blocking::RequestBuilder) -> reqwest::blocking::RequestBuilder {
-    if let Some(token) = relay_token() {
-        builder.header("Authorization", format!("Bearer {token}"))
-    } else {
-        builder
-    }
-}
-
-pub fn relay_status_label() -> String {
-    format!("Relay ({})", relay_url())
 }
 
 fn mirror_url() -> Option<String> {
@@ -179,41 +216,7 @@ fn mirror_url() -> Option<String> {
     })
 }
 
-pub fn publish_limits() -> PublishLimits {
-    if relay_url() == DEFAULT_RELAY {
-        PublishLimits {
-            burst: Some(2),
-            sustained_per_second: Some(2),
-            body_max_bytes: None,
-        }
-    } else {
-        PublishLimits {
-            burst: None,
-            sustained_per_second: None,
-            body_max_bytes: None,
-        }
-    }
-}
-
-fn parse_retry_after(value: Option<&str>) -> Option<Duration> {
-    value
-        .and_then(|raw| raw.trim().parse::<u64>().ok())
-        .map(Duration::from_secs)
-}
-
-fn classify_publish_failure(status: u16, retry_after: Option<&str>, body: &str) -> PublishError {
-    match status {
-        429 => PublishError::RateLimited {
-            retry_after: parse_retry_after(retry_after),
-        },
-        413 => PublishError::PayloadTooLarge { limit: None },
-        401 | 403 => PublishError::Forbidden(format!("HTTP {status}: {}", body.trim())),
-        400..=499 => PublishError::Forbidden(format!("HTTP {status}: {}", body.trim())),
-        _ => PublishError::Network(format!("HTTP {status}: {}", body.trim())),
-    }
-}
-
-fn parse_since_cutoff(since: &str, now: u64) -> u64 {
+pub(crate) fn parse_since_cutoff(since: &str, now: u64) -> u64 {
     if let Some(secs) = since.strip_suffix('s').and_then(|v| v.parse::<u64>().ok()) {
         return now.saturating_sub(secs);
     }
@@ -229,262 +232,48 @@ fn parse_since_cutoff(since: &str, now: u64) -> u64 {
     since.parse::<u64>().unwrap_or(0)
 }
 
-fn classify_stream_connect_failure(status: u16, body: &str) -> StreamDisconnect {
-    let message = format!("HTTP {status}: {}", body.trim());
-    match status {
-        401 | 403 => StreamDisconnect::Auth(message),
-        _ => StreamDisconnect::Connect(message),
-    }
-}
-
-#[cfg(not(test))]
-#[derive(Debug, Default)]
-struct PublishGateState {
-    next_allowed: Option<Instant>,
-    in_flight: usize,
-}
-
-#[cfg(not(test))]
-fn publish_gate() -> &'static (Mutex<PublishGateState>, Condvar) {
-    static GATE: OnceLock<(Mutex<PublishGateState>, Condvar)> = OnceLock::new();
-    GATE.get_or_init(|| (Mutex::new(PublishGateState::default()), Condvar::new()))
-}
-
-#[cfg(not(test))]
-struct PublishPermit;
-
-#[cfg(not(test))]
-impl Drop for PublishPermit {
-    fn drop(&mut self) {
-        let (lock, cvar) = publish_gate();
-        let mut state = lock.lock().unwrap_or_else(|e| e.into_inner());
-        state.in_flight = state.in_flight.saturating_sub(1);
-        cvar.notify_one();
-    }
-}
-
-#[cfg(not(test))]
-fn acquire_publish_permit() -> Option<PublishPermit> {
-    let limits = publish_limits();
-    let max_in_flight = limits.burst.filter(|burst| *burst > 0);
-    let interval = limits
-        .sustained_per_second
-        .filter(|rate| *rate > 0)
-        .map(|rate| Duration::from_secs_f64(1.0 / rate as f64));
-
-    if max_in_flight.is_none() && interval.is_none() {
-        return None;
-    }
-
-    let (lock, cvar) = publish_gate();
-    let mut state = lock.lock().unwrap_or_else(|e| e.into_inner());
-    loop {
-        if let Some(limit) = max_in_flight
-            && state.in_flight >= limit
-        {
-            state = cvar.wait(state).unwrap_or_else(|e| e.into_inner());
-            continue;
+fn with_transport<R>(f: impl FnOnce(&dyn Transport, &TransportConfig) -> R) -> R {
+    let config = TransportConfig::current();
+    match config.kind() {
+        TransportKind::Memory => {
+            let transport = memory::MemoryTransport;
+            f(&transport, &config)
         }
-
-        if let Some(interval) = interval {
-            let now = Instant::now();
-            if let Some(next_allowed) = state.next_allowed
-                && next_allowed > now
-            {
-                let delay = next_allowed.duration_since(now);
-                drop(state);
-                runtime::sleep(delay);
-                state = lock.lock().unwrap_or_else(|e| e.into_inner());
-                continue;
-            }
-            state.next_allowed = Some(now + interval);
+        TransportKind::Nats => {
+            let transport = nats::NatsTransport;
+            f(&transport, &config)
         }
-
-        state.in_flight += 1;
-        return Some(PublishPermit);
+        TransportKind::Ntfy => {
+            let transport = ntfy::NtfyTransport;
+            f(&transport, &config)
+        }
     }
 }
 
-#[cfg(not(test))]
-#[derive(Debug, Deserialize)]
-struct NtfyEvent {
-    id: Option<String>,
-    event: Option<String>,
-    message: Option<String>,
-    time: Option<u64>,
+pub fn relay_status_label() -> String {
+    with_transport(|transport, config| transport.relay_status_label(config))
 }
 
-#[cfg(not(test))]
-fn client() -> reqwest::blocking::Client {
-    reqwest::blocking::Client::builder()
-        .timeout(std::time::Duration::from_secs(15))
-        .build()
-        .expect("failed to build HTTP client")
+pub fn publish_limits() -> PublishLimits {
+    with_transport(|transport, config| transport.publish_limits(config))
 }
 
-#[cfg(not(test))]
-fn streaming_client() -> reqwest::blocking::Client {
-    reqwest::blocking::Client::builder()
-        .timeout(None)
-        .build()
-        .expect("failed to build streaming HTTP client")
-}
-
-#[cfg(test)]
-fn test_relay() -> &'static std::sync::Mutex<TestRelayStore> {
-    static RELAY: std::sync::OnceLock<std::sync::Mutex<TestRelayStore>> =
-        std::sync::OnceLock::new();
-    RELAY.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
-}
-
-#[cfg(test)]
-fn test_namespace() -> String {
-    runtime::home_dir()
-        .map(|path| path.to_string_lossy().to_string())
-        .unwrap_or_else(|| "__agora_test__".to_string())
-}
-
-#[cfg(test)]
-fn test_now() -> u64 {
-    runtime::unix_now()
-}
-
-#[cfg(test)]
-fn test_since_cutoff(since: &str) -> u64 {
-    parse_since_cutoff(since, test_now())
-}
-
-#[cfg(test)]
-fn test_fetch(topic: &str, since: &str) -> Vec<(u64, String)> {
-    let cutoff = test_since_cutoff(since);
-    let relay = test_relay().lock().unwrap_or_else(|e| e.into_inner());
-    relay
-        .get(&(test_namespace(), topic.to_string()))
-        .cloned()
-        .unwrap_or_default()
-        .into_iter()
-        .filter(|(ts, _)| *ts >= cutoff)
-        .collect()
-}
-
-/// Publish an encrypted payload to the relay topic.
-/// Also publishes to the mirror if AGORA_RELAY_MIRROR is set.
+/// Publish an encrypted payload to the configured relay topic.
 pub fn publish(topic: &str, payload: &str) -> bool {
     publish_detailed(topic, payload).is_ok()
 }
 
-/// Publish an encrypted payload to the relay topic with typed error reporting.
-/// Also publishes to the mirror if AGORA_RELAY_MIRROR is set.
+/// Publish an encrypted payload to the configured relay topic with typed error reporting.
 pub fn publish_detailed(topic: &str, payload: &str) -> Result<(), PublishError> {
-    #[cfg(test)]
-    {
-        let mut relay = test_relay().lock().unwrap_or_else(|e| e.into_inner());
-        relay
-            .entry((test_namespace(), topic.to_string()))
-            .or_default()
-            .push((test_now(), payload.to_string()));
-        Ok(())
-    }
-
-    #[cfg(not(test))]
-    {
-        let _permit = acquire_publish_permit();
-        let base = relay_url();
-        let url = format!("{base}/{topic}");
-        let result = match apply_auth(client().post(&url))
-            .body(payload.to_string())
-            .send()
-        {
-            Ok(resp) if resp.status().is_success() => Ok(()),
-            Ok(resp) => {
-                let status = resp.status().as_u16();
-                let retry_after = resp
-                    .headers()
-                    .get("retry-after")
-                    .and_then(|value| value.to_str().ok())
-                    .map(str::to_string);
-                let body = resp.text().unwrap_or_default();
-                Err(classify_publish_failure(
-                    status,
-                    retry_after.as_deref(),
-                    &body,
-                ))
-            }
-            Err(e) => {
-                eprintln!("  [warn] relay publish failed: {e}");
-                Err(PublishError::Network(e.to_string()))
-            }
-        };
-
-        // Dual-publish when an explicit mirror is configured.
-        if let Some(mirror) = mirror_url() {
-            let mirror_url = format!("{mirror}/{topic}");
-            let _ = apply_auth(client().post(&mirror_url))
-                .body(payload.to_string())
-                .send();
-        }
-
-        result
-    }
+    with_transport(|transport, config| transport.publish(config, topic, payload))
 }
 
-/// Fetch recent messages from the relay topic.
-/// Falls back to mirror relay if primary fails.
-/// Returns vec of (timestamp, raw_payload).
+/// Fetch recent messages from the configured relay topic.
 pub fn fetch(topic: &str, since: &str) -> Vec<(u64, String)> {
-    #[cfg(test)]
-    {
-        test_fetch(topic, since)
-    }
-
-    #[cfg(not(test))]
-    {
-        let base = relay_url();
-        let url = format!("{base}/{topic}/json?poll=1&since={since}");
-        let body = match apply_auth(client().get(&url)).send() {
-            Ok(resp) => resp.text().unwrap_or_default(),
-            Err(e) => {
-                eprintln!("  [warn] primary relay fetch failed: {e}");
-                String::new()
-            }
-        };
-
-        // Failover: if primary returned nothing, try mirror
-        let body = if body.trim().is_empty() || !body.contains("message") {
-            if let Some(mirror) = mirror_url() {
-                let mirror_url = format!("{mirror}/{topic}/json?poll=1&since={since}");
-                match client().get(&mirror_url).send() {
-                    Ok(resp) => resp.text().unwrap_or(body),
-                    Err(_) => body,
-                }
-            } else {
-                body
-            }
-        } else {
-            body
-        };
-
-        let mut events = Vec::new();
-        for line in body.lines() {
-            let line = line.trim();
-            if line.is_empty() {
-                continue;
-            }
-            if let Ok(evt) = serde_json::from_str::<NtfyEvent>(line)
-                && evt.event.as_deref() == Some("message")
-                && let Some(msg) = evt.message
-            {
-                events.push((evt.time.unwrap_or(0), msg));
-            }
-        }
-
-        events
-    }
+    with_transport(|transport, config| transport.fetch(config, topic, since))
 }
 
-/// Open a streaming SSE connection to the relay topic.
-/// Calls `on_message(timestamp, raw_payload)` for each message.
-/// Blocks forever. Returns on connection error.
+/// Open a streaming connection to the configured relay topic.
 pub fn stream<F>(topic: &str, mut on_message: F)
 where
     F: FnMut(u64, &str),
@@ -506,7 +295,7 @@ where
     );
 }
 
-/// Open a streaming SSE connection with reconnect/backoff configuration.
+/// Open a streaming connection with reconnect/backoff configuration.
 pub fn stream_with_config<F, G>(topic: &str, config: &StreamConfig, on_message: F, on_disconnect: G)
 where
     F: FnMut(u64, &str),
@@ -515,8 +304,7 @@ where
     stream_from_cursor_with_config(topic, None, config, on_message, on_disconnect);
 }
 
-/// Open a streaming SSE connection with reconnect/backoff configuration and an
-/// explicit initial catchup cursor.
+/// Open a streaming connection with reconnect/backoff configuration and an explicit initial cursor.
 pub fn stream_since_with_config<F, G>(
     topic: &str,
     since: &str,
@@ -535,122 +323,29 @@ fn stream_from_cursor_with_config<F, G>(
     initial_since: Option<&str>,
     config: &StreamConfig,
     mut on_message: F,
-    on_disconnect: G,
+    mut on_disconnect: G,
 ) where
     F: FnMut(u64, &str),
     G: FnMut(StreamDisconnect, Option<Duration>),
 {
-    #[cfg(test)]
-    {
-        let _ = config;
-        let _ = on_disconnect;
-        for (ts, payload) in test_fetch(topic, initial_since.unwrap_or("0")) {
-            on_message(ts, &payload);
-        }
-    }
-
-    #[cfg(not(test))]
-    {
-        let mut cursor = match initial_since {
-            Some(since) => Some(StreamCursor::new(parse_since_cutoff(
-                since,
-                runtime::unix_now(),
-            ))),
-            None if config.reconnect => Some(StreamCursor::new(runtime::unix_now())),
-            None => None,
-        };
-        let mut on_disconnect = on_disconnect;
-        let mut backoff = config.initial_backoff;
-        let mut first_request = true;
-        loop {
-            let base = relay_url();
-            let request_since = if first_request {
-                initial_since.map(str::to_string)
-            } else {
-                cursor.as_ref().map(StreamCursor::reconnect_since)
-            };
-            first_request = false;
-            let url = match request_since.as_deref() {
-                Some(since) => format!("{base}/{topic}/json?since={since}"),
-                None => format!("{base}/{topic}/json"),
-            };
-            let resp = match apply_auth(streaming_client().get(&url)).send() {
-                Ok(r) if r.status().is_success() => {
-                    backoff = config.initial_backoff;
-                    r
-                }
-                Ok(resp) => {
-                    let status = resp.status().as_u16();
-                    let body = resp.text().unwrap_or_default();
-                    let error = classify_stream_connect_failure(status, &body);
-                    if matches!(error, StreamDisconnect::Auth(_)) || !config.reconnect {
-                        on_disconnect(error, None);
-                        return;
-                    }
-                    on_disconnect(error, Some(backoff));
-                    runtime::sleep(backoff);
-                    backoff = std::cmp::min(backoff.saturating_mul(2), config.max_backoff);
-                    continue;
-                }
-                Err(e) => {
-                    let error = StreamDisconnect::Connect(e.to_string());
-                    if !config.reconnect {
-                        on_disconnect(error, None);
-                        return;
-                    }
-                    on_disconnect(error, Some(backoff));
-                    runtime::sleep(backoff);
-                    backoff = std::cmp::min(backoff.saturating_mul(2), config.max_backoff);
-                    continue;
-                }
-            };
-
-            let reader = std::io::BufReader::new(resp);
-            use std::io::BufRead;
-            let mut disconnect = StreamDisconnect::Read("stream ended".to_string());
-            for line in reader.lines() {
-                let line = match line {
-                    Ok(l) => l,
-                    Err(e) => {
-                        disconnect = StreamDisconnect::Read(e.to_string());
-                        break;
-                    }
-                };
-                let line = line.trim().to_string();
-                if line.is_empty() {
-                    continue;
-                }
-                if let Ok(evt) = serde_json::from_str::<NtfyEvent>(&line)
-                    && evt.event.as_deref() == Some("message")
-                    && let Some(ref msg) = evt.message
-                {
-                    let ts = evt.time.unwrap_or(0);
-                    let should_emit = match cursor.as_mut() {
-                        Some(cursor) => cursor.should_emit(ts, evt.id.as_deref(), msg),
-                        None => true,
-                    };
-                    if should_emit {
-                        on_message(ts, msg);
-                    }
-                }
-            }
-            if !config.reconnect {
-                on_disconnect(disconnect, None);
-                return;
-            }
-            on_disconnect(disconnect, Some(backoff));
-            runtime::sleep(backoff);
-            backoff = std::cmp::min(backoff.saturating_mul(2), config.max_backoff);
-        }
-    }
+    with_transport(|transport, transport_config| {
+        transport.stream(
+            transport_config,
+            topic,
+            initial_since,
+            config,
+            &mut on_message,
+            &mut on_disconnect,
+        )
+    });
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        DEFAULT_RELAY, PublishError, StreamConfig, StreamCursor, StreamDisconnect,
-        classify_publish_failure, classify_stream_connect_failure, fetch, mirror_url, publish,
-        publish_detailed, publish_limits, relay_status_label, relay_token, relay_url, stream_since,
+        DEFAULT_RELAY, PublishError, PublishLimits, StreamConfig, StreamCursor, StreamDisconnect,
+        TransportConfig, TransportKind, fetch, mirror_url, ntfy, publish, publish_detailed,
+        publish_limits, relay_status_label, relay_token, relay_url, stream_since,
     };
     use crate::runtime;
     use std::time::Duration;
@@ -662,15 +357,26 @@ mod tests {
             .enter();
 
         assert_eq!(relay_url(), DEFAULT_RELAY);
+        assert_eq!(TransportConfig::current().kind(), TransportKind::Ntfy);
     }
 
     #[test]
-    fn relay_url_uses_env_override() {
+    fn relay_url_uses_nats_scheme_override() {
         let _runtime = runtime::TestRuntime::new()
-            .var("AGORA_RELAY_URL", "https://ntfy.theagora.dev")
+            .var("AGORA_RELAY_URL", "nats://127.0.0.1:4222")
             .enter();
 
-        assert_eq!(relay_url(), "https://ntfy.theagora.dev");
+        assert_eq!(relay_url(), "nats://127.0.0.1:4222");
+        assert_eq!(TransportConfig::current().kind(), TransportKind::Nats);
+    }
+
+    #[test]
+    fn relay_url_uses_memory_scheme_override() {
+        let _runtime = runtime::TestRuntime::new()
+            .var("AGORA_RELAY_URL", "memory://suite")
+            .enter();
+
+        assert_eq!(TransportConfig::current().kind(), TransportKind::Memory);
     }
 
     #[test]
@@ -715,6 +421,7 @@ mod tests {
             .unset_var("AGORA_RELAY_TOKEN")
             .enter();
         assert_eq!(relay_token(), None);
+
         let _runtime = runtime::TestRuntime::new()
             .var("AGORA_RELAY_TOKEN", "relay-secret")
             .enter();
@@ -724,10 +431,10 @@ mod tests {
     #[test]
     fn relay_status_label_reflects_override() {
         let _runtime = runtime::TestRuntime::new()
-            .var("AGORA_RELAY_URL", "https://ntfy.theagora.dev")
+            .var("AGORA_RELAY_URL", "nats://127.0.0.1:4222")
             .enter();
 
-        assert_eq!(relay_status_label(), "Relay (https://ntfy.theagora.dev)");
+        assert_eq!(relay_status_label(), "Relay (nats://127.0.0.1:4222)");
     }
 
     #[test]
@@ -737,7 +444,7 @@ mod tests {
             .enter();
         assert_eq!(
             publish_limits(),
-            super::PublishLimits {
+            PublishLimits {
                 burst: Some(2),
                 sustained_per_second: Some(2),
                 body_max_bytes: None,
@@ -746,13 +453,13 @@ mod tests {
     }
 
     #[test]
-    fn publish_limits_custom_relay_are_unknown() {
+    fn publish_limits_custom_relays_are_unknown() {
         let _runtime = runtime::TestRuntime::new()
-            .var("AGORA_RELAY_URL", "https://relay.example")
+            .var("AGORA_RELAY_URL", "nats://127.0.0.1:4222")
             .enter();
         assert_eq!(
             publish_limits(),
-            super::PublishLimits {
+            PublishLimits {
                 burst: None,
                 sustained_per_second: None,
                 body_max_bytes: None,
@@ -763,7 +470,7 @@ mod tests {
     #[test]
     fn classify_publish_failure_maps_rate_limit() {
         assert_eq!(
-            classify_publish_failure(429, Some("7"), "slow down"),
+            ntfy::classify_publish_failure(429, Some("7"), "slow down"),
             PublishError::RateLimited {
                 retry_after: Some(Duration::from_secs(7))
             }
@@ -773,7 +480,7 @@ mod tests {
     #[test]
     fn classify_publish_failure_maps_payload_too_large() {
         assert_eq!(
-            classify_publish_failure(413, None, "too large"),
+            ntfy::classify_publish_failure(413, None, "too large"),
             PublishError::PayloadTooLarge { limit: None }
         );
     }
@@ -781,7 +488,7 @@ mod tests {
     #[test]
     fn classify_publish_failure_maps_forbidden() {
         assert_eq!(
-            classify_publish_failure(403, None, "blocked"),
+            ntfy::classify_publish_failure(403, None, "blocked"),
             PublishError::Forbidden("HTTP 403: blocked".to_string())
         );
     }
@@ -789,7 +496,7 @@ mod tests {
     #[test]
     fn classify_stream_connect_failure_maps_auth() {
         assert_eq!(
-            classify_stream_connect_failure(403, "blocked"),
+            ntfy::classify_stream_connect_failure(403, "blocked"),
             StreamDisconnect::Auth("HTTP 403: blocked".to_string())
         );
     }
@@ -807,7 +514,7 @@ mod tests {
     }
 
     #[test]
-    fn publish_and_fetch_use_in_memory_relay_in_tests() {
+    fn publish_and_fetch_use_memory_transport() {
         let home = std::env::temp_dir().join(format!(
             "agora-transport-test-{}",
             std::time::SystemTime::now()
@@ -816,7 +523,10 @@ mod tests {
                 .as_nanos()
         ));
         std::fs::create_dir_all(&home).unwrap();
-        let _runtime = runtime::TestRuntime::new().home(&home).enter();
+        let _runtime = runtime::TestRuntime::new()
+            .home(&home)
+            .var("AGORA_RELAY_URL", "memory://suite")
+            .enter();
 
         assert!(publish("room-a", "first"));
         assert!(publish("room-a", "second"));
@@ -831,7 +541,7 @@ mod tests {
     }
 
     #[test]
-    fn stream_since_replays_from_explicit_cursor_in_tests() {
+    fn stream_since_replays_from_explicit_cursor_in_memory_transport() {
         let home = std::env::temp_dir().join(format!(
             "agora-stream-since-test-{}",
             std::time::SystemTime::now()
@@ -840,12 +550,24 @@ mod tests {
                 .as_nanos()
         ));
         std::fs::create_dir_all(&home).unwrap();
-        let _runtime = runtime::TestRuntime::new().home(&home).now(100).enter();
+        let _runtime = runtime::TestRuntime::new()
+            .home(&home)
+            .var("AGORA_RELAY_URL", "memory://suite")
+            .now(100)
+            .enter();
 
         assert!(publish("room-b", "first"));
-        let _runtime = runtime::TestRuntime::new().home(&home).now(120).enter();
+        let _runtime = runtime::TestRuntime::new()
+            .home(&home)
+            .var("AGORA_RELAY_URL", "memory://suite")
+            .now(120)
+            .enter();
         assert!(publish("room-b", "second"));
-        let _runtime = runtime::TestRuntime::new().home(&home).now(140).enter();
+        let _runtime = runtime::TestRuntime::new()
+            .home(&home)
+            .var("AGORA_RELAY_URL", "memory://suite")
+            .now(140)
+            .enter();
         assert!(publish("room-b", "third"));
 
         let mut events = Vec::new();
