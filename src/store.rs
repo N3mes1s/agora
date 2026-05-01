@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 pub fn agora_dir() -> PathBuf {
@@ -30,6 +31,8 @@ fn ensure_dir(path: &PathBuf) {
 fn now() -> u64 {
     runtime::unix_now()
 }
+
+static ATOMIC_WRITE_SEQ: AtomicU64 = AtomicU64::new(0);
 
 // ── Identity ────────────────────────────────────────────────────
 // Two-tier identity (SSH agent / Signal pattern):
@@ -284,11 +287,21 @@ pub fn load_registry() -> Vec<RoomEntry> {
     }
 }
 
-fn atomic_write(path: &Path, data: &str) -> std::io::Result<()> {
-    let tmp = path.with_extension("tmp");
+fn atomic_write_bytes(path: &Path, data: &[u8]) -> std::io::Result<()> {
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("tmp");
+    let seq = ATOMIC_WRITE_SEQ.fetch_add(1, Ordering::Relaxed);
+    let tmp = parent.join(format!(".{file_name}.{}.{}.tmp", std::process::id(), seq));
     fs::write(&tmp, data)?;
     fs::rename(&tmp, path)?;
     Ok(())
+}
+
+fn atomic_write(path: &Path, data: &str) -> std::io::Result<()> {
+    atomic_write_bytes(path, data.as_bytes())
 }
 
 pub fn save_registry(rooms: &[RoomEntry]) {
@@ -477,9 +490,7 @@ pub fn save_message(room_id: &str, envelope: &serde_json::Value) {
     let ts = envelope["ts"].as_u64().unwrap_or_else(now);
     let mid = envelope["id"].as_str().unwrap_or("x");
     let path = dir.join(format!("{ts}_{mid}.json"));
-    if !path.exists() {
-        let _ = fs::write(&path, serde_json::to_string(envelope).unwrap());
-    }
+    let _ = atomic_write_bytes(&path, serde_json::to_string(envelope).unwrap().as_bytes());
 }
 
 pub fn delete_message(room_id: &str, msg_id: &str) {
@@ -507,6 +518,9 @@ pub fn load_messages(room_id: &str, since_secs: u64) -> Vec<serde_json::Value> {
     let mut msgs = Vec::new();
     if let Ok(entries) = fs::read_dir(&dir) {
         for entry in entries.flatten() {
+            if entry.path().extension().and_then(|ext| ext.to_str()) != Some("json") {
+                continue;
+            }
             if let Ok(data) = fs::read_to_string(entry.path())
                 && let Ok(env) = serde_json::from_str::<serde_json::Value>(&data)
                 && env["ts"].as_u64().unwrap_or(0) >= cutoff
@@ -1614,6 +1628,31 @@ mod tests {
 
         mark_room_read("ag-room", &[older]).unwrap();
         assert_eq!(load_read_cursor("ag-room"), Some(latest));
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn load_messages_ignores_transient_tmp_files() {
+        let (_runtime, home, agora) = enter_test_home("load-messages-tmp");
+        let dir = agora.join("rooms").join("ag-room").join("messages");
+        fs::create_dir_all(&dir).unwrap();
+
+        fs::write(
+            dir.join("10_good.json"),
+            serde_json::json!({
+                "id": "good",
+                "ts": 10,
+                "from": "peer",
+                "text": "ok",
+            })
+            .to_string(),
+        )
+        .unwrap();
+        fs::write(dir.join(".10_race.json.123.1.tmp"), "{\"id\":").unwrap();
+
+        let msgs = load_messages("ag-room", u64::MAX);
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0]["id"].as_str(), Some("good"));
         let _ = fs::remove_dir_all(&home);
     }
 
