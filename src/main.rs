@@ -6,6 +6,7 @@
 mod chat;
 mod crypto;
 mod mcp;
+mod runtime;
 mod sandbox;
 mod serve;
 mod store;
@@ -857,6 +858,58 @@ fn dm_room_label(left: &str, right: &str) -> Result<String, String> {
     Ok(format!("dm-{a}-{b}"))
 }
 
+fn ensure_canonical_dm_label(left: &str, right: &str, label: &str) -> Result<(), String> {
+    let expected = dm_room_label(left, right)?;
+    if label != expected {
+        return Err(format!(
+            "DM room label '{}' does not match canonical label '{}'.",
+            label, expected
+        ));
+    }
+    Ok(())
+}
+
+fn ensure_dm_room_entry(
+    room: &store::RoomEntry,
+    local_agent_id: &str,
+    peer_agent_id: &str,
+) -> Result<store::RoomEntry, String> {
+    ensure_canonical_dm_label(local_agent_id, peer_agent_id, &room.label)?;
+    if let Some(purpose) = room.purpose.as_deref()
+        && purpose != "dm"
+    {
+        return Err(format!(
+            "Room '{}' already exists but is marked as '{}', not a DM.",
+            room.label, purpose
+        ));
+    }
+    if let Some(existing_peer) = room.dm_peer.as_deref()
+        && existing_peer != peer_agent_id
+    {
+        return Err(format!(
+            "Room '{}' is already bound to DM peer '{}'.",
+            room.label, existing_peer
+        ));
+    }
+    store::mark_dm_room(&room.room_id, peer_agent_id)
+}
+
+fn dm_peer_from_invite(payload: &InviteTokenPayload) -> Result<String, String> {
+    let inviter = payload
+        .created_by
+        .as_deref()
+        .ok_or_else(|| "DM invite is missing inviter identity.".to_string())?;
+    let target = payload
+        .target_agent_id
+        .as_deref()
+        .ok_or_else(|| "DM invite is missing target agent ID.".to_string())?;
+    ensure_canonical_dm_label(inviter, target, &payload.label)?;
+    if inviter == target {
+        return Err("DM invite cannot target the inviter.".to_string());
+    }
+    Ok(inviter.to_string())
+}
+
 fn invite_id() -> String {
     let mut bytes = [0u8; 8];
     ring::rand::SystemRandom::new()
@@ -936,6 +989,10 @@ fn targeted_invite_token(
     target_agent_id: &str,
     purpose: &str,
 ) -> Result<String, String> {
+    let created_by = store::get_agent_id();
+    if purpose == "dm" {
+        ensure_canonical_dm_label(&created_by, target_agent_id, &room.label)?;
+    }
     let payload = InviteTokenPayload {
         room_id: room.room_id.clone(),
         secret: room.secret.clone(),
@@ -946,7 +1003,7 @@ fn targeted_invite_token(
         purpose: Some(purpose.to_string()),
         expires_at: None,
         max_uses: None,
-        created_by: Some(store::get_agent_id()),
+        created_by: Some(created_by),
         issued_at: None,
     };
     sign_invite_token(payload)
@@ -1049,11 +1106,11 @@ fn short_ref(git_ref: &str) -> &str {
 
 fn default_display_name(agent_id: &str) -> String {
     let short = &agent_id[..6.min(agent_id.len())];
-    if std::env::var("CLAUDE_CODE_SESSION_ID").is_ok() {
+    if runtime::var("CLAUDE_CODE_SESSION_ID").is_some() {
         format!("Claude-{short}")
-    } else if std::env::var("CODEX_THREAD_ID").is_ok()
-        || std::env::var("CODEX_CLI_SESSION_ID").is_ok()
-        || std::env::var("OPENAI_API_KEY").is_ok()
+    } else if runtime::var("CODEX_THREAD_ID").is_some()
+        || runtime::var("CODEX_CLI_SESSION_ID").is_some()
+        || runtime::var("OPENAI_API_KEY").is_some()
     {
         format!("Codex-{short}")
     } else {
@@ -1233,6 +1290,7 @@ fn main() {
             match parse_invite_token(&token) {
                 Ok(parsed) => {
                     let payload = parsed.payload;
+                    let me = store::get_agent_id();
                     // Check expiry
                     if let Some(expires_at) = payload.expires_at {
                         let now_ts = std::time::SystemTime::now()
@@ -1245,22 +1303,20 @@ fn main() {
                         }
                     }
 
-                    if let Some(target) = payload.target_agent_id.as_deref() {
-                        let me = store::get_agent_id();
-                        if me != target {
-                            eprintln!(
-                                "  Error: invite token is intended for '{}' but your agent ID is '{}'.",
-                                target, me
-                            );
-                            eprintln!(
-                                "  Note: agent IDs are not authenticated yet; this is a soft guardrail."
-                            );
-                            process::exit(1);
-                        }
+                    if let Some(target) = payload.target_agent_id.as_deref()
+                        && me != target
+                    {
+                        eprintln!(
+                            "  Error: invite token is intended for '{}' but your agent ID is '{}'.",
+                            target, me
+                        );
+                        eprintln!(
+                            "  Note: agent IDs are not authenticated yet; this is a soft guardrail."
+                        );
+                        process::exit(1);
                     }
 
                     if let Some(target_key) = payload.target_signing_pubkey.as_deref() {
-                        let me = store::get_agent_id();
                         let my_key = match local_signing_pubkey(&me) {
                             Ok(key) => key,
                             Err(e) => {
@@ -1276,6 +1332,18 @@ fn main() {
                             process::exit(1);
                         }
                     }
+
+                    let dm_peer = if payload.purpose.as_deref() == Some("dm") {
+                        match dm_peer_from_invite(&payload) {
+                            Ok(peer) => Some(peer),
+                            Err(e) => {
+                                eprintln!("  Error: {e}");
+                                process::exit(1);
+                            }
+                        }
+                    } else {
+                        None
+                    };
 
                     let redemption_count = if let (Some(max_uses), Some(invite_id)) =
                         (payload.max_uses, payload.invite_id.as_deref())
@@ -1305,7 +1373,13 @@ fn main() {
                     };
 
                     match chat::join(&payload.room_id, &payload.secret, &payload.label) {
-                        Ok(_) => {
+                        Ok(joined_room) => {
+                            if let Some(peer) = dm_peer.as_deref()
+                                && let Err(e) = ensure_dm_room_entry(&joined_room, &me, peer)
+                            {
+                                eprintln!("  Error: {e}");
+                                process::exit(1);
+                            }
                             if let Some(invite_id) = payload.invite_id.as_deref()
                                 && let Err(e) = chat::redeem_invite(
                                     &payload.room_id,
@@ -1340,6 +1414,9 @@ fn main() {
                                 );
                             }
                             if payload.purpose.as_deref() == Some("dm") {
+                                if let Some(peer) = dm_peer.as_deref() {
+                                    println!("  DM peer: {peer}");
+                                }
                                 if payload.target_signing_pubkey.is_some() {
                                     println!("  DM invite target key check passed.");
                                 } else if payload.target_agent_id.is_some() {
@@ -1388,6 +1465,13 @@ fn main() {
                         eprintln!("  Error: {e}");
                         process::exit(1);
                     }
+                }
+            };
+            let room_entry = match ensure_dm_room_entry(&room_entry, &me, &agent_id) {
+                Ok(room) => room,
+                Err(e) => {
+                    eprintln!("  Error: {e}");
+                    process::exit(1);
                 }
             };
 
@@ -1565,11 +1649,16 @@ fn main() {
             }
             let active = store::get_active_room();
             let active_id = active.map(|r| r.room_id).unwrap_or_default();
-            println!("  {:<20} {:<22} {:<8} Joined", "Label", "Room ID", "Active");
             println!(
-                "  {:<20} {:<22} {:<8} {}",
+                "  {:<20} {:<22} {:<8} {:<18} {:<8} Joined",
+                "Label", "Room ID", "Kind", "Peer", "Active"
+            );
+            println!(
+                "  {:<20} {:<22} {:<8} {:<18} {:<8} {}",
                 "─".repeat(20),
                 "─".repeat(22),
+                "─".repeat(8),
+                "─".repeat(18),
                 "─".repeat(8),
                 "─".repeat(20)
             );
@@ -1578,9 +1667,11 @@ fn main() {
                 let joined = chrono::DateTime::from_timestamp(r.joined_at as i64, 0)
                     .map(|dt| dt.format("%Y-%m-%d %H:%M").to_string())
                     .unwrap_or_default();
+                let kind = r.purpose.as_deref().unwrap_or("room");
+                let peer = r.dm_peer.as_deref().unwrap_or("");
                 println!(
-                    "  {:<20} {:<22} {:<8} {joined}",
-                    r.label, r.room_id, is_active
+                    "  {:<20} {:<22} {:<8} {:<18} {:<8} {joined}",
+                    r.label, r.room_id, kind, peer, is_active
                 );
             }
         }
@@ -1618,6 +1709,12 @@ fn main() {
             Ok(info) => {
                 println!("  Room:        {}", info["label"].as_str().unwrap_or("?"));
                 println!("  ID:          {}", info["room_id"].as_str().unwrap_or("?"));
+                if info["purpose"].as_str() == Some("dm") {
+                    println!("  Kind:        dm");
+                    if let Some(peer) = info["dm_peer"].as_str() {
+                        println!("  Peer:        {peer}");
+                    }
+                }
                 if let Some(topic) = info["topic"].as_str() {
                     println!("  Topic:       {topic}");
                 }
@@ -2130,7 +2227,7 @@ fn main() {
                 eprintln!(
                     "  \x1b[33m[hub] Connection lost. Reconnecting in 5s... ({msg_count} messages received so far)\x1b[0m"
                 );
-                std::thread::sleep(std::time::Duration::from_secs(5));
+                runtime::sleep(std::time::Duration::from_secs(5));
             }
         }
 
@@ -3788,6 +3885,7 @@ mod tests {
         parse_invite_token, targeted_invite_token,
     };
     use crate::crypto;
+    use crate::runtime;
     use crate::store::{self, RoomEntry};
     use base64::Engine;
 
@@ -3801,55 +3899,35 @@ mod tests {
         ))
     }
 
-    fn restore_env(name: &str, value: Option<String>) {
-        match value {
-            Some(value) => unsafe { std::env::set_var(name, value) },
-            None => unsafe { std::env::remove_var(name) },
-        }
+    fn enter_agent_runtime(home: &std::path::Path, agent_id: &str) -> runtime::TestRuntimeGuard {
+        runtime::TestRuntime::new()
+            .home(home)
+            .var("AGORA_AGENT_ID", agent_id)
+            .enter()
     }
 
     #[test]
     fn default_display_name_detects_codex_thread_id() {
-        let _guard = store::test_env_lock().lock().unwrap();
-        let prior_codex = std::env::var("CODEX_THREAD_ID").ok();
-        let prior_claude = std::env::var("CLAUDE_CODE_SESSION_ID").ok();
-        let prior_openai = std::env::var("OPENAI_API_KEY").ok();
-        let prior_codex_cli = std::env::var("CODEX_CLI_SESSION_ID").ok();
-        unsafe {
-            std::env::set_var("CODEX_THREAD_ID", "019d5e1a-b68c");
-            std::env::remove_var("CLAUDE_CODE_SESSION_ID");
-            std::env::remove_var("OPENAI_API_KEY");
-            std::env::remove_var("CODEX_CLI_SESSION_ID");
-        }
+        let _runtime = runtime::TestRuntime::new()
+            .var("CODEX_THREAD_ID", "019d5e1a-b68c")
+            .unset_var("CLAUDE_CODE_SESSION_ID")
+            .unset_var("OPENAI_API_KEY")
+            .unset_var("CODEX_CLI_SESSION_ID")
+            .enter();
 
         assert_eq!(default_display_name("abcdef12"), "Codex-abcdef");
-
-        restore_env("CODEX_THREAD_ID", prior_codex);
-        restore_env("CLAUDE_CODE_SESSION_ID", prior_claude);
-        restore_env("OPENAI_API_KEY", prior_openai);
-        restore_env("CODEX_CLI_SESSION_ID", prior_codex_cli);
     }
 
     #[test]
     fn default_display_name_falls_back_to_agent() {
-        let _guard = store::test_env_lock().lock().unwrap();
-        let prior_codex = std::env::var("CODEX_THREAD_ID").ok();
-        let prior_claude = std::env::var("CLAUDE_CODE_SESSION_ID").ok();
-        let prior_openai = std::env::var("OPENAI_API_KEY").ok();
-        let prior_codex_cli = std::env::var("CODEX_CLI_SESSION_ID").ok();
-        unsafe {
-            std::env::remove_var("CODEX_THREAD_ID");
-            std::env::remove_var("CLAUDE_CODE_SESSION_ID");
-            std::env::remove_var("OPENAI_API_KEY");
-            std::env::remove_var("CODEX_CLI_SESSION_ID");
-        }
+        let _runtime = runtime::TestRuntime::new()
+            .unset_var("CODEX_THREAD_ID")
+            .unset_var("CLAUDE_CODE_SESSION_ID")
+            .unset_var("OPENAI_API_KEY")
+            .unset_var("CODEX_CLI_SESSION_ID")
+            .enter();
 
         assert_eq!(default_display_name("abcdef12"), "Agent-abcdef");
-
-        restore_env("CODEX_THREAD_ID", prior_codex);
-        restore_env("CLAUDE_CODE_SESSION_ID", prior_claude);
-        restore_env("OPENAI_API_KEY", prior_openai);
-        restore_env("CODEX_CLI_SESSION_ID", prior_codex_cli);
     }
 
     #[test]
@@ -3868,20 +3946,18 @@ mod tests {
 
     #[test]
     fn targeted_dm_invite_round_trips() {
-        let _guard = store::test_env_lock().lock().unwrap();
         let home = temp_home();
         std::fs::create_dir_all(&home).unwrap();
-        unsafe {
-            std::env::set_var("HOME", &home);
-            std::env::set_var("AGORA_AGENT_ID", "agent-a");
-        }
+        let _runtime = enter_agent_runtime(&home, "agent-a");
         store::trust_signing_key("agent-b", "cGVlci1zaWduaW5nLWtleQ");
         let room = RoomEntry {
             room_id: "ag-dm-test".to_string(),
             secret: "secret".to_string(),
-            label: "dm-a-b".to_string(),
+            label: "dm-agent-a-agent-b".to_string(),
             joined_at: 0,
             topic: None,
+            purpose: None,
+            dm_peer: None,
             members: vec![],
         };
         let token = targeted_invite_token(&room, "agent-b", "dm").unwrap();
@@ -3891,7 +3967,7 @@ mod tests {
             InviteTokenPayload {
                 room_id: "ag-dm-test".to_string(),
                 secret: "secret".to_string(),
-                label: "dm-a-b".to_string(),
+                label: "dm-agent-a-agent-b".to_string(),
                 invite_id: parsed.payload.invite_id.clone(),
                 target_agent_id: Some("agent-b".to_string()),
                 target_signing_pubkey: Some("cGVlci1zaWduaW5nLWtleQ==".to_string()),
@@ -3908,21 +3984,42 @@ mod tests {
     }
 
     #[test]
-    fn signed_invite_token_rejects_tampering() {
-        let _guard = store::test_env_lock().lock().unwrap();
+    fn targeted_dm_invite_requires_canonical_label() {
         let home = temp_home();
         std::fs::create_dir_all(&home).unwrap();
-        unsafe {
-            std::env::set_var("HOME", &home);
-            std::env::set_var("AGORA_AGENT_ID", "agent-a");
-        }
+        let _runtime = enter_agent_runtime(&home, "agent-a");
 
         let room = RoomEntry {
             room_id: "ag-dm-test".to_string(),
             secret: "secret".to_string(),
-            label: "dm-a-b".to_string(),
+            label: "not-a-dm".to_string(),
             joined_at: 0,
             topic: None,
+            purpose: None,
+            dm_peer: None,
+            members: vec![],
+        };
+        let err = targeted_invite_token(&room, "agent-b", "dm").unwrap_err();
+        assert_eq!(
+            err,
+            "DM room label 'not-a-dm' does not match canonical label 'dm-agent-a-agent-b'."
+        );
+    }
+
+    #[test]
+    fn signed_invite_token_rejects_tampering() {
+        let home = temp_home();
+        std::fs::create_dir_all(&home).unwrap();
+        let _runtime = enter_agent_runtime(&home, "agent-a");
+
+        let room = RoomEntry {
+            room_id: "ag-dm-test".to_string(),
+            secret: "secret".to_string(),
+            label: "dm-agent-a-agent-b".to_string(),
+            joined_at: 0,
+            topic: None,
+            purpose: None,
+            dm_peer: None,
             members: vec![],
         };
         let token = targeted_invite_token(&room, "agent-b", "dm").unwrap();
@@ -3941,20 +4038,18 @@ mod tests {
 
     #[test]
     fn signed_invite_token_accepts_legacy_url_safe_trusted_key() {
-        let _guard = store::test_env_lock().lock().unwrap();
         let home = temp_home();
         std::fs::create_dir_all(&home).unwrap();
-        unsafe {
-            std::env::set_var("HOME", &home);
-            std::env::set_var("AGORA_AGENT_ID", "agent-a");
-        }
+        let _runtime = enter_agent_runtime(&home, "agent-a");
 
         let room = RoomEntry {
             room_id: "ag-dm-test".to_string(),
             secret: "secret".to_string(),
-            label: "dm-a-b".to_string(),
+            label: "dm-agent-a-agent-b".to_string(),
             joined_at: 0,
             topic: None,
+            purpose: None,
+            dm_peer: None,
             members: vec![],
         };
         let token = targeted_invite_token(&room, "agent-b", "dm").unwrap();
@@ -3985,13 +4080,9 @@ mod tests {
 
     #[test]
     fn status_json_output_has_required_fields() {
-        let _guard = store::test_env_lock().lock().unwrap();
         let home = temp_home();
         std::fs::create_dir_all(&home).unwrap();
-        unsafe {
-            std::env::set_var("HOME", &home);
-            std::env::set_var("AGORA_AGENT_ID", "test-agent-status");
-        }
+        let _runtime = enter_agent_runtime(&home, "test-agent-status");
 
         let agent_id = store::get_agent_id();
         let (credits, trust_ledger) =

@@ -11,9 +11,9 @@ use crate::sandbox;
 use std::io::{Read as IoRead, Write as IoWrite};
 use std::net::{TcpListener, TcpStream};
 use std::thread;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
-use crate::{chat, store};
+use crate::{chat, runtime, store};
 
 /// Credits charged per sandbox creation. Refunded if the provider call fails.
 const SANDBOX_OPEN_COST_CREDITS: i64 = 10;
@@ -334,7 +334,7 @@ fn render_room_page(room_label: &str) -> String {
         .map(|t| format!(r#"<div class="stats">Topic: {}</div>"#, html_escape(t)))
         .unwrap_or_default();
 
-    let readonly = std::env::var("AGORA_READONLY").is_ok();
+    let readonly = runtime::var("AGORA_READONLY").is_some();
 
     format!(
         r#"<!DOCTYPE html>
@@ -884,10 +884,7 @@ fn verify_bearer_agent_token(raw: &str) -> Result<String, String> {
 }
 
 fn audit_now() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_secs()
+    runtime::unix_now()
 }
 
 fn sandbox_audit_id(agent_id: &str, action: &str, session_id: Option<&str>, ts: u64) -> String {
@@ -972,10 +969,7 @@ fn verify_stripe_signature(raw: &str, body: &str, secret: &str) -> Result<(), St
 
     // Reject timestamps older than 5 minutes (replay protection)
     if let Ok(ts_secs) = ts.parse::<u64>() {
-        let now_secs = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
+        let now_secs = runtime::unix_now();
         if now_secs.saturating_sub(ts_secs) > 300 {
             return Err("Stripe-Signature timestamp too old (replay protection)".to_string());
         }
@@ -1035,7 +1029,7 @@ fn handle_sse(mut stream: TcpStream, room_label: String, since_ts: u64) {
     let mut relay_tick: u32 = 0;
 
     loop {
-        thread::sleep(Duration::from_secs(2));
+        runtime::sleep(Duration::from_secs(2));
         relay_tick += 1;
 
         // Every 3 ticks (~6 s) fetch from relay to populate local store.
@@ -1448,7 +1442,7 @@ fn handle_connection(stream: TcpStream) {
         // Requires: STRIPE_WEBHOOK_SECRET env var for signature verification
         ("POST", ["api", "payments", "webhook"]) => {
             // Verify Stripe-Signature header using HMAC-SHA256 (replay window: 5 minutes)
-            let webhook_secret = std::env::var("STRIPE_WEBHOOK_SECRET").unwrap_or_default();
+            let webhook_secret = runtime::var("STRIPE_WEBHOOK_SECRET").unwrap_or_default();
             if webhook_secret.is_empty() {
                 send_json(
                     stream,
@@ -1508,23 +1502,23 @@ fn handle_connection(stream: TcpStream) {
         // GET /api/health — structured health check for Railway + ops monitoring
         // Always returns 200 so Railway healthcheck passes; status field indicates readiness
         ("GET", ["api", "health"]) => {
-            let e2b = std::env::var("E2B_TOKEN")
+            let e2b = runtime::var("E2B_TOKEN")
                 .map(|v| !v.is_empty())
                 .unwrap_or(false);
-            let daytona = std::env::var("DAYTONA_TOKEN")
+            let daytona = runtime::var("DAYTONA_TOKEN")
                 .map(|v| !v.is_empty())
                 .unwrap_or(false);
-            let sprites = std::env::var("SPRITES_TOKEN")
+            let sprites = runtime::var("SPRITES_TOKEN")
                 .map(|v| !v.is_empty())
                 .unwrap_or(false);
-            let stripe_key = std::env::var("STRIPE_SECRET_KEY")
+            let stripe_key = runtime::var("STRIPE_SECRET_KEY")
                 .map(|v| !v.is_empty())
                 .unwrap_or(false);
-            let stripe_webhook = std::env::var("STRIPE_WEBHOOK_SECRET")
+            let stripe_webhook = runtime::var("STRIPE_WEBHOOK_SECRET")
                 .map(|v| !v.is_empty())
                 .unwrap_or(false);
-            let relay_url = std::env::var("AGORA_RELAY_URL")
-                .unwrap_or_else(|_| "https://ntfy.theagora.dev".to_string());
+            let relay_url = runtime::var("AGORA_RELAY_URL")
+                .unwrap_or_else(|| "https://ntfy.theagora.dev".to_string());
             let sandbox_ok = e2b || daytona || sprites;
             let body = serde_json::json!({
                 "status": if sandbox_ok && stripe_key { "ok" } else { "degraded" },
@@ -2930,7 +2924,7 @@ mod tests {
     fn serve_once(raw: &str) -> String {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
-        let server = std::thread::spawn(move || {
+        let server = crate::runtime::spawn_with_current(move || {
             let (stream, _) = listener.accept().unwrap();
             handle_connection(stream);
         });
@@ -2943,6 +2937,12 @@ mod tests {
         client.read_to_string(&mut response).unwrap();
         server.join().unwrap();
         response
+    }
+
+    fn enter_serve_runtime(home: &std::path::Path, agent_id: &str) -> crate::runtime::TestRuntime {
+        crate::runtime::TestRuntime::new()
+            .home(home)
+            .var("AGORA_AGENT_ID", agent_id)
     }
 
     #[test]
@@ -3109,7 +3109,6 @@ mod tests {
 
     #[test]
     fn test_render_thread_page_contains_thread_rows() {
-        let _guard = store::test_env_lock().lock().unwrap();
         let home = std::env::temp_dir().join(format!(
             "agora-serve-thread-test-{}",
             std::time::SystemTime::now()
@@ -3118,10 +3117,7 @@ mod tests {
                 .as_nanos()
         ));
         std::fs::create_dir_all(&home).unwrap();
-        unsafe {
-            std::env::set_var("HOME", &home);
-            std::env::set_var("AGORA_AGENT_ID", "serve-test");
-        }
+        let _runtime = enter_serve_runtime(&home, "serve-test").enter();
 
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -3161,7 +3157,6 @@ mod tests {
 
     #[test]
     fn test_render_room_page_readonly_guards_missing_form() {
-        let _guard = store::test_env_lock().lock().unwrap();
         let home = std::env::temp_dir().join(format!(
             "agora-serve-readonly-test-{}",
             std::time::SystemTime::now()
@@ -3170,11 +3165,9 @@ mod tests {
                 .as_nanos()
         ));
         std::fs::create_dir_all(&home).unwrap();
-        unsafe {
-            std::env::set_var("HOME", &home);
-            std::env::set_var("AGORA_AGENT_ID", "serve-test");
-            std::env::set_var("AGORA_READONLY", "1");
-        }
+        let _runtime = enter_serve_runtime(&home, "serve-test")
+            .var("AGORA_READONLY", "1")
+            .enter();
 
         let room = store::add_room("ag-readonly-test", "secret", "plaza", store::Role::Admin);
         store::save_message(
@@ -3241,10 +3234,9 @@ mod tests {
 
     #[test]
     fn test_verify_bearer_agent_token_accepts_valid_token() {
-        let _guard = crate::store::test_env_lock().lock().unwrap();
-        unsafe {
-            std::env::set_var("AGORA_SANDBOX_SECRET", "serve-test-secret");
-        }
+        let _runtime = crate::runtime::TestRuntime::new()
+            .var("AGORA_SANDBOX_SECRET", "serve-test-secret")
+            .enter();
         let token = crate::sandbox::generate_agent_token("api-agent", 1);
         let raw =
             format!("POST /api/v1/tasks HTTP/1.1\r\nAuthorization: Bearer {token}\r\n\r\n{{}}");
@@ -3254,7 +3246,6 @@ mod tests {
 
     #[test]
     fn test_patch_tasks_requires_bearer_auth() {
-        let _guard = crate::store::test_env_lock().lock().unwrap();
         let home = std::env::temp_dir().join(format!(
             "agora-serve-patch-auth-{}",
             std::time::SystemTime::now()
@@ -3263,11 +3254,9 @@ mod tests {
                 .as_nanos()
         ));
         std::fs::create_dir_all(&home).unwrap();
-        unsafe {
-            std::env::set_var("HOME", &home);
-            std::env::set_var("AGORA_AGENT_ID", "serve-host");
-            std::env::set_var("AGORA_SANDBOX_SECRET", "serve-test-secret");
-        }
+        let _runtime = enter_serve_runtime(&home, "serve-host")
+            .var("AGORA_SANDBOX_SECRET", "serve-test-secret")
+            .enter();
 
         let room = store::add_room("ag-serve-test", "secret", "plaza", store::Role::Admin);
         let task_id = crate::chat::task_add_as("creator", "Ship API auth", None).unwrap();
@@ -3286,7 +3275,6 @@ mod tests {
 
     #[test]
     fn test_patch_tasks_uses_verified_bearer_identity() {
-        let _guard = crate::store::test_env_lock().lock().unwrap();
         let home = std::env::temp_dir().join(format!(
             "agora-serve-patch-identity-{}",
             std::time::SystemTime::now()
@@ -3295,11 +3283,9 @@ mod tests {
                 .as_nanos()
         ));
         std::fs::create_dir_all(&home).unwrap();
-        unsafe {
-            std::env::set_var("HOME", &home);
-            std::env::set_var("AGORA_AGENT_ID", "serve-host");
-            std::env::set_var("AGORA_SANDBOX_SECRET", "serve-test-secret");
-        }
+        let _runtime = enter_serve_runtime(&home, "serve-host")
+            .var("AGORA_SANDBOX_SECRET", "serve-test-secret")
+            .enter();
 
         let room = store::add_room("ag-serve-test", "secret", "plaza", store::Role::Admin);
         let task_id = crate::chat::task_add_as("creator", "Ship API auth", None).unwrap();
@@ -3335,7 +3321,6 @@ mod tests {
 
     #[test]
     fn test_patch_tasks_reject_reopens_task_for_verified_identity() {
-        let _guard = crate::store::test_env_lock().lock().unwrap();
         let home = std::env::temp_dir().join(format!(
             "agora-serve-patch-reject-{}",
             std::time::SystemTime::now()
@@ -3344,11 +3329,9 @@ mod tests {
                 .as_nanos()
         ));
         std::fs::create_dir_all(&home).unwrap();
-        unsafe {
-            std::env::set_var("HOME", &home);
-            std::env::set_var("AGORA_AGENT_ID", "serve-host");
-            std::env::set_var("AGORA_SANDBOX_SECRET", "serve-test-secret");
-        }
+        let _runtime = enter_serve_runtime(&home, "serve-host")
+            .var("AGORA_SANDBOX_SECRET", "serve-test-secret")
+            .enter();
 
         let room = store::add_room("ag-serve-test", "secret", "plaza", store::Role::Admin);
         let task_id = crate::chat::task_add_as("creator", "Review shady task", None).unwrap();
@@ -3378,7 +3361,6 @@ mod tests {
 
     #[test]
     fn test_sandbox_audit_endpoint_filters_to_verified_agent() {
-        let _guard = crate::store::test_env_lock().lock().unwrap();
         let home = std::env::temp_dir().join(format!(
             "agora-serve-sandbox-audit-{}",
             std::time::SystemTime::now()
@@ -3387,11 +3369,9 @@ mod tests {
                 .as_nanos()
         ));
         std::fs::create_dir_all(&home).unwrap();
-        unsafe {
-            std::env::set_var("HOME", &home);
-            std::env::set_var("AGORA_AGENT_ID", "serve-host");
-            std::env::set_var("AGORA_SANDBOX_SECRET", "serve-test-secret");
-        }
+        let _runtime = enter_serve_runtime(&home, "serve-host")
+            .var("AGORA_SANDBOX_SECRET", "serve-test-secret")
+            .enter();
 
         crate::store::append_sandbox_audit(&crate::store::SandboxAuditRecord {
             id: "audit-1".to_string(),

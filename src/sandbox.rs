@@ -6,6 +6,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::runtime;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SandboxSession {
     pub id: String,
@@ -18,7 +20,7 @@ pub struct SandboxSession {
 /// Load sandbox tokens from env vars OR ~/.agora/sandbox-tokens.json
 fn load_token(name: &str) -> Option<String> {
     // Env var first
-    if let Ok(val) = std::env::var(name)
+    if let Some(val) = runtime::var(name)
         && !val.is_empty()
     {
         return Some(val);
@@ -282,7 +284,7 @@ fn destroy_sprites(session_id: &str) -> Result<(), String> {
 /// Generate a time-limited sandbox access token for an agent.
 /// Token = base64(agent_id:expiry:HMAC(agent_id:expiry, server_secret))
 pub fn generate_agent_token(agent_id: &str, hours: u64) -> String {
-    let secret = std::env::var("AGORA_SANDBOX_SECRET").unwrap_or_else(|_| {
+    let secret = runtime::var("AGORA_SANDBOX_SECRET").unwrap_or_else(|| {
         eprintln!("  [warn] AGORA_SANDBOX_SECRET not set — using insecure default");
         "INSECURE-SET-AGORA_SANDBOX_SECRET".to_string()
     });
@@ -332,7 +334,7 @@ pub fn verify_agent_token(token: &str) -> Result<(String, u64), String> {
     }
 
     // Verify HMAC over canonical JSON
-    let secret = std::env::var("AGORA_SANDBOX_SECRET").unwrap_or_else(|_| {
+    let secret = runtime::var("AGORA_SANDBOX_SECRET").unwrap_or_else(|| {
         eprintln!("  [warn] AGORA_SANDBOX_SECRET not set — using insecure default");
         "INSECURE-SET-AGORA_SANDBOX_SECRET".to_string()
     });

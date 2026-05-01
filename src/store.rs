@@ -6,7 +6,7 @@
 //!   rooms.json                — room registry
 //!   identity.json             — agent identity
 
-use crate::crypto;
+use crate::{crypto, runtime};
 use base64::{
     Engine,
     engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
@@ -16,10 +16,9 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 pub fn agora_dir() -> PathBuf {
-    dirs::home_dir()
+    runtime::home_dir()
         .unwrap_or_else(|| PathBuf::from("/tmp"))
         .join(".agora")
 }
@@ -29,10 +28,7 @@ fn ensure_dir(path: &PathBuf) {
 }
 
 fn now() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_secs()
+    runtime::unix_now()
 }
 
 // ── Identity ────────────────────────────────────────────────────
@@ -44,7 +40,7 @@ fn now() -> u64 {
 
 pub fn get_agent_id() -> String {
     // Display alias override — not the authoritative identity, just cosmetic
-    if let Ok(id) = std::env::var("AGORA_AGENT_ID")
+    if let Some(id) = runtime::var("AGORA_AGENT_ID")
         && !id.is_empty()
     {
         return id;
@@ -76,7 +72,7 @@ pub fn get_agent_id() -> String {
         "agent_id": agent_id, // compat
         "public_key": hex::encode(&pubkey),
         "created_at": now(),
-        "ephemeral": std::env::var("AGORA_IDENTITY_SEED").is_err(),
+        "ephemeral": runtime::var("AGORA_IDENTITY_SEED").is_none(),
     });
     let _ = fs::write(&id_file, serde_json::to_string_pretty(&json).unwrap());
 
@@ -91,7 +87,7 @@ pub fn get_agent_id() -> String {
 fn generate_identity() -> (String, Vec<u8>) {
     // If seed phrase provided, derive keypair deterministically (portable identity).
     // HMAC-SHA256(key="agora-identity-v1", data=seed_phrase) -> 32-byte Ed25519 seed.
-    if let Ok(seed) = std::env::var("AGORA_IDENTITY_SEED") {
+    if let Some(seed) = runtime::var("AGORA_IDENTITY_SEED") {
         let hk = ring::hmac::Key::new(ring::hmac::HMAC_SHA256, b"agora-identity-v1");
         let derived = ring::hmac::sign(&hk, seed.as_bytes());
         let seed_bytes: [u8; 32] = derived.as_ref()[..32]
@@ -267,6 +263,10 @@ pub struct RoomEntry {
     #[serde(default)]
     pub topic: Option<String>,
     #[serde(default)]
+    pub purpose: Option<String>,
+    #[serde(default)]
+    pub dm_peer: Option<String>,
+    #[serde(default)]
     pub members: Vec<RoomMember>,
 }
 
@@ -305,6 +305,8 @@ pub fn add_room(room_id: &str, secret: &str, label: &str, role: Role) -> RoomEnt
         label: label.to_string(),
         joined_at: now(),
         topic: None,
+        purpose: None,
+        dm_peer: None,
         members: vec![RoomMember {
             agent_id,
             role,
@@ -328,6 +330,27 @@ pub fn update_room(room: &RoomEntry) {
     if changed {
         save_registry(&rooms);
     }
+}
+
+pub fn mark_dm_room(room_id: &str, peer_agent_id: &str) -> Result<RoomEntry, String> {
+    let mut rooms = load_registry();
+    if let Some(room) = rooms.iter_mut().find(|r| r.room_id == room_id) {
+        let mut changed = false;
+        if room.purpose.as_deref() != Some("dm") {
+            room.purpose = Some("dm".to_string());
+            changed = true;
+        }
+        if room.dm_peer.as_deref() != Some(peer_agent_id) {
+            room.dm_peer = Some(peer_agent_id.to_string());
+            changed = true;
+        }
+        let updated = room.clone();
+        if changed {
+            save_registry(&rooms);
+        }
+        return Ok(updated);
+    }
+    Err(format!("Room '{room_id}' not found."))
 }
 
 pub fn remove_member_from_room(room_id: &str, agent_id: &str) {
@@ -581,57 +604,6 @@ pub fn get_profile(room_id: &str, agent_id: &str) -> Option<AgentProfile> {
     load_profiles(room_id)
         .into_iter()
         .find(|p| p.agent_id == agent_id)
-}
-
-// ── Agent Capability Cards ─────────────────────────────────────
-
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct AgentCapabilityCard {
-    pub agent_id: String,
-    #[serde(default)]
-    pub capabilities: Vec<String>,
-    #[serde(default)]
-    pub summary: Option<String>,
-    pub updated_at: u64,
-    #[serde(default = "default_card_auth")]
-    pub auth: String,
-}
-
-fn default_card_auth() -> String {
-    "unsigned".to_string()
-}
-
-pub fn load_capability_cards(room_id: &str) -> Vec<AgentCapabilityCard> {
-    let path = agora_dir().join("rooms").join(room_id).join("cards.json");
-    if let Ok(data) = fs::read_to_string(&path) {
-        serde_json::from_str(&data).unwrap_or_default()
-    } else {
-        Vec::new()
-    }
-}
-
-pub fn save_capability_cards(room_id: &str, cards: &[AgentCapabilityCard]) {
-    let dir = agora_dir().join("rooms").join(room_id);
-    ensure_dir(&dir);
-    let data = serde_json::to_string_pretty(cards).unwrap();
-    let _ = fs::write(dir.join("cards.json"), data);
-}
-
-pub fn upsert_capability_card(room_id: &str, card: &AgentCapabilityCard) {
-    let mut cards = load_capability_cards(room_id);
-    if let Some(existing) = cards.iter_mut().find(|c| c.agent_id == card.agent_id) {
-        *existing = card.clone();
-    } else {
-        cards.push(card.clone());
-    }
-    save_capability_cards(room_id, &cards);
-}
-
-#[allow(dead_code)]
-pub fn get_capability_card(room_id: &str, agent_id: &str) -> Option<AgentCapabilityCard> {
-    load_capability_cards(room_id)
-        .into_iter()
-        .find(|c| c.agent_id == agent_id)
 }
 
 // ── Muted Agents ──────────────────────────────────────────────
@@ -932,7 +904,6 @@ pub fn load_card() -> Option<CapabilityCard> {
         .and_then(|d| serde_json::from_str(&d).ok())
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
 pub fn save_peer_card(room_id: &str, card: &CapabilityCard) {
     let dir = agora_dir().join("rooms").join(room_id).join("cards");
     ensure_dir(&dir);
@@ -1115,13 +1086,6 @@ pub fn save_payments(payments: &[PaymentRecord]) {
     );
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
-pub fn find_payment_by_stripe_id(stripe_id: &str) -> Option<PaymentRecord> {
-    load_payments()
-        .into_iter()
-        .find(|p| p.stripe_id.as_deref() == Some(stripe_id))
-}
-
 pub fn find_payment_by_reference(reference: &str) -> Option<PaymentRecord> {
     load_payments()
         .into_iter()
@@ -1246,110 +1210,6 @@ pub fn upsert_work_receipt(room_id: &str, receipt: &WorkReceipt) {
     }
     receipts.sort_by_key(|a| a.created_at);
     save_work_receipts(room_id, &receipts);
-}
-
-// ── Sandbox Leases ─────────────────────────────────────────────
-
-/// Maximum duration an active lease can exist before being considered stale on recovery.
-#[cfg_attr(not(test), allow(dead_code))]
-pub const MAX_LEASE_SECS: u64 = 3600; // 1 hour
-
-#[cfg_attr(not(test), allow(dead_code))]
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "snake_case")]
-pub enum LeaseStatus {
-    Active,
-    Closed,
-}
-
-/// Tracks credit authorization for a single sandbox session.
-/// Persisted so crash recovery can detect and close stale leases.
-#[cfg_attr(not(test), allow(dead_code))]
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SandboxLease {
-    pub id: String, // matches SandboxSession.id
-    pub agent_id: String,
-    pub max_cost_credits: i64,
-    pub credits_per_minute: i64,
-    pub started_at: u64, // unix timestamp
-    pub status: LeaseStatus,
-    #[serde(default)]
-    pub actual_cost: Option<i64>, // set when closed
-    #[serde(default)]
-    pub closed_at: Option<u64>,
-}
-
-#[cfg_attr(not(test), allow(dead_code))]
-pub fn load_leases(room_id: &str) -> Vec<SandboxLease> {
-    let path = agora_dir()
-        .join("rooms")
-        .join(room_id)
-        .join("sandbox_leases.json");
-    if let Ok(data) = fs::read_to_string(&path) {
-        serde_json::from_str(&data).unwrap_or_default()
-    } else {
-        Vec::new()
-    }
-}
-
-#[cfg_attr(not(test), allow(dead_code))]
-pub fn save_leases(room_id: &str, leases: &[SandboxLease]) {
-    let dir = agora_dir().join("rooms").join(room_id);
-    ensure_dir(&dir);
-    let data = serde_json::to_string_pretty(leases).unwrap();
-    let _ = fs::write(dir.join("sandbox_leases.json"), data);
-}
-
-/// Open a new lease. Returns Err if the agent already has an active lease in this room.
-#[cfg_attr(not(test), allow(dead_code))]
-pub fn open_lease(room_id: &str, lease: SandboxLease) -> Result<(), String> {
-    let mut leases = load_leases(room_id);
-    if leases
-        .iter()
-        .any(|l| l.agent_id == lease.agent_id && l.status == LeaseStatus::Active)
-    {
-        return Err(format!(
-            "Agent {} already has an active lease",
-            lease.agent_id
-        ));
-    }
-    leases.push(lease);
-    save_leases(room_id, &leases);
-    Ok(())
-}
-
-/// Close an existing lease with the actual cost incurred.
-#[cfg_attr(not(test), allow(dead_code))]
-pub fn close_lease(room_id: &str, lease_id: &str, actual_cost: i64) {
-    let mut leases = load_leases(room_id);
-    if let Some(lease) = leases.iter_mut().find(|l| l.id == lease_id) {
-        lease.status = LeaseStatus::Closed;
-        lease.actual_cost = Some(actual_cost);
-        lease.closed_at = Some(now());
-    }
-    save_leases(room_id, &leases);
-}
-
-/// On startup: scan all rooms for active leases older than MAX_LEASE_SECS and close them
-/// at ceiling cost (penalizes ungraceful shutdown, prevents credit escrow leaks).
-/// Returns the number of stale leases recovered.
-#[cfg_attr(not(test), allow(dead_code))]
-pub fn recover_stale_leases(room_id: &str) -> Vec<SandboxLease> {
-    let cutoff = now().saturating_sub(MAX_LEASE_SECS);
-    let mut leases = load_leases(room_id);
-    let mut recovered = Vec::new();
-    for lease in leases.iter_mut() {
-        if lease.status == LeaseStatus::Active && lease.started_at < cutoff {
-            lease.status = LeaseStatus::Closed;
-            lease.actual_cost = Some(lease.max_cost_credits); // charge ceiling
-            lease.closed_at = Some(now());
-            recovered.push(lease.clone());
-        }
-    }
-    if !recovered.is_empty() {
-        save_leases(room_id, &leases);
-    }
-    recovered
 }
 
 // ── Role Leases ────────────────────────────────────────────────
@@ -1574,55 +1434,36 @@ pub fn mark_seen(room_id: &str, msg_id: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::env;
+    use crate::runtime;
 
     fn test_home(name: &str) -> PathBuf {
         std::env::temp_dir().join(format!("agora-store-{name}-{}", std::process::id()))
     }
 
-    #[test]
-    fn update_last_seen_does_not_clobber_invalid_registry() {
-        let _guard = test_env_lock().lock().unwrap();
-        let home = test_home("invalid-registry");
+    fn enter_test_home(name: &str) -> (runtime::TestRuntimeGuard, PathBuf, PathBuf) {
+        let home = test_home(name);
         let agora = home.join(".agora");
         let _ = fs::remove_dir_all(&home);
         fs::create_dir_all(&agora).unwrap();
-        fs::write(agora.join("rooms.json"), "{not-json").unwrap();
+        let runtime = runtime::TestRuntime::new().home(&home).enter();
+        (runtime, home, agora)
+    }
 
-        let old_home = env::var("HOME").ok();
-        unsafe {
-            env::set_var("HOME", &home);
-        }
+    #[test]
+    fn update_last_seen_does_not_clobber_invalid_registry() {
+        let (_runtime, home, agora) = enter_test_home("invalid-registry");
+        fs::write(agora.join("rooms.json"), "{not-json").unwrap();
 
         update_last_seen("missing-room", "agent-1");
 
         let persisted = fs::read_to_string(agora.join("rooms.json")).unwrap();
         assert_eq!(persisted, "{not-json");
-
-        if let Some(old) = old_home {
-            unsafe {
-                env::set_var("HOME", old);
-            }
-        } else {
-            unsafe {
-                env::remove_var("HOME");
-            }
-        }
         let _ = fs::remove_dir_all(&home);
     }
 
     #[test]
     fn save_registry_persists_valid_json() {
-        let _guard = test_env_lock().lock().unwrap();
-        let home = test_home("atomic-save");
-        let agora = home.join(".agora");
-        let _ = fs::remove_dir_all(&home);
-        fs::create_dir_all(&agora).unwrap();
-
-        let old_home = env::var("HOME").ok();
-        unsafe {
-            env::set_var("HOME", &home);
-        }
+        let (_runtime, home, agora) = enter_test_home("atomic-save");
 
         let room = RoomEntry {
             room_id: "room-1".to_string(),
@@ -1630,6 +1471,8 @@ mod tests {
             label: "plaza".to_string(),
             joined_at: 1,
             topic: None,
+            purpose: None,
+            dm_peer: None,
             members: vec![],
         };
         save_registry(&[room]);
@@ -1638,31 +1481,12 @@ mod tests {
         let parsed: Vec<RoomEntry> = serde_json::from_str(&persisted).unwrap();
         assert_eq!(parsed.len(), 1);
         assert_eq!(parsed[0].label, "plaza");
-
-        if let Some(old) = old_home {
-            unsafe {
-                env::set_var("HOME", old);
-            }
-        } else {
-            unsafe {
-                env::remove_var("HOME");
-            }
-        }
         let _ = fs::remove_dir_all(&home);
     }
 
     #[test]
     fn payment_record_round_trips() {
-        let _guard = test_env_lock().lock().unwrap();
-        let home = test_home("payment-rt");
-        let agora = home.join(".agora");
-        let _ = fs::remove_dir_all(&home);
-        fs::create_dir_all(&agora).unwrap();
-
-        let old_home = env::var("HOME").ok();
-        unsafe {
-            env::set_var("HOME", &home);
-        }
+        let (_runtime, home, _agora) = enter_test_home("payment-rt");
 
         let record = PaymentRecord {
             id: "pay-test-001".to_string(),
@@ -1688,26 +1512,23 @@ mod tests {
         assert!(matches!(loaded[0].kind, PaymentKind::Deposit));
         assert!(matches!(loaded[0].status, PaymentStatus::Pending));
 
-        // find_payment_by_stripe_id
-        let found = find_payment_by_stripe_id("cs_test_abc123");
-        assert!(found.is_some());
-        assert_eq!(found.unwrap().id, "pay-test-001");
-
-        let not_found = find_payment_by_stripe_id("nonexistent");
-        assert!(not_found.is_none());
-
         let found_by_reference = find_payment_by_reference("cs_test_abc123");
         assert!(found_by_reference.is_some());
+        let _ = fs::remove_dir_all(&home);
+    }
 
-        if let Some(old) = old_home {
-            unsafe {
-                env::set_var("HOME", old);
-            }
-        } else {
-            unsafe {
-                env::remove_var("HOME");
-            }
-        }
+    #[test]
+    fn mark_dm_room_persists_metadata() {
+        let (_runtime, home, _agora) = enter_test_home("mark-dm-room");
+
+        add_room("ag-dm-1", "secret", "dm-agent-a-agent-b", Role::Admin);
+        let room = mark_dm_room("ag-dm-1", "agent-b").unwrap();
+        assert_eq!(room.purpose.as_deref(), Some("dm"));
+        assert_eq!(room.dm_peer.as_deref(), Some("agent-b"));
+
+        let persisted = find_room("ag-dm-1").unwrap();
+        assert_eq!(persisted.purpose.as_deref(), Some("dm"));
+        assert_eq!(persisted.dm_peer.as_deref(), Some("agent-b"));
         let _ = fs::remove_dir_all(&home);
     }
 
@@ -1734,16 +1555,7 @@ mod tests {
 
     #[test]
     fn sandbox_audit_round_trips() {
-        let _guard = test_env_lock().lock().unwrap();
-        let home = test_home("sandbox-audit");
-        let agora = home.join(".agora");
-        let _ = fs::remove_dir_all(&home);
-        fs::create_dir_all(&agora).unwrap();
-
-        let old_home = env::var("HOME").ok();
-        unsafe {
-            env::set_var("HOME", &home);
-        }
+        let (_runtime, home, _agora) = enter_test_home("sandbox-audit");
 
         let record = SandboxAuditRecord {
             id: "audit-1".to_string(),
@@ -1767,259 +1579,46 @@ mod tests {
         assert_eq!(loaded[0].room_id.as_deref(), Some("room-1"));
         assert_eq!(loaded[0].action, "exec");
         assert_eq!(loaded[0].command_len, Some(12));
-
-        if let Some(old) = old_home {
-            unsafe {
-                env::set_var("HOME", old);
-            }
-        } else {
-            unsafe {
-                env::remove_var("HOME");
-            }
-        }
-        let _ = fs::remove_dir_all(&home);
-    }
-
-    #[test]
-    fn sandbox_lease_open_close_roundtrip() {
-        let _guard = test_env_lock().lock().unwrap();
-        let home = test_home("lease-roundtrip");
-        let agora = home.join(".agora");
-        let _ = fs::remove_dir_all(&home);
-        fs::create_dir_all(&agora).unwrap();
-        let old_home = env::var("HOME").ok();
-        unsafe {
-            env::set_var("HOME", &home);
-        }
-
-        let lease = SandboxLease {
-            id: "sandbox-1".to_string(),
-            agent_id: "agent-1".to_string(),
-            max_cost_credits: 100,
-            credits_per_minute: 5,
-            started_at: now(),
-            status: LeaseStatus::Active,
-            actual_cost: None,
-            closed_at: None,
-        };
-        open_lease("room-1", lease).unwrap();
-        close_lease("room-1", "sandbox-1", 42);
-
-        let leases = load_leases("room-1");
-        assert_eq!(leases.len(), 1);
-        assert_eq!(leases[0].status, LeaseStatus::Closed);
-        assert_eq!(leases[0].actual_cost, Some(42));
-
-        if let Some(old) = old_home {
-            unsafe {
-                env::set_var("HOME", old);
-            }
-        } else {
-            unsafe {
-                env::remove_var("HOME");
-            }
-        }
-        let _ = fs::remove_dir_all(&home);
-    }
-
-    #[test]
-    fn sandbox_lease_rejects_duplicate_active() {
-        let _guard = test_env_lock().lock().unwrap();
-        let home = test_home("lease-duplicate");
-        let agora = home.join(".agora");
-        let _ = fs::remove_dir_all(&home);
-        fs::create_dir_all(&agora).unwrap();
-        let old_home = env::var("HOME").ok();
-        unsafe {
-            env::set_var("HOME", &home);
-        }
-
-        let lease = SandboxLease {
-            id: "sandbox-1".to_string(),
-            agent_id: "agent-1".to_string(),
-            max_cost_credits: 100,
-            credits_per_minute: 5,
-            started_at: now(),
-            status: LeaseStatus::Active,
-            actual_cost: None,
-            closed_at: None,
-        };
-        open_lease("room-1", lease.clone()).unwrap();
-        let second = SandboxLease {
-            id: "sandbox-2".to_string(),
-            ..lease
-        };
-        assert!(open_lease("room-1", second).is_err());
-
-        if let Some(old) = old_home {
-            unsafe {
-                env::set_var("HOME", old);
-            }
-        } else {
-            unsafe {
-                env::remove_var("HOME");
-            }
-        }
-        let _ = fs::remove_dir_all(&home);
-    }
-
-    #[test]
-    fn recover_stale_leases_charges_ceiling() {
-        let _guard = test_env_lock().lock().unwrap();
-        let home = test_home("lease-stale");
-        let agora = home.join(".agora");
-        let _ = fs::remove_dir_all(&home);
-        fs::create_dir_all(&agora).unwrap();
-        let old_home = env::var("HOME").ok();
-        unsafe {
-            env::set_var("HOME", &home);
-        }
-
-        // A lease that started well beyond MAX_LEASE_SECS ago
-        let stale_lease = SandboxLease {
-            id: "stale-sandbox".to_string(),
-            agent_id: "agent-crash".to_string(),
-            max_cost_credits: 200,
-            credits_per_minute: 10,
-            started_at: now().saturating_sub(MAX_LEASE_SECS + 60),
-            status: LeaseStatus::Active,
-            actual_cost: None,
-            closed_at: None,
-        };
-        // A fresh lease that should NOT be recovered
-        let fresh_lease = SandboxLease {
-            id: "fresh-sandbox".to_string(),
-            agent_id: "agent-ok".to_string(),
-            max_cost_credits: 50,
-            credits_per_minute: 2,
-            started_at: now(),
-            status: LeaseStatus::Active,
-            actual_cost: None,
-            closed_at: None,
-        };
-
-        let leases = vec![stale_lease, fresh_lease];
-        save_leases("room-1", &leases);
-
-        let recovered = recover_stale_leases("room-1");
-        assert_eq!(recovered.len(), 1);
-        assert_eq!(recovered[0].id, "stale-sandbox");
-        assert_eq!(recovered[0].actual_cost, Some(200)); // charged ceiling
-
-        let persisted = load_leases("room-1");
-        // stale is closed, fresh is still active
-        let stale = persisted.iter().find(|l| l.id == "stale-sandbox").unwrap();
-        let fresh = persisted.iter().find(|l| l.id == "fresh-sandbox").unwrap();
-        assert_eq!(stale.status, LeaseStatus::Closed);
-        assert_eq!(fresh.status, LeaseStatus::Active);
-
-        if let Some(old) = old_home {
-            unsafe {
-                env::set_var("HOME", old);
-            }
-        } else {
-            unsafe {
-                env::remove_var("HOME");
-            }
-        }
         let _ = fs::remove_dir_all(&home);
     }
 
     #[test]
     fn atomic_credit_debit_succeeds_with_sufficient_balance() {
-        let _guard = test_env_lock().lock().unwrap();
-        let home = test_home("debit-ok");
-        let _ = fs::remove_dir_all(&home);
-        fs::create_dir_all(home.join(".agora")).unwrap();
-        let old_home = env::var("HOME").ok();
-        unsafe {
-            env::set_var("HOME", &home);
-        }
+        let (_runtime, home, _agora) = enter_test_home("debit-ok");
 
         credit_add("room-1", "agent-1", 50, "seed");
         let result = atomic_credit_debit("room-1", "agent-1", 10, "sandbox:open");
         assert_eq!(result, Ok(40));
         assert_eq!(credit_balance("room-1", "agent-1"), 40);
-
-        if let Some(old) = old_home {
-            unsafe {
-                env::set_var("HOME", old);
-            }
-        } else {
-            unsafe {
-                env::remove_var("HOME");
-            }
-        }
         let _ = fs::remove_dir_all(&home);
     }
 
     #[test]
     fn atomic_credit_debit_rejects_insufficient_balance() {
-        let _guard = test_env_lock().lock().unwrap();
-        let home = test_home("debit-fail");
-        let _ = fs::remove_dir_all(&home);
-        fs::create_dir_all(home.join(".agora")).unwrap();
-        let old_home = env::var("HOME").ok();
-        unsafe {
-            env::set_var("HOME", &home);
-        }
+        let (_runtime, home, _agora) = enter_test_home("debit-fail");
 
         credit_add("room-1", "agent-1", 5, "seed");
         let result = atomic_credit_debit("room-1", "agent-1", 10, "sandbox:open");
         assert!(result.is_err());
         // Balance must be unchanged after a failed debit
         assert_eq!(credit_balance("room-1", "agent-1"), 5);
-
-        if let Some(old) = old_home {
-            unsafe {
-                env::set_var("HOME", old);
-            }
-        } else {
-            unsafe {
-                env::remove_var("HOME");
-            }
-        }
         let _ = fs::remove_dir_all(&home);
     }
 
     #[test]
     fn atomic_credit_debit_rejects_zero_balance() {
-        let _guard = test_env_lock().lock().unwrap();
-        let home = test_home("debit-zero");
-        let _ = fs::remove_dir_all(&home);
-        fs::create_dir_all(home.join(".agora")).unwrap();
-        let old_home = env::var("HOME").ok();
-        unsafe {
-            env::set_var("HOME", &home);
-        }
+        let (_runtime, home, _agora) = enter_test_home("debit-zero");
 
         // No credits added — debit must fail
         let result = atomic_credit_debit("room-1", "agent-1", 1, "sandbox:open");
         assert!(result.is_err());
         assert_eq!(credit_balance("room-1", "agent-1"), 0);
-
-        if let Some(old) = old_home {
-            unsafe {
-                env::set_var("HOME", old);
-            }
-        } else {
-            unsafe {
-                env::remove_var("HOME");
-            }
-        }
         let _ = fs::remove_dir_all(&home);
     }
 
     #[test]
     fn atomic_credit_debit_drains_to_zero() {
-        let _guard = test_env_lock().lock().unwrap();
-        let home = test_home("debit-drain");
-        let _ = fs::remove_dir_all(&home);
-        fs::create_dir_all(home.join(".agora")).unwrap();
-        let old_home = env::var("HOME").ok();
-        unsafe {
-            env::set_var("HOME", &home);
-        }
+        let (_runtime, home, _agora) = enter_test_home("debit-drain");
 
         credit_add("room-1", "agent-1", 10, "seed");
         let result = atomic_credit_debit("room-1", "agent-1", 10, "sandbox:open");
@@ -2027,16 +1626,6 @@ mod tests {
         // Next debit must fail
         let second = atomic_credit_debit("room-1", "agent-1", 1, "sandbox:open");
         assert!(second.is_err());
-
-        if let Some(old) = old_home {
-            unsafe {
-                env::set_var("HOME", old);
-            }
-        } else {
-            unsafe {
-                env::remove_var("HOME");
-            }
-        }
         let _ = fs::remove_dir_all(&home);
     }
 }
