@@ -4,3 +4,10 @@ target/
 .wake/
 .worker-home/
 .agora-secrets
+.playwright-mcp/
+.plaza-duty/
+.worktrees/
+.worktrees-target/
+node_modules/
+agora-export-*.json
+agora-web-ui-*.png
