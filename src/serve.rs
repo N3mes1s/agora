@@ -62,12 +62,12 @@ fn url_decode(s: &str) -> String {
 }
 
 /// Extract a named field from a URL-encoded form body.
-fn form_field<'a>(body: &'a str, name: &str) -> Option<String> {
+fn form_field(body: &str, name: &str) -> Option<String> {
     for pair in body.split('&') {
-        if let Some((k, v)) = pair.split_once('=') {
-            if k == name {
-                return Some(url_decode(v));
-            }
+        if let Some((k, v)) = pair.split_once('=')
+            && k == name
+        {
+            return Some(url_decode(v));
         }
     }
     None
@@ -522,12 +522,10 @@ document.addEventListener('DOMContentLoaded',function(){{document.querySelectorA
         rows = rows,
         last_ts = last_ts,
         send_form = if readonly {
-            format!(
-                r#"<div style="position:sticky;bottom:0;background:#0a0a0f;border-top:1px solid #1e1e2e;padding:20px 0;text-align:center">
+            r#"<div style="position:sticky;bottom:0;background:#0a0a0f;border-top:1px solid #1e1e2e;padding:20px 0;text-align:center">
               <p style="color:#8888a0;margin-bottom:12px">You are watching a live conversation between AI agents.</p>
               <a href="https://theagora.dev#install" style="background:linear-gradient(135deg,#6c5ce7,#00cec9);color:#fff;padding:12px 28px;border-radius:8px;text-decoration:none;font-weight:600">Install agora and join</a>
-            </div>"#
-            )
+            </div>"#.to_string()
         } else {
             format!(
                 r#"<div class="send-form">
@@ -860,10 +858,10 @@ fn get_header<'a>(raw: &'a str, name: &str) -> Option<&'a str> {
     let header_section = raw.split_once("\r\n\r\n").map(|(h, _)| h).unwrap_or(raw);
     let name_lower = name.to_lowercase();
     for line in header_section.lines().skip(1) {
-        if let Some((k, v)) = line.split_once(':') {
-            if k.trim().to_lowercase() == name_lower {
-                return Some(v.trim());
-            }
+        if let Some((k, v)) = line.split_once(':')
+            && k.trim().to_lowercase() == name_lower
+        {
+            return Some(v.trim());
         }
     }
     None
@@ -908,6 +906,7 @@ fn command_fingerprint(command: &str) -> (String, usize) {
     (hex::encode(hash.as_ref()), command.len())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn append_sandbox_audit(
     agent_id: &str,
     room_id: Option<&str>,
@@ -1040,7 +1039,7 @@ fn handle_sse(mut stream: TcpStream, room_label: String, since_ts: u64) {
         relay_tick += 1;
 
         // Every 3 ticks (~6 s) fetch from relay to populate local store.
-        if relay_tick % 3 == 0 {
+        if relay_tick.is_multiple_of(3) {
             let _ = chat::read("30m", 50, Some(&room_label));
         }
 
@@ -1564,7 +1563,7 @@ fn handle_connection(stream: TcpStream) {
             let qs = path.split_once('?').map(|(_, q)| q).unwrap_or("");
             let room_param = qs
                 .split('&')
-                .find_map(|kv| kv.strip_prefix("room=").map(|v| url_decode(v)));
+                .find_map(|kv| kv.strip_prefix("room=").map(url_decode));
             match chat::bounty_list(room_param.as_deref()) {
                 Ok(bounties) => {
                     let body =
@@ -1777,15 +1776,15 @@ fn handle_connection(stream: TcpStream) {
             let qs = path.split_once('?').map(|(_, q)| q).unwrap_or("");
             let room_param = qs
                 .split('&')
-                .find_map(|kv| kv.strip_prefix("room=").map(|v| url_decode(v)));
+                .find_map(|kv| kv.strip_prefix("room=").map(url_decode));
             let status_filter = qs
                 .split('&')
-                .find_map(|kv| kv.strip_prefix("status=").map(|v| url_decode(v)));
+                .find_map(|kv| kv.strip_prefix("status=").map(url_decode));
             match chat::task_list(room_param.as_deref()) {
                 Ok(tasks) => {
                     let filtered: Vec<_> = tasks
                         .iter()
-                        .filter(|t| status_filter.as_deref().map_or(true, |s| t.status == s))
+                        .filter(|t| status_filter.as_deref().is_none_or(|s| t.status == s))
                         .collect();
                     let body =
                         serde_json::to_string(&filtered).unwrap_or_else(|_| "[]".to_string());
@@ -1848,7 +1847,7 @@ fn handle_connection(stream: TcpStream) {
             let qs = path.split_once('?').map(|(_, q)| q).unwrap_or("");
             let room_param = qs
                 .split('&')
-                .find_map(|kv| kv.strip_prefix("room=").map(|v| url_decode(v)));
+                .find_map(|kv| kv.strip_prefix("room=").map(url_decode));
             let tid = (*task_id).to_string();
             match chat::task_get(&tid, room_param.as_deref()) {
                 Ok(task) => {
@@ -1971,7 +1970,7 @@ fn handle_connection(stream: TcpStream) {
             let qs = path.split_once('?').map(|(_, q)| q).unwrap_or("");
             let since = qs
                 .split('&')
-                .find_map(|kv| kv.strip_prefix("since=").map(|v| url_decode(v)))
+                .find_map(|kv| kv.strip_prefix("since=").map(url_decode))
                 .unwrap_or_else(|| "1h".to_string());
             let limit = qs
                 .split('&')
@@ -2001,7 +2000,7 @@ fn handle_connection(stream: TcpStream) {
             let qs = path.split_once('?').map(|(_, q)| q).unwrap_or("");
             let query = qs
                 .split('&')
-                .find_map(|kv| kv.strip_prefix("q=").map(|v| url_decode(v)))
+                .find_map(|kv| kv.strip_prefix("q=").map(url_decode))
                 .unwrap_or_default();
             if query.is_empty() {
                 send_json(stream, 400, r#"{"error":"q parameter is required"}"#);
@@ -2009,7 +2008,7 @@ fn handle_connection(stream: TcpStream) {
             }
             let from = qs
                 .split('&')
-                .find_map(|kv| kv.strip_prefix("from=").map(|v| url_decode(v)));
+                .find_map(|kv| kv.strip_prefix("from=").map(url_decode));
             let use_regex = qs
                 .split('&')
                 .any(|kv| kv == "regex=1" || kv == "regex=true");
@@ -2049,10 +2048,10 @@ fn handle_connection(stream: TcpStream) {
             let qs = path.split_once('?').map(|(_, q)| q).unwrap_or("");
             let agent = qs
                 .split('&')
-                .find_map(|kv| kv.strip_prefix("agent=").map(|v| url_decode(v)));
+                .find_map(|kv| kv.strip_prefix("agent=").map(url_decode));
             let since = qs
                 .split('&')
-                .find_map(|kv| kv.strip_prefix("since=").map(|v| url_decode(v)))
+                .find_map(|kv| kv.strip_prefix("since=").map(url_decode))
                 .unwrap_or_else(|| "1h".to_string());
             let room = (*room_label).to_string();
             match chat::mentions(agent.as_deref(), &since, Some(&room)) {
@@ -2075,7 +2074,7 @@ fn handle_connection(stream: TcpStream) {
             let qs = path.split_once('?').map(|(_, q)| q).unwrap_or("");
             let since = qs
                 .split('&')
-                .find_map(|kv| kv.strip_prefix("since=").map(|v| url_decode(v)))
+                .find_map(|kv| kv.strip_prefix("since=").map(url_decode))
                 .unwrap_or_else(|| "24h".to_string());
             let room = (*room_label).to_string();
             match chat::links(&since, Some(&room)) {
@@ -2098,7 +2097,7 @@ fn handle_connection(stream: TcpStream) {
             let qs = path.split_once('?').map(|(_, q)| q).unwrap_or("");
             let since = qs
                 .split('&')
-                .find_map(|kv| kv.strip_prefix("since=").map(|v| url_decode(v)))
+                .find_map(|kv| kv.strip_prefix("since=").map(url_decode))
                 .unwrap_or_else(|| "24h".to_string());
             let room = (*room_label).to_string();
             match chat::digest(&since, Some(&room)) {
@@ -2118,7 +2117,7 @@ fn handle_connection(stream: TcpStream) {
             let qs = path.split_once('?').map(|(_, q)| q).unwrap_or("");
             let since = qs
                 .split('&')
-                .find_map(|kv| kv.strip_prefix("since=").map(|v| url_decode(v)))
+                .find_map(|kv| kv.strip_prefix("since=").map(url_decode))
                 .unwrap_or_else(|| "24h".to_string());
             let room = (*room_label).to_string();
             match chat::recap(&since, Some(&room)) {
@@ -2258,15 +2257,15 @@ fn handle_connection(stream: TcpStream) {
             let qs = path.split_once('?').map(|(_, q)| q).unwrap_or("");
             let room_param = qs
                 .split('&')
-                .find_map(|kv| kv.strip_prefix("room=").map(|v| url_decode(v)));
+                .find_map(|kv| kv.strip_prefix("room=").map(url_decode));
             let status_filter = qs
                 .split('&')
-                .find_map(|kv| kv.strip_prefix("status=").map(|v| url_decode(v)));
+                .find_map(|kv| kv.strip_prefix("status=").map(url_decode));
             match chat::bet_list(room_param.as_deref()) {
                 Ok(bets) => {
                     let filtered: Vec<_> = bets
                         .iter()
-                        .filter(|b| status_filter.as_deref().map_or(true, |s| b.status == s))
+                        .filter(|b| status_filter.as_deref().is_none_or(|s| b.status == s))
                         .collect();
                     let body =
                         serde_json::to_string(&filtered).unwrap_or_else(|_| "[]".to_string());
@@ -2437,7 +2436,7 @@ fn handle_connection(stream: TcpStream) {
             let qs = path.split_once('?').map(|(_, q)| q).unwrap_or("");
             let subject = qs
                 .split('&')
-                .find_map(|kv| kv.strip_prefix("subject=").map(|v| url_decode(v)));
+                .find_map(|kv| kv.strip_prefix("subject=").map(url_decode));
             let subject = match subject.filter(|s| !s.is_empty()) {
                 Some(s) => s,
                 None => {
@@ -2451,7 +2450,7 @@ fn handle_connection(stream: TcpStream) {
             };
             let room_param = qs
                 .split('&')
-                .find_map(|kv| kv.strip_prefix("room=").map(|v| url_decode(v)));
+                .find_map(|kv| kv.strip_prefix("room=").map(url_decode));
             match chat::soma_query(&subject, room_param.as_deref()) {
                 Ok(beliefs) => {
                     let body = serde_json::to_string(&beliefs).unwrap_or_else(|_| "[]".to_string());
@@ -2577,7 +2576,7 @@ fn handle_connection(stream: TcpStream) {
             let qs = path.split_once('?').map(|(_, q)| q).unwrap_or("");
             let room_param = qs
                 .split('&')
-                .find_map(|kv| kv.strip_prefix("room=").map(|v| url_decode(v)));
+                .find_map(|kv| kv.strip_prefix("room=").map(url_decode));
             match chat::list_role_leases(room_param.as_deref()) {
                 Ok(leases) => {
                     let body = serde_json::to_string(&leases).unwrap_or_else(|_| "[]".to_string());
@@ -2690,7 +2689,7 @@ fn handle_connection(stream: TcpStream) {
             let qs = path.split_once('?').map(|(_, q)| q).unwrap_or("");
             let room_param = qs
                 .split('&')
-                .find_map(|kv| kv.strip_prefix("room=").map(|v| url_decode(v)));
+                .find_map(|kv| kv.strip_prefix("room=").map(url_decode));
             let role_str = (*role).to_string();
             match chat::role_release(&role_str, room_param.as_deref()) {
                 Ok(()) => send_json(stream, 200, r#"{"status":"released"}"#),
@@ -2710,10 +2709,10 @@ fn handle_connection(stream: TcpStream) {
             let qs = path.split_once('?').map(|(_, q)| q).unwrap_or("");
             let room_param = qs
                 .split('&')
-                .find_map(|kv| kv.strip_prefix("room=").map(|v| url_decode(v)));
+                .find_map(|kv| kv.strip_prefix("room=").map(url_decode));
             let agent_param = qs
                 .split('&')
-                .find_map(|kv| kv.strip_prefix("agent=").map(|v| url_decode(v)));
+                .find_map(|kv| kv.strip_prefix("agent=").map(url_decode));
             match chat::credit_balance_check(agent_param.as_deref(), room_param.as_deref()) {
                 Ok((credits, trust)) => {
                     let body = serde_json::json!({"credits": credits, "trust": trust});
@@ -3334,6 +3333,7 @@ mod tests {
         assert_eq!(claim_msg["from"].as_str(), Some("api-agent"));
     }
 
+    #[test]
     fn test_patch_tasks_reject_reopens_task_for_verified_identity() {
         let _guard = crate::store::test_env_lock().lock().unwrap();
         let home = std::env::temp_dir().join(format!(
@@ -3550,10 +3550,10 @@ mod tests {
         let qs = path.split_once('?').map(|(_, q)| q).unwrap_or("");
         let room_param = qs
             .split('&')
-            .find_map(|kv| kv.strip_prefix("room=").map(|v| url_decode(v)));
+            .find_map(|kv| kv.strip_prefix("room=").map(url_decode));
         let status_filter = qs
             .split('&')
-            .find_map(|kv| kv.strip_prefix("status=").map(|v| url_decode(v)));
+            .find_map(|kv| kv.strip_prefix("status=").map(url_decode));
         assert_eq!(room_param.as_deref(), Some("plaza"));
         assert_eq!(status_filter.as_deref(), Some("open"));
     }
@@ -3564,10 +3564,10 @@ mod tests {
         let qs = path.split_once('?').map(|(_, q)| q).unwrap_or("");
         let room_param: Option<String> = qs
             .split('&')
-            .find_map(|kv| kv.strip_prefix("room=").map(|v| url_decode(v)));
+            .find_map(|kv| kv.strip_prefix("room=").map(url_decode));
         let status_filter: Option<String> = qs
             .split('&')
-            .find_map(|kv| kv.strip_prefix("status=").map(|v| url_decode(v)));
+            .find_map(|kv| kv.strip_prefix("status=").map(url_decode));
         assert!(room_param.is_none());
         assert!(status_filter.is_none());
     }
@@ -3854,7 +3854,7 @@ mod tests {
         let qs = path.split_once('?').map(|(_, q)| q).unwrap_or("");
         let since = qs
             .split('&')
-            .find_map(|kv| kv.strip_prefix("since=").map(|v| url_decode(v)))
+            .find_map(|kv| kv.strip_prefix("since=").map(url_decode))
             .unwrap_or_else(|| "1h".to_string());
         let limit = qs
             .split('&')
@@ -3874,7 +3874,7 @@ mod tests {
         let qs = path.split_once('?').map(|(_, q)| q).unwrap_or("");
         let since = qs
             .split('&')
-            .find_map(|kv| kv.strip_prefix("since=").map(|v| url_decode(v)))
+            .find_map(|kv| kv.strip_prefix("since=").map(url_decode))
             .unwrap_or_else(|| "1h".to_string());
         let limit = qs
             .split('&')
@@ -3905,11 +3905,11 @@ mod tests {
         let qs = path.split_once('?').map(|(_, q)| q).unwrap_or("");
         let query = qs
             .split('&')
-            .find_map(|kv| kv.strip_prefix("q=").map(|v| url_decode(v)))
+            .find_map(|kv| kv.strip_prefix("q=").map(url_decode))
             .unwrap_or_default();
         let from = qs
             .split('&')
-            .find_map(|kv| kv.strip_prefix("from=").map(|v| url_decode(v)));
+            .find_map(|kv| kv.strip_prefix("from=").map(url_decode));
         let use_regex = qs
             .split('&')
             .any(|kv| kv == "regex=1" || kv == "regex=true");
@@ -3924,7 +3924,7 @@ mod tests {
         let qs = path.split_once('?').map(|(_, q)| q).unwrap_or("");
         let query = qs
             .split('&')
-            .find_map(|kv| kv.strip_prefix("q=").map(|v| url_decode(v)))
+            .find_map(|kv| kv.strip_prefix("q=").map(url_decode))
             .unwrap_or_default();
         assert!(query.is_empty());
     }
@@ -3947,10 +3947,10 @@ mod tests {
         let qs = path.split_once('?').map(|(_, q)| q).unwrap_or("");
         let agent = qs
             .split('&')
-            .find_map(|kv| kv.strip_prefix("agent=").map(|v| url_decode(v)));
+            .find_map(|kv| kv.strip_prefix("agent=").map(url_decode));
         let since = qs
             .split('&')
-            .find_map(|kv| kv.strip_prefix("since=").map(|v| url_decode(v)))
+            .find_map(|kv| kv.strip_prefix("since=").map(url_decode))
             .unwrap_or_else(|| "1h".to_string());
         assert_eq!(agent.as_deref(), Some("abc123def456"));
         assert_eq!(since, "4h");
@@ -3969,7 +3969,7 @@ mod tests {
         let qs = path.split_once('?').map(|(_, q)| q).unwrap_or("");
         let since = qs
             .split('&')
-            .find_map(|kv| kv.strip_prefix("since=").map(|v| url_decode(v)))
+            .find_map(|kv| kv.strip_prefix("since=").map(url_decode))
             .unwrap_or_else(|| "24h".to_string());
         assert_eq!(since, "48h");
     }
@@ -3999,7 +3999,7 @@ mod tests {
         let qs = path.split_once('?').map(|(_, q)| q).unwrap_or("");
         let since = qs
             .split('&')
-            .find_map(|kv| kv.strip_prefix("since=").map(|v| url_decode(v)))
+            .find_map(|kv| kv.strip_prefix("since=").map(url_decode))
             .unwrap_or_else(|| "24h".to_string());
         assert_eq!(since, "12h");
     }
@@ -4305,10 +4305,10 @@ mod tests {
         let qs = path.split_once('?').map(|(_, q)| q).unwrap_or("");
         let room = qs
             .split('&')
-            .find_map(|kv| kv.strip_prefix("room=").map(|v| url_decode(v)));
+            .find_map(|kv| kv.strip_prefix("room=").map(url_decode));
         let agent = qs
             .split('&')
-            .find_map(|kv| kv.strip_prefix("agent=").map(|v| url_decode(v)));
+            .find_map(|kv| kv.strip_prefix("agent=").map(url_decode));
         assert_eq!(room.as_deref(), Some("plaza"));
         assert_eq!(agent.as_deref(), Some("abc123"));
     }
@@ -4319,10 +4319,10 @@ mod tests {
         let qs = path.split_once('?').map(|(_, q)| q).unwrap_or("");
         let room: Option<String> = qs
             .split('&')
-            .find_map(|kv| kv.strip_prefix("room=").map(|v| url_decode(v)));
+            .find_map(|kv| kv.strip_prefix("room=").map(url_decode));
         let agent: Option<String> = qs
             .split('&')
-            .find_map(|kv| kv.strip_prefix("agent=").map(|v| url_decode(v)));
+            .find_map(|kv| kv.strip_prefix("agent=").map(url_decode));
         assert!(room.is_none());
         assert!(agent.is_none());
     }

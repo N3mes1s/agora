@@ -103,10 +103,7 @@ pub fn fetch(topic: &str, since: &str) -> Vec<(u64, String)> {
     let base = relay_url();
     let url = format!("{base}/{topic}/json?poll=1&since={since}");
     let body = match apply_auth(client().get(&url)).send() {
-        Ok(resp) => match resp.text() {
-            Ok(s) => s,
-            Err(_) => String::new(),
-        },
+        Ok(resp) => resp.text().unwrap_or_default(),
         Err(e) => {
             eprintln!("  [warn] primary relay fetch failed: {e}");
             String::new()
@@ -134,12 +131,11 @@ pub fn fetch(topic: &str, since: &str) -> Vec<(u64, String)> {
         if line.is_empty() {
             continue;
         }
-        if let Ok(evt) = serde_json::from_str::<NtfyEvent>(line) {
-            if evt.event.as_deref() == Some("message") {
-                if let Some(msg) = evt.message {
-                    events.push((evt.time.unwrap_or(0), msg));
-                }
-            }
+        if let Ok(evt) = serde_json::from_str::<NtfyEvent>(line)
+            && evt.event.as_deref() == Some("message")
+            && let Some(msg) = evt.message
+        {
+            events.push((evt.time.unwrap_or(0), msg));
         }
     }
     events
@@ -173,12 +169,11 @@ where
         if line.is_empty() {
             continue;
         }
-        if let Ok(evt) = serde_json::from_str::<NtfyEvent>(&line) {
-            if evt.event.as_deref() == Some("message") {
-                if let Some(ref msg) = evt.message {
-                    on_message(evt.time.unwrap_or(0), msg);
-                }
-            }
+        if let Ok(evt) = serde_json::from_str::<NtfyEvent>(&line)
+            && evt.event.as_deref() == Some("message")
+            && let Some(ref msg) = evt.message
+        {
+            on_message(evt.time.unwrap_or(0), msg);
         }
     }
 }

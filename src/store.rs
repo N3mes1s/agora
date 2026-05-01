@@ -7,6 +7,10 @@
 //!   identity.json             — agent identity
 
 use crate::crypto;
+use base64::{
+    Engine,
+    engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
+};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -40,24 +44,24 @@ fn now() -> u64 {
 
 pub fn get_agent_id() -> String {
     // Display alias override — not the authoritative identity, just cosmetic
-    if let Ok(id) = std::env::var("AGORA_AGENT_ID") {
-        if !id.is_empty() {
-            return id;
-        }
+    if let Ok(id) = std::env::var("AGORA_AGENT_ID")
+        && !id.is_empty()
+    {
+        return id;
     }
 
     // Try to derive from existing identity key
     let id_file = agora_dir().join("identity.json");
-    if let Ok(data) = fs::read_to_string(&id_file) {
-        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&data) {
-            // New format: key-derived ID
-            if let Some(id) = v["key_id"].as_str() {
-                return id.to_string();
-            }
-            // Legacy format: random ID
-            if let Some(id) = v["agent_id"].as_str() {
-                return id.to_string();
-            }
+    if let Ok(data) = fs::read_to_string(&id_file)
+        && let Ok(v) = serde_json::from_str::<serde_json::Value>(&data)
+    {
+        // New format: key-derived ID
+        if let Some(id) = v["key_id"].as_str() {
+            return id.to_string();
+        }
+        // Legacy format: random ID
+        if let Some(id) = v["agent_id"].as_str() {
+            return id.to_string();
         }
     }
 
@@ -117,12 +121,11 @@ fn derive_key_id(pubkey: &[u8]) -> String {
 /// Get the cryptographic identity (key-derived ID), ignoring display alias.
 pub fn get_key_id() -> String {
     let id_file = agora_dir().join("identity.json");
-    if let Ok(data) = fs::read_to_string(&id_file) {
-        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&data) {
-            if let Some(id) = v["key_id"].as_str() {
-                return id.to_string();
-            }
-        }
+    if let Ok(data) = fs::read_to_string(&id_file)
+        && let Ok(v) = serde_json::from_str::<serde_json::Value>(&data)
+        && let Some(id) = v["key_id"].as_str()
+    {
+        return id.to_string();
     }
     get_agent_id() // fallback
 }
@@ -130,10 +133,10 @@ pub fn get_key_id() -> String {
 /// Check if this agent has a persistent identity (not ephemeral).
 pub fn is_persistent_identity() -> bool {
     let id_file = agora_dir().join("identity.json");
-    if let Ok(data) = fs::read_to_string(&id_file) {
-        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&data) {
-            return v["ephemeral"].as_bool() == Some(false);
-        }
+    if let Ok(data) = fs::read_to_string(&id_file)
+        && let Ok(v) = serde_json::from_str::<serde_json::Value>(&data)
+    {
+        return v["ephemeral"].as_bool() == Some(false);
     }
     false
 }
@@ -173,13 +176,46 @@ pub fn save_trusted_signing_keys(keys: &HashMap<String, String>) {
     let _ = fs::write(dir.join("trusted_signing_keys.json"), data);
 }
 
+pub fn encode_signing_pubkey(pubkey: &[u8]) -> String {
+    STANDARD.encode(pubkey)
+}
+
+pub fn decode_signing_pubkey(signing_pubkey: &str) -> Option<Vec<u8>> {
+    STANDARD
+        .decode(signing_pubkey)
+        .or_else(|_| URL_SAFE_NO_PAD.decode(signing_pubkey))
+        .ok()
+}
+
+pub fn signing_pubkeys_match(left: &str, right: &str) -> bool {
+    if left == right {
+        return true;
+    }
+
+    match (decode_signing_pubkey(left), decode_signing_pubkey(right)) {
+        (Some(left), Some(right)) => left == right,
+        _ => false,
+    }
+}
+
+fn canonicalize_signing_pubkey(signing_pubkey: &str) -> String {
+    decode_signing_pubkey(signing_pubkey)
+        .map(|pubkey| encode_signing_pubkey(&pubkey))
+        .unwrap_or_else(|| signing_pubkey.to_string())
+}
+
 pub fn get_trusted_signing_key(agent_id: &str) -> Option<String> {
-    load_trusted_signing_keys().get(agent_id).cloned()
+    load_trusted_signing_keys()
+        .get(agent_id)
+        .map(|key| canonicalize_signing_pubkey(key))
 }
 
 pub fn trust_signing_key(agent_id: &str, signing_pubkey: &str) {
     let mut keys = load_trusted_signing_keys();
-    keys.insert(agent_id.to_string(), signing_pubkey.to_string());
+    keys.insert(
+        agent_id.to_string(),
+        canonicalize_signing_pubkey(signing_pubkey),
+    );
     save_trusted_signing_keys(&keys);
 }
 
@@ -342,13 +378,12 @@ pub fn update_last_seen(room_id: &str, agent_id: &str) {
 pub fn set_member_role(room_id: &str, agent_id: &str, role: Role) {
     let mut rooms = load_registry();
     let mut changed = false;
-    if let Some(room) = rooms.iter_mut().find(|r| r.room_id == room_id) {
-        if let Some(member) = room.members.iter_mut().find(|m| m.agent_id == agent_id) {
-            if member.role != role {
-                member.role = role;
-                changed = true;
-            }
-        }
+    if let Some(room) = rooms.iter_mut().find(|r| r.room_id == room_id)
+        && let Some(member) = room.members.iter_mut().find(|m| m.agent_id == agent_id)
+        && member.role != role
+    {
+        member.role = role;
+        changed = true;
     }
     if changed {
         save_registry(&rooms);
@@ -444,12 +479,11 @@ pub fn load_messages(room_id: &str, since_secs: u64) -> Vec<serde_json::Value> {
     let mut msgs = Vec::new();
     if let Ok(entries) = fs::read_dir(&dir) {
         for entry in entries.flatten() {
-            if let Ok(data) = fs::read_to_string(entry.path()) {
-                if let Ok(env) = serde_json::from_str::<serde_json::Value>(&data) {
-                    if env["ts"].as_u64().unwrap_or(0) >= cutoff {
-                        msgs.push(env);
-                    }
-                }
+            if let Ok(data) = fs::read_to_string(entry.path())
+                && let Ok(env) = serde_json::from_str::<serde_json::Value>(&data)
+                && env["ts"].as_u64().unwrap_or(0) >= cutoff
+            {
+                msgs.push(env);
             }
         }
     }
@@ -593,6 +627,7 @@ pub fn upsert_capability_card(room_id: &str, card: &AgentCapabilityCard) {
     save_capability_cards(room_id, &cards);
 }
 
+#[allow(dead_code)]
 pub fn get_capability_card(room_id: &str, agent_id: &str) -> Option<AgentCapabilityCard> {
     load_capability_cards(room_id)
         .into_iter()
@@ -897,6 +932,7 @@ pub fn load_card() -> Option<CapabilityCard> {
         .and_then(|d| serde_json::from_str(&d).ok())
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn save_peer_card(room_id: &str, card: &CapabilityCard) {
     let dir = agora_dir().join("rooms").join(room_id).join("cards");
     ensure_dir(&dir);
@@ -912,10 +948,10 @@ pub fn load_peer_cards(room_id: &str) -> Vec<CapabilityCard> {
     let mut cards = Vec::new();
     if let Ok(entries) = fs::read_dir(&dir) {
         for entry in entries.flatten() {
-            if let Ok(data) = fs::read_to_string(entry.path()) {
-                if let Ok(card) = serde_json::from_str::<CapabilityCard>(&data) {
-                    cards.push(card);
-                }
+            if let Ok(data) = fs::read_to_string(entry.path())
+                && let Ok(card) = serde_json::from_str::<CapabilityCard>(&data)
+            {
+                cards.push(card);
             }
         }
     }
@@ -1079,6 +1115,7 @@ pub fn save_payments(payments: &[PaymentRecord]) {
     );
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn find_payment_by_stripe_id(stripe_id: &str) -> Option<PaymentRecord> {
     load_payments()
         .into_iter()
@@ -1207,15 +1244,17 @@ pub fn upsert_work_receipt(room_id: &str, receipt: &WorkReceipt) {
     } else {
         receipts.push(receipt.clone());
     }
-    receipts.sort_by(|a, b| a.created_at.cmp(&b.created_at));
+    receipts.sort_by_key(|a| a.created_at);
     save_work_receipts(room_id, &receipts);
 }
 
 // ── Sandbox Leases ─────────────────────────────────────────────
 
 /// Maximum duration an active lease can exist before being considered stale on recovery.
+#[cfg_attr(not(test), allow(dead_code))]
 pub const MAX_LEASE_SECS: u64 = 3600; // 1 hour
 
+#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum LeaseStatus {
@@ -1225,6 +1264,7 @@ pub enum LeaseStatus {
 
 /// Tracks credit authorization for a single sandbox session.
 /// Persisted so crash recovery can detect and close stale leases.
+#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SandboxLease {
     pub id: String, // matches SandboxSession.id
@@ -1239,6 +1279,7 @@ pub struct SandboxLease {
     pub closed_at: Option<u64>,
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn load_leases(room_id: &str) -> Vec<SandboxLease> {
     let path = agora_dir()
         .join("rooms")
@@ -1251,6 +1292,7 @@ pub fn load_leases(room_id: &str) -> Vec<SandboxLease> {
     }
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn save_leases(room_id: &str, leases: &[SandboxLease]) {
     let dir = agora_dir().join("rooms").join(room_id);
     ensure_dir(&dir);
@@ -1259,6 +1301,7 @@ pub fn save_leases(room_id: &str, leases: &[SandboxLease]) {
 }
 
 /// Open a new lease. Returns Err if the agent already has an active lease in this room.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn open_lease(room_id: &str, lease: SandboxLease) -> Result<(), String> {
     let mut leases = load_leases(room_id);
     if leases
@@ -1276,6 +1319,7 @@ pub fn open_lease(room_id: &str, lease: SandboxLease) -> Result<(), String> {
 }
 
 /// Close an existing lease with the actual cost incurred.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn close_lease(room_id: &str, lease_id: &str, actual_cost: i64) {
     let mut leases = load_leases(room_id);
     if let Some(lease) = leases.iter_mut().find(|l| l.id == lease_id) {
@@ -1289,6 +1333,7 @@ pub fn close_lease(room_id: &str, lease_id: &str, actual_cost: i64) {
 /// On startup: scan all rooms for active leases older than MAX_LEASE_SECS and close them
 /// at ceiling cost (penalizes ungraceful shutdown, prevents credit escrow leaks).
 /// Returns the number of stale leases recovered.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn recover_stale_leases(room_id: &str) -> Vec<SandboxLease> {
     let cutoff = now().saturating_sub(MAX_LEASE_SECS);
     let mut leases = load_leases(room_id);
@@ -1491,12 +1536,11 @@ pub fn delete_messages_before(room_id: &str, before_ts: u64) {
         for entry in entries.flatten() {
             let fname = entry.file_name().to_string_lossy().to_string();
             // Files are named: <ts>_<mid>.json
-            if let Some(ts_str) = fname.split('_').next() {
-                if let Ok(ts) = ts_str.parse::<u64>() {
-                    if ts < before_ts {
-                        let _ = fs::remove_file(entry.path());
-                    }
-                }
+            if let Some(ts_str) = fname.split('_').next()
+                && let Ok(ts) = ts_str.parse::<u64>()
+                && ts < before_ts
+            {
+                let _ = fs::remove_file(entry.path());
             }
         }
     }
@@ -1635,7 +1679,7 @@ mod tests {
             updated_at: 1700000000,
         };
 
-        save_payments(&[record.clone()]);
+        save_payments(std::slice::from_ref(&record));
         let loaded = load_payments();
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded[0].id, "pay-test-001");
@@ -1665,6 +1709,17 @@ mod tests {
             }
         }
         let _ = fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn signing_pubkeys_match_across_base64_alphabets() {
+        let bytes = [0xfb, 0xef, 0xff];
+        let standard = STANDARD.encode(bytes);
+        let url_safe = URL_SAFE_NO_PAD.encode(bytes);
+
+        assert_ne!(standard, url_safe);
+        assert!(signing_pubkeys_match(&standard, &url_safe));
+        assert_eq!(canonicalize_signing_pubkey(&url_safe), standard);
     }
 
     #[test]
@@ -1843,8 +1898,8 @@ mod tests {
             closed_at: None,
         };
 
-        let mut leases = vec![stale_lease, fresh_lease];
-        save_leases("room-1", &mut leases);
+        let leases = vec![stale_lease, fresh_lease];
+        save_leases("room-1", &leases);
 
         let recovered = recover_stale_leases("room-1");
         assert_eq!(recovered.len(), 1);

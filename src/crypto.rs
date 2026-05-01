@@ -83,6 +83,7 @@ fn hkdf_derive(ikm: &[u8], info_label: &[u8]) -> [u8; 32] {
 ///
 /// Each sender gets a unique starting chain key so multi-sender
 /// rooms don't collide or need synchronized counters.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn init_sender_chain(room_key: &[u8; 32], sender_id: &str) -> [u8; 32] {
     let salt = Salt::new(HKDF_SHA256, sender_id.as_bytes());
     let prk = salt.extract(room_key);
@@ -94,12 +95,14 @@ pub fn init_sender_chain(room_key: &[u8; 32], sender_id: &str) -> [u8; 32] {
 }
 
 /// Advance the chain key by one step. The old key should be deleted.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn advance_chain(chain_key: &[u8; 32]) -> [u8; 32] {
     hkdf_derive(chain_key, b"agora-chain-advance")
 }
 
 /// Derive a message encryption key from the current chain key.
 /// This key is used for AES-256-GCM for a single message.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn derive_msg_key(chain_key: &[u8; 32]) -> [u8; 32] {
     hkdf_derive(chain_key, b"agora-msg-key")
 }

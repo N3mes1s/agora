@@ -893,7 +893,7 @@ fn invite_signing_message_bytes(
 fn local_signing_pubkey(agent_id: &str) -> Result<String, String> {
     let pkcs8 = store::load_or_create_signing_keypair(agent_id)?;
     let pubkey = crypto::signing_public_key(&pkcs8).map_err(|e| e.to_string())?;
-    Ok(BASE64.encode(pubkey))
+    Ok(store::encode_signing_pubkey(&pubkey))
 }
 
 fn sign_invite_token(payload: InviteTokenPayload) -> Result<String, String> {
@@ -914,8 +914,9 @@ fn sign_invite_token(payload: InviteTokenPayload) -> Result<String, String> {
         .clone()
         .unwrap_or_else(store::get_agent_id);
     let pkcs8 = store::load_or_create_signing_keypair(&created_by)?;
-    let inviter_signing_pubkey =
-        BASE64.encode(crypto::signing_public_key(&pkcs8).map_err(|e| e.to_string())?);
+    let inviter_signing_pubkey = store::encode_signing_pubkey(
+        &crypto::signing_public_key(&pkcs8).map_err(|e| e.to_string())?,
+    );
     store::trust_signing_key(&created_by, &inviter_signing_pubkey);
     let signing_input = invite_signing_message_bytes(&payload, &inviter_signing_pubkey);
     let sig =
@@ -960,9 +961,8 @@ fn parse_invite_token(token: &str) -> Result<ParsedInviteToken, String> {
     if let Ok(token) = serde_json::from_slice::<SignedInviteToken>(&bytes) {
         let signing_input =
             invite_signing_message_bytes(&token.payload, &token.inviter_signing_pubkey);
-        let public_key = BASE64
-            .decode(&token.inviter_signing_pubkey)
-            .map_err(|_| "Invalid invite token (bad signing key).".to_string())?;
+        let public_key = store::decode_signing_pubkey(&token.inviter_signing_pubkey)
+            .ok_or_else(|| "Invalid invite token (bad signing key).".to_string())?;
         let sig = BASE64
             .decode(&token.sig)
             .map_err(|_| "Invalid invite token (bad signature encoding).".to_string())?;
@@ -971,7 +971,7 @@ fn parse_invite_token(token: &str) -> Result<ParsedInviteToken, String> {
         }
         if let Some(created_by) = token.payload.created_by.as_deref() {
             if let Some(trusted) = store::get_trusted_signing_key(created_by) {
-                if trusted != token.inviter_signing_pubkey {
+                if !store::signing_pubkeys_match(&trusted, &token.inviter_signing_pubkey) {
                     return Err(format!(
                         "Invite token signer does not match trusted key for '{}'.",
                         created_by
@@ -1033,10 +1033,10 @@ fn resolve_display_name(agent_id: &str) -> String {
     }
     // 2. Check profiles
     for room in store::load_registry() {
-        if let Some(p) = store::get_profile(&room.room_id, agent_id) {
-            if let Some(name) = &p.name {
-                return format!("{name} ({agent_id})");
-            }
+        if let Some(p) = store::get_profile(&room.room_id, agent_id)
+            && let Some(name) = &p.name
+        {
+            return format!("{name} ({agent_id})");
         }
     }
     // 3. Raw ID
@@ -1093,11 +1093,11 @@ fn print_soma_details(belief: &serde_json::Value) {
 }
 
 fn print_msg_with_depth(env: &serde_json::Value, depth: usize) {
-    match env["type"].as_str() {
-        Some(
-            "heartbeat" | "receipt" | "reaction" | "invite_redeem" | "work_receipt" | "role_state",
-        ) => return,
-        _ => {}
+    if let Some(
+        "heartbeat" | "receipt" | "reaction" | "invite_redeem" | "work_receipt" | "role_state",
+    ) = env["type"].as_str()
+    {
+        return;
     }
     let time = ts(env["ts"].as_u64().unwrap_or(0));
     let sender_id = env["from"].as_str().unwrap_or("?");
@@ -1268,7 +1268,7 @@ fn main() {
                                 process::exit(1);
                             }
                         };
-                        if my_key != target_key {
+                        if !store::signing_pubkeys_match(&my_key, target_key) {
                             eprintln!(
                                 "  Error: invite token is bound to a different signing key than '{}'.",
                                 me
@@ -1306,16 +1306,16 @@ fn main() {
 
                     match chat::join(&payload.room_id, &payload.secret, &payload.label) {
                         Ok(_) => {
-                            if let Some(invite_id) = payload.invite_id.as_deref() {
-                                if let Err(e) = chat::redeem_invite(
+                            if let Some(invite_id) = payload.invite_id.as_deref()
+                                && let Err(e) = chat::redeem_invite(
                                     &payload.room_id,
                                     &payload.secret,
                                     invite_id,
                                     payload.created_by.as_deref(),
                                     payload.max_uses,
-                                ) {
-                                    eprintln!("  Warning: failed to record invite redemption: {e}");
-                                }
+                                )
+                            {
+                                eprintln!("  Warning: failed to record invite redemption: {e}");
                             }
                             let room_key =
                                 crypto::derive_room_key(&payload.secret, &payload.room_id);
@@ -1521,14 +1521,14 @@ fn main() {
                         msgs.len()
                     );
                 }
-                if let Ok(pinned) = chat::pins(room) {
-                    if !pinned.is_empty() {
-                        println!("  --- pinned ({}) ---\n", pinned.len());
-                        for p in &pinned {
-                            print_msg(p);
-                        }
-                        println!();
+                if let Ok(pinned) = chat::pins(room)
+                    && !pinned.is_empty()
+                {
+                    println!("  --- pinned ({}) ---\n", pinned.len());
+                    for p in &pinned {
+                        print_msg(p);
                     }
+                    println!();
                 }
                 for m in msgs {
                     print_msg(m);
@@ -1915,13 +1915,12 @@ fn main() {
                     }
 
                     // Keywords
-                    if let Some(kws) = info["top_keywords"].as_array() {
-                        if !kws.is_empty() {
-                            println!("\n  Topics:");
-                            let words: Vec<_> =
-                                kws.iter().filter_map(|k| k["word"].as_str()).collect();
-                            println!("    {}", words.join(", "));
-                        }
+                    if let Some(kws) = info["top_keywords"].as_array()
+                        && !kws.is_empty()
+                    {
+                        println!("\n  Topics:");
+                        let words: Vec<_> = kws.iter().filter_map(|k| k["word"].as_str()).collect();
+                        println!("    {}", words.join(", "));
                     }
 
                     println!("\n  ╚{}╝", "═".repeat(40));
@@ -1950,8 +1949,8 @@ fn main() {
                     return;
                 }
                 println!(
-                    "  {:<10} {:<20} {:>10} {:<12} {}",
-                    "ID", "Filename", "Size", "From", "Time"
+                    "  {:<10} {:<20} {:>10} {:<12} Time",
+                    "ID", "Filename", "Size", "From"
                 );
                 println!(
                     "  {:<10} {:<20} {:>10} {:<12} {}",
@@ -2093,14 +2092,14 @@ fn main() {
             println!("  Status:      \x1b[92mLISTENING\x1b[0m (Ctrl+C to stop)\n");
 
             // Print recent history
-            if let Ok(msgs) = chat::read("1h", 30, room) {
-                if !msgs.is_empty() {
-                    println!("  ─── recent ({} messages) ───\n", msgs.len());
-                    for m in &msgs {
-                        print_msg(m);
-                    }
-                    println!("\n  ─── live ───\n");
+            if let Ok(msgs) = chat::read("1h", 30, room)
+                && !msgs.is_empty()
+            {
+                println!("  ─── recent ({} messages) ───\n", msgs.len());
+                for m in &msgs {
+                    print_msg(m);
                 }
+                println!("\n  ─── live ───\n");
             }
 
             let mut msg_count: u64 = 0;
@@ -2208,7 +2207,7 @@ fn main() {
         Commands::Balance { agent_id } => {
             match chat::credit_balance_check(agent_id.as_deref(), room) {
                 Ok((credits, trust)) => {
-                    let id = agent_id.clone().unwrap_or_else(|| store::get_agent_id());
+                    let id = agent_id.clone().unwrap_or_else(store::get_agent_id);
                     let name = resolve_display_name(&id);
                     println!("  {name}:");
                     println!("    Credits (spendable): {credits}");
@@ -2294,7 +2293,7 @@ fn main() {
             let agent_id = store::get_agent_id();
             let cost = (hours * 10) as i64; // 10 credits per hour of access
             // Check credits in active room
-            if let Some(r) = room.and_then(|l| store::find_room(l)) {
+            if let Some(r) = room.and_then(store::find_room) {
                 let balance = store::credit_balance(&r.room_id, &agent_id);
                 if balance < cost {
                     eprintln!(
@@ -2325,8 +2324,8 @@ fn main() {
             let max_session_cost: i64 = 50; // max credits per sandbox session
             // Bug fix: also check active room, not just --room flag
             let active = room
-                .and_then(|l| store::find_room(l))
-                .or_else(|| store::get_active_room());
+                .and_then(store::find_room)
+                .or_else(store::get_active_room);
             if let Some(r) = active {
                 let balance = store::credit_balance(&r.room_id, &agent_id);
                 if balance < max_session_cost {
@@ -3723,15 +3722,15 @@ fn main() {
             println!("  \x1b[92m✓\x1b[0m Announced in plaza\n");
 
             // 7. Show who's online
-            if let Ok(members) = chat::who(Some("plaza"), true) {
-                if !members.is_empty() {
-                    println!("  {} agent(s) online right now:", members.len());
-                    for m in members.iter().take(5) {
-                        let name = resolve_display_name(&m.agent_id);
-                        println!("    - {name}");
-                    }
-                    println!();
+            if let Ok(members) = chat::who(Some("plaza"), true)
+                && !members.is_empty()
+            {
+                println!("  {} agent(s) online right now:", members.len());
+                for m in members.iter().take(5) {
+                    let name = resolve_display_name(&m.agent_id);
+                    println!("    - {name}");
                 }
+                println!();
             }
 
             println!("  Ready! Your path:");
@@ -3771,13 +3770,12 @@ fn main() {
             );
             // Show public key if available
             let id_file = store::agora_dir().join("identity.json");
-            if let Ok(data) = std::fs::read_to_string(&id_file) {
-                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&data) {
-                    if let Some(pk) = v["public_key"].as_str() {
-                        let short = &pk[..16.min(pk.len())];
-                        println!("  Public key: {short}...");
-                    }
-                }
+            if let Ok(data) = std::fs::read_to_string(&id_file)
+                && let Ok(v) = serde_json::from_str::<serde_json::Value>(&data)
+                && let Some(pk) = v["public_key"].as_str()
+            {
+                let short = &pk[..16.min(pk.len())];
+                println!("  Public key: {short}...");
             }
         }
     }
@@ -3789,6 +3787,7 @@ mod tests {
         InviteTokenAuth, InviteTokenPayload, default_display_name, dm_room_label,
         parse_invite_token, targeted_invite_token,
     };
+    use crate::crypto;
     use crate::store::{self, RoomEntry};
     use base64::Engine;
 
@@ -3895,7 +3894,7 @@ mod tests {
                 label: "dm-a-b".to_string(),
                 invite_id: parsed.payload.invite_id.clone(),
                 target_agent_id: Some("agent-b".to_string()),
-                target_signing_pubkey: Some("cGVlci1zaWduaW5nLWtleQ".to_string()),
+                target_signing_pubkey: Some("cGVlci1zaWduaW5nLWtleQ==".to_string()),
                 purpose: Some("dm".to_string()),
                 expires_at: None,
                 max_uses: None,
@@ -3938,6 +3937,36 @@ mod tests {
 
         let err = parse_invite_token(&tampered).unwrap_err();
         assert_eq!(err, "Invalid invite token signature.");
+    }
+
+    #[test]
+    fn signed_invite_token_accepts_legacy_url_safe_trusted_key() {
+        let _guard = store::test_env_lock().lock().unwrap();
+        let home = temp_home();
+        std::fs::create_dir_all(&home).unwrap();
+        unsafe {
+            std::env::set_var("HOME", &home);
+            std::env::set_var("AGORA_AGENT_ID", "agent-a");
+        }
+
+        let room = RoomEntry {
+            room_id: "ag-dm-test".to_string(),
+            secret: "secret".to_string(),
+            label: "dm-a-b".to_string(),
+            joined_at: 0,
+            topic: None,
+            members: vec![],
+        };
+        let token = targeted_invite_token(&room, "agent-b", "dm").unwrap();
+
+        let pkcs8 = store::load_or_create_signing_keypair("agent-a").unwrap();
+        let legacy_pubkey = super::BASE64.encode(crypto::signing_public_key(&pkcs8).unwrap());
+        let mut trusted = std::collections::HashMap::new();
+        trusted.insert("agent-a".to_string(), legacy_pubkey);
+        store::save_trusted_signing_keys(&trusted);
+
+        let parsed = parse_invite_token(&token).unwrap();
+        assert_eq!(parsed.auth, InviteTokenAuth::SignedVerified);
     }
 
     #[test]

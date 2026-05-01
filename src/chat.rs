@@ -56,6 +56,7 @@ struct SomaVolatility {
     effective_confidence: Option<f64>,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct DiscoveredCapabilityCard {
     pub room_label: String,
@@ -472,10 +473,10 @@ fn ingest_auxiliary_event(room_id: &str, env: &serde_json::Value) {
         return;
     }
 
-    if is_reaction(env) {
-        if let (Some(target), Some(emoji)) = (env["target_id"].as_str(), env["emoji"].as_str()) {
-            store::add_reaction(room_id, target, from, emoji);
-        }
+    if is_reaction(env)
+        && let (Some(target), Some(emoji)) = (env["target_id"].as_str(), env["emoji"].as_str())
+    {
+        store::add_reaction(room_id, target, from, emoji);
     }
 }
 
@@ -500,10 +501,11 @@ fn track_presence(room_id: &str, env: &serde_json::Value) {
 }
 
 fn parse_envelope(raw: &str) -> Option<serde_json::Value> {
-    if let Ok(env) = serde_json::from_str::<serde_json::Value>(raw) {
-        if env["v"].is_string() && env["text"].is_string() {
-            return Some(env);
-        }
+    if let Ok(env) = serde_json::from_str::<serde_json::Value>(raw)
+        && env["v"].is_string()
+        && env["text"].is_string()
+    {
+        return Some(env);
     }
     // v1 fallback: "agent_id: message"
     if let Some((sender, text)) = raw.split_once(':') {
@@ -538,8 +540,9 @@ fn encrypt_envelope(env: &serde_json::Value, room_key: &[u8; 32], room_id: &str)
     let from = env["from"].as_str().unwrap_or("");
 
     let pkcs8 = store::load_or_create_signing_keypair(from).expect("signing key load failed");
-    let signing_pubkey = BASE64
-        .encode(crypto::signing_public_key(&pkcs8).expect("signing pubkey derivation failed"));
+    let signing_pubkey = store::encode_signing_pubkey(
+        &crypto::signing_public_key(&pkcs8).expect("signing pubkey derivation failed"),
+    );
     store::trust_signing_key(from, &signing_pubkey);
 
     let signing_input = signing_message_bytes(room_id, from, &signing_pubkey, &payload);
@@ -564,7 +567,7 @@ fn decrypt_signed_payload(
     let wire = serde_json::from_str::<SignedWirePayload>(raw).ok()?;
     let signing_input =
         signing_message_bytes(room_id, &wire.from, &wire.signing_pubkey, &wire.payload);
-    let public_key = BASE64.decode(&wire.signing_pubkey).ok()?;
+    let public_key = store::decode_signing_pubkey(&wire.signing_pubkey)?;
     let sig = BASE64.decode(&wire.sig).ok()?;
 
     if !crypto::verify_message_signature(&public_key, &signing_input, &sig) {
@@ -580,7 +583,7 @@ fn decrypt_signed_payload(
     }
 
     if let Some(trusted) = store::get_trusted_signing_key(&wire.from) {
-        if trusted != wire.signing_pubkey {
+        if !store::signing_pubkeys_match(&trusted, &wire.signing_pubkey) {
             return Some(make_auth_warning(
                 room_id,
                 &wire,
@@ -999,6 +1002,7 @@ pub fn react(target_id: &str, emoji: &str, room_label: Option<&str>) -> Result<(
 }
 
 /// Get reactions for recent messages.
+#[allow(dead_code)]
 pub fn reactions(
     room_label: Option<&str>,
 ) -> Result<std::collections::HashMap<String, Vec<(String, String)>>, String> {
@@ -1021,6 +1025,7 @@ pub fn unmute(agent_id: &str, room_label: Option<&str>) -> Result<(), String> {
 }
 
 /// List muted agents.
+#[allow(dead_code)]
 pub fn muted(room_label: Option<&str>) -> Result<std::collections::HashSet<String>, String> {
     let room = resolve_room(room_label)?;
     Ok(store::load_muted(&room.room_id))
@@ -1121,15 +1126,16 @@ pub fn role_claim(
     let me = store::get_agent_id();
     let now_ts = now();
 
-    if let Some(existing) = store::get_role_lease(&room.room_id, role) {
-        if existing.agent_id != me && existing.lease_expires > now_ts {
-            return Err(format!(
-                "Role '{}' is currently held by '{}' for another {}s.",
-                role,
-                existing.agent_id,
-                existing.lease_expires.saturating_sub(now_ts)
-            ));
-        }
+    if let Some(existing) = store::get_role_lease(&room.room_id, role)
+        && existing.agent_id != me
+        && existing.lease_expires > now_ts
+    {
+        return Err(format!(
+            "Role '{}' is currently held by '{}' for another {}s.",
+            role,
+            existing.agent_id,
+            existing.lease_expires.saturating_sub(now_ts)
+        ));
     }
 
     let lease = store::RoleLease {
@@ -1157,15 +1163,16 @@ pub fn role_heartbeat(
     let now_ts = now();
     let existing = store::get_role_lease(&room.room_id, role);
 
-    if let Some(current) = &existing {
-        if current.agent_id != me && current.lease_expires > now_ts {
-            return Err(format!(
-                "Role '{}' is currently held by '{}' for another {}s.",
-                role,
-                current.agent_id,
-                current.lease_expires.saturating_sub(now_ts)
-            ));
-        }
+    if let Some(current) = &existing
+        && current.agent_id != me
+        && current.lease_expires > now_ts
+    {
+        return Err(format!(
+            "Role '{}' is currently held by '{}' for another {}s.",
+            role,
+            current.agent_id,
+            current.lease_expires.saturating_sub(now_ts)
+        ));
     }
 
     let lease = store::RoleLease {
@@ -1572,7 +1579,6 @@ pub fn gap_list() -> Vec<CapabilityGap> {
 
 pub struct RoomInfo {
     pub label: String,
-    pub room_id: String,
     pub topic: Option<String>,
     pub agent_count: usize,
     pub message_count: usize,
@@ -1597,14 +1603,13 @@ pub fn directory() -> Result<Vec<RoomInfo>, String> {
             .unwrap_or(0);
         infos.push(RoomInfo {
             label: room.label.clone(),
-            room_id: room.room_id.clone(),
             topic: room.topic.clone(),
             agent_count: online,
             message_count: msgs.len(),
             last_activity: last_ts,
         });
     }
-    infos.sort_by(|a, b| b.last_activity.cmp(&a.last_activity));
+    infos.sort_by_key(|entry| std::cmp::Reverse(entry.last_activity));
     Ok(infos)
 }
 
@@ -1821,6 +1826,7 @@ fn stale_claim_weight(age_secs: u64) -> f64 {
     )
 }
 
+#[allow(dead_code)]
 pub fn process_card_message(room_id: &str, msg: &serde_json::Value) {
     if msg["type"].as_str() != Some("capability_card") {
         return;
@@ -1926,12 +1932,10 @@ pub fn bounty_post(
     let reward_label = reward_credits
         .map(|c| format!(", reward: {c} credits"))
         .unwrap_or_default();
-    if let Some(h) = deadline_hours {
-        if h == 0 {
-            return Err(
-                "Deadline must be at least 1 hour (0 would expire immediately)".to_string(),
-            );
-        }
+    if let Some(h) = deadline_hours
+        && h == 0
+    {
+        return Err("Deadline must be at least 1 hour (0 would expire immediately)".to_string());
     }
     let expires_at = deadline_hours.map(|h| now() + h * 3600);
     let deadline_label = deadline_hours
@@ -2042,9 +2046,7 @@ pub fn bounty_submit(
         let msgs = store::load_messages(&room.room_id, 604800);
         for msg in &msgs {
             if msg["type"].as_str() == Some("bounty")
-                && msg["id"]
-                    .as_str()
-                    .map_or(false, |id| id.starts_with(task_id))
+                && msg["id"].as_str().is_some_and(|id| id.starts_with(task_id))
             {
                 tasks.push(store::Task {
                     id: msg["id"].as_str().unwrap_or(task_id).to_string(),
@@ -2314,16 +2316,14 @@ pub fn bounty_verify(
         }
     }
 
-    if passed {
-        if let Some(trust) = reward_trust {
-            store::trust_add(
-                &room.room_id,
-                agent_id,
-                trust,
-                &format!("bounty oracle PASS: {task_title}"),
-                "oracle",
-            );
-        }
+    if passed && let Some(trust) = reward_trust {
+        store::trust_add(
+            &room.room_id,
+            agent_id,
+            trust,
+            &format!("bounty oracle PASS: {task_title}"),
+            "oracle",
+        );
     }
 
     let env = make_envelope(
@@ -2351,10 +2351,10 @@ pub fn bounty_list(room_label: Option<&str>) -> Result<Vec<serde_json::Value>, S
                 return false;
             }
             // Exclude bounties that have passed their deadline
-            if let Some(exp) = m["expires_at"].as_u64() {
-                if ts >= exp {
-                    return false;
-                }
+            if let Some(exp) = m["expires_at"].as_u64()
+                && ts >= exp
+            {
+                return false;
             }
             true
         })
@@ -3628,26 +3628,9 @@ const PUZZLES: &[(&str, &str, &str, &str)] = &[
     ),
 ];
 
-/// Credits awarded for solving calibration seeds by difficulty.
-fn seed_credit_reward(difficulty: &str) -> i64 {
-    // Decaying rewards: 10 - 2*seeds_completed, capped at 0
-    // ~50 credits lifetime max per agent from seeds
-    // Prevents Sybil farming while bootstrapping the economy
-    let base = match difficulty {
-        "hard" => 15,
-        "medium" => 10,
-        _ => 10, // easy
-    };
-    // Count previous seed completions from local state
-    let agent_id = store::get_agent_id();
-    let seed_count = store::load_registry()
-        .iter()
-        .flat_map(|r| store::load_messages(&r.room_id, 604800 * 4))
-        .filter(|m| {
-            m["type"].as_str() == Some("seed_receipt") && m["from"].as_str() == Some(&agent_id)
-        })
-        .count() as i64;
-    std::cmp::max(0, base - 2 * seed_count)
+/// Calibration seeds no longer mint credits; they bootstrap trust via receipts only.
+fn seed_credit_reward(_difficulty: &str) -> i64 {
+    0
 }
 
 fn sha256_hex(input: &str) -> String {
@@ -3728,7 +3711,7 @@ pub fn seed_verify(seed_id: &str, answer: &str, room_label: Option<&str>) -> Res
     let seed_snapshot = seed.clone();
     store::save_seeds(&room.room_id, &seeds);
 
-    // Award credits based on difficulty (autonomous economy bootstrapping).
+    // Calibration seeds now bootstrap trust with receipts only.
     let credit_reward = seed_credit_reward(&seed_snapshot.difficulty);
 
     // Synthesise a Task so we can reuse publish_task_receipt.
@@ -3761,7 +3744,7 @@ pub fn seed_verify(seed_id: &str, answer: &str, room_label: Option<&str>) -> Res
         task.updated_at,
     );
 
-    // Grant credits for medium/hard seeds (proof-of-work bootstrapping).
+    // Calibration seeds no longer mint credits.
     if credit_reward > 0 {
         store::credit_add(
             &room.room_id,
@@ -3829,8 +3812,7 @@ pub fn task_list(room_label: Option<&str>) -> Result<Vec<store::Task>, String> {
                     });
                 }
             }
-        } else if text.starts_with("[task] Claimed by ") {
-            let rest = &text["[task] Claimed by ".len()..];
+        } else if let Some(rest) = text.strip_prefix("[task] Claimed by ") {
             if let Some(colon) = rest.find(": ") {
                 let claimer = &rest[..colon];
                 let title = &rest[colon + 2..];
@@ -3842,17 +3824,16 @@ pub fn task_list(room_label: Option<&str>) -> Result<Vec<store::Task>, String> {
                     t.claimed_by = Some(claimer.to_string());
                 }
             }
-        } else if text.starts_with("[task] Done by ") {
-            let rest = &text["[task] Done by ".len()..];
-            if let Some(colon) = rest.find(": ") {
-                let title_and_notes = &rest[colon + 2..];
-                let title = title_and_notes
-                    .split(" — ")
-                    .next()
-                    .unwrap_or(title_and_notes);
-                if let Some(t) = tasks.iter_mut().find(|t| t.title == title) {
-                    t.status = "done".to_string();
-                }
+        } else if let Some(rest) = text.strip_prefix("[task] Done by ")
+            && let Some(colon) = rest.find(": ")
+        {
+            let title_and_notes = &rest[colon + 2..];
+            let title = title_and_notes
+                .split(" — ")
+                .next()
+                .unwrap_or(title_and_notes);
+            if let Some(t) = tasks.iter_mut().find(|t| t.title == title) {
+                t.status = "done".to_string();
             }
         }
     }
@@ -3886,7 +3867,7 @@ pub fn list_work_receipts(
         }
     }
 
-    receipts.sort_by(|a, b| b.receipt.created_at.cmp(&a.receipt.created_at));
+    receipts.sort_by_key(|entry| std::cmp::Reverse(entry.receipt.created_at));
     Ok(receipts)
 }
 
@@ -3965,9 +3946,9 @@ pub fn digest(since: &str, room_label: Option<&str>) -> Result<String, String> {
     }
 
     let mut sorted_agents: Vec<_> = agents.into_iter().collect();
-    sorted_agents.sort_by(|a, b| b.1.cmp(&a.1));
+    sorted_agents.sort_by_key(|entry| std::cmp::Reverse(entry.1));
     let mut sorted_topics: Vec<_> = topics.into_iter().collect();
-    sorted_topics.sort_by(|a, b| b.1.cmp(&a.1));
+    sorted_topics.sort_by_key(|entry| std::cmp::Reverse(entry.1));
     sorted_topics.truncate(8);
 
     let total_reactions: usize = reactions.values().map(|v| v.len()).sum();
@@ -4410,7 +4391,7 @@ pub fn stats(room_label: Option<&str>) -> Result<serde_json::Value, String> {
     let total_receipts: usize = receipts.values().map(|v| v.len()).sum();
 
     let mut sorted_agents: Vec<_> = agents.into_iter().collect();
-    sorted_agents.sort_by(|a, b| b.1.cmp(&a.1));
+    sorted_agents.sort_by_key(|entry| std::cmp::Reverse(entry.1));
 
     // Peak hour
     let peak = hourly.iter().max_by_key(|(_, v)| *v);
@@ -4465,7 +4446,7 @@ pub fn export(
     let json_str = serde_json::to_string_pretty(&export).map_err(|e| format!("JSON error: {e}"))?;
     let count = msgs.len();
 
-    let dest = out_path.unwrap_or_else(|| {
+    let dest = out_path.unwrap_or({
         // Will be handled by caller with a default
         ""
     });
@@ -4687,11 +4668,11 @@ pub fn recap(since: &str, room_label: Option<&str>) -> Result<serde_json::Value,
 
     // Sort agents by message count
     let mut agents: Vec<_> = agent_counts.into_iter().collect();
-    agents.sort_by(|a, b| b.1.cmp(&a.1));
+    agents.sort_by_key(|entry| std::cmp::Reverse(entry.1));
 
     // Top 10 keywords
     let mut top_words: Vec<_> = words.into_iter().collect();
-    top_words.sort_by(|a, b| b.1.cmp(&a.1));
+    top_words.sort_by_key(|entry| std::cmp::Reverse(entry.1));
     top_words.truncate(10);
 
     Ok(json!({
@@ -5794,6 +5775,38 @@ mod tests {
     }
 
     #[test]
+    fn signed_payload_accepts_legacy_url_safe_trusted_key() {
+        let _guard = store::test_env_lock().lock().unwrap();
+        let home = temp_home();
+        std::fs::create_dir_all(&home).unwrap();
+        unsafe {
+            std::env::set_var("HOME", &home);
+            std::env::set_var("AGORA_AGENT_ID", "alice");
+        }
+
+        let room = store::add_room(
+            "ag-sign-legacy",
+            "secret-sign-legacy",
+            "sign-legacy",
+            Role::Admin,
+        );
+        let room_key = crypto::derive_room_key(&room.secret, &room.room_id);
+        let env = make_envelope("hello signed world", None);
+        let wire = encrypt_envelope(&env, &room_key, &room.room_id);
+
+        let pkcs8 = store::load_or_create_signing_keypair("alice").unwrap();
+        let legacy_pubkey = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(crypto::signing_public_key(&pkcs8).unwrap());
+        let mut trusted = std::collections::HashMap::new();
+        trusted.insert("alice".to_string(), legacy_pubkey);
+        store::save_trusted_signing_keys(&trusted);
+
+        let decrypted = decrypt_payload(&wire, &room_key, &room.room_id).unwrap();
+        assert_eq!(decrypted["text"].as_str(), Some("hello signed world"));
+        assert_eq!(decrypted["_auth"].as_str(), Some("verified"));
+    }
+
+    #[test]
     fn invite_redemption_counter_matches_invite_id() {
         let first = make_invite_redemption("invite-a", Some("alice"), Some(1));
         let second = make_invite_redemption("invite-a", Some("alice"), Some(1));
@@ -6465,9 +6478,9 @@ pub fn search(
                 text.to_lowercase().contains(&query_lower)
             };
 
-            let matches_from = from.map_or(true, |f| sender == f);
-            let matches_after = after.map_or(true, |a| ts >= a);
-            let matches_before = before.map_or(true, |b| ts <= b);
+            let matches_from = from.is_none_or(|f| sender == f);
+            let matches_after = after.is_none_or(|a| ts >= a);
+            let matches_before = before.is_none_or(|b| ts <= b);
 
             matches_query && matches_from && matches_after && matches_before
         })
@@ -6537,11 +6550,11 @@ fn walk_thread(
         env: env.clone(),
     });
 
-    if let Some(id) = env["id"].as_str() {
-        if let Some(replies) = children.get(id) {
-            for reply in replies {
-                walk_thread(reply, depth + 1, children, out);
-            }
+    if let Some(id) = env["id"].as_str()
+        && let Some(replies) = children.get(id)
+    {
+        for reply in replies {
+            walk_thread(reply, depth + 1, children, out);
         }
     }
 }
@@ -6737,14 +6750,14 @@ pub fn notify(since: &str, room_label: Option<&str>) -> Result<Vec<serde_json::V
 pub fn stop_daemon(room_label: Option<&str>) -> Result<(), String> {
     let room = resolve_room(room_label)?;
     let pid_path = store::daemon_pid_path(&room.room_id);
-    if let Ok(pid_str) = std::fs::read_to_string(&pid_path) {
-        if let Ok(pid) = pid_str.trim().parse::<i32>() {
-            unsafe {
-                libc::kill(pid, libc::SIGTERM);
-            }
-            let _ = std::fs::remove_file(pid_path);
-            return Ok(());
+    if let Ok(pid_str) = std::fs::read_to_string(&pid_path)
+        && let Ok(pid) = pid_str.trim().parse::<i32>()
+    {
+        unsafe {
+            libc::kill(pid, libc::SIGTERM);
         }
+        let _ = std::fs::remove_file(pid_path);
+        return Ok(());
     }
     Err("No daemon running.".to_string())
 }

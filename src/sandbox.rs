@@ -18,19 +18,18 @@ pub struct SandboxSession {
 /// Load sandbox tokens from env vars OR ~/.agora/sandbox-tokens.json
 fn load_token(name: &str) -> Option<String> {
     // Env var first
-    if let Ok(val) = std::env::var(name) {
-        if !val.is_empty() {
-            return Some(val);
-        }
+    if let Ok(val) = std::env::var(name)
+        && !val.is_empty()
+    {
+        return Some(val);
     }
     // Fall back to tokens file
     let path = crate::store::agora_dir().join("sandbox-tokens.json");
-    if let Ok(data) = std::fs::read_to_string(&path) {
-        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&data) {
-            if let Some(val) = v[name].as_str() {
-                return Some(val.to_string());
-            }
-        }
+    if let Ok(data) = std::fs::read_to_string(&path)
+        && let Ok(v) = serde_json::from_str::<serde_json::Value>(&data)
+        && let Some(val) = v[name].as_str()
+    {
+        return Some(val.to_string());
     }
     None
 }
@@ -141,7 +140,7 @@ fn create_e2b(agent_id: &str, token: &str) -> Result<SandboxSession, String> {
 fn exec_e2b(session_id: &str, command: &str) -> Result<String, String> {
     let token = e2b_token().ok_or("E2B_TOKEN not set")?;
     let resp = client()
-        .post(&format!(
+        .post(format!(
             "https://api.e2b.dev/sandboxes/{session_id}/execute"
         ))
         .header("X-E2B-API-Key", &token)
@@ -156,7 +155,7 @@ fn exec_e2b(session_id: &str, command: &str) -> Result<String, String> {
 fn destroy_e2b(session_id: &str) -> Result<(), String> {
     let token = e2b_token().ok_or("E2B_TOKEN not set")?;
     client()
-        .delete(&format!("https://api.e2b.dev/sandboxes/{session_id}"))
+        .delete(format!("https://api.e2b.dev/sandboxes/{session_id}"))
         .header("X-E2B-API-Key", &token)
         .send()
         .map_err(|e| format!("E2B destroy failed: {e}"))?;
@@ -196,7 +195,7 @@ fn create_daytona(agent_id: &str, token: &str) -> Result<SandboxSession, String>
 fn exec_daytona(session_id: &str, command: &str) -> Result<String, String> {
     let token = daytona_token().ok_or("DAYTONA_TOKEN not set")?;
     let resp = client()
-        .post(&format!(
+        .post(format!(
             "https://proxy.app-eu.daytona.io/toolbox/{session_id}/process/execute"
         ))
         .bearer_auth(&token)
@@ -216,7 +215,7 @@ fn exec_daytona(session_id: &str, command: &str) -> Result<String, String> {
 fn destroy_daytona(session_id: &str) -> Result<(), String> {
     let token = daytona_token().ok_or("DAYTONA_TOKEN not set")?;
     client()
-        .delete(&format!("https://app.daytona.io/api/sandbox/{session_id}"))
+        .delete(format!("https://app.daytona.io/api/sandbox/{session_id}"))
         .bearer_auth(&token)
         .send()
         .map_err(|e| format!("Daytona destroy failed: {e}"))?;
@@ -256,7 +255,7 @@ fn create_sprites(agent_id: &str, token: &str) -> Result<SandboxSession, String>
 fn exec_sprites(session_id: &str, command: &str) -> Result<String, String> {
     let token = sprites_token().ok_or("SPRITES_TOKEN not set")?;
     let resp = client()
-        .post(&format!(
+        .post(format!(
             "https://api.sprites.dev/v1/machines/{session_id}/exec"
         ))
         .bearer_auth(&token)
@@ -271,7 +270,7 @@ fn exec_sprites(session_id: &str, command: &str) -> Result<String, String> {
 fn destroy_sprites(session_id: &str) -> Result<(), String> {
     let token = sprites_token().ok_or("SPRITES_TOKEN not set")?;
     client()
-        .delete(&format!("https://api.sprites.dev/v1/machines/{session_id}"))
+        .delete(format!("https://api.sprites.dev/v1/machines/{session_id}"))
         .bearer_auth(&token)
         .send()
         .map_err(|e| format!("Sprites destroy failed: {e}"))?;
