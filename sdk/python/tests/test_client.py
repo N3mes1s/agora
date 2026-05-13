@@ -129,6 +129,10 @@ class TestNatsTransport:
         assert "*" not in subject
         assert ">" not in subject
 
+    def test_nats_start_time_preserves_fractional_seconds(self):
+        start = transport._nats_start_time(1700000000)
+        assert start.isoformat() == "2023-11-14T22:13:19.999999+00:00"
+
     def test_publish_dispatches_to_nats_transport(self):
         calls = []
 

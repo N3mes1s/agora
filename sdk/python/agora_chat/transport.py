@@ -392,7 +392,7 @@ async def _fetch_nats(
         cutoff = since_cutoff(since)
         config = api.ConsumerConfig(
             deliver_policy=api.DeliverPolicy.BY_START_TIME if cutoff else api.DeliverPolicy.ALL,
-            opt_start_time=_rfc3339(cutoff) if cutoff else None,
+            opt_start_time=_nats_start_time(cutoff) if cutoff else None,
             ack_policy=api.AckPolicy.EXPLICIT,
             replay_policy=api.ReplayPolicy.INSTANT,
             inactive_threshold=NATS_CONSUMER_INACTIVE_THRESHOLD,
@@ -413,7 +413,9 @@ async def _fetch_nats(
                     break
                 for msg in messages:
                     await msg.ack()
-                    events.append(_nats_event(msg))
+                    event = _nats_event(msg)
+                    if event[0] >= cutoff:
+                        events.append(event)
             return events
         finally:
             await sub.unsubscribe()
@@ -432,6 +434,7 @@ def _stream_nats(
     sub = None
     nc = None
     try:
+        cutoff = since_cutoff(since)
         nc, sub = loop.run_until_complete(_open_nats_stream(relay_url, token, settings, topic, since))
         _, _, _, nats_errors = _nats_modules()
         while True:
@@ -441,7 +444,9 @@ def _stream_nats(
                 continue
             for msg in messages:
                 loop.run_until_complete(msg.ack())
-                yield _nats_event(msg)
+                event = _nats_event(msg)
+                if event[0] >= cutoff:
+                    yield event
     finally:
         if sub is not None:
             loop.run_until_complete(sub.unsubscribe())
@@ -464,8 +469,8 @@ async def _open_nats_stream(
         await _ensure_nats_stream(js, settings)
         cutoff = since_cutoff(since)
         config = api.ConsumerConfig(
-            deliver_policy=api.DeliverPolicy.BY_START_TIME if cutoff else api.DeliverPolicy.NEW,
-            opt_start_time=_rfc3339(cutoff) if cutoff else None,
+            deliver_policy=api.DeliverPolicy.BY_START_TIME if cutoff else api.DeliverPolicy.ALL,
+            opt_start_time=_nats_start_time(cutoff) if cutoff else None,
             ack_policy=api.AckPolicy.EXPLICIT,
             replay_policy=api.ReplayPolicy.INSTANT,
             inactive_threshold=NATS_CONSUMER_INACTIVE_THRESHOLD,
@@ -485,5 +490,5 @@ def _nats_event(msg) -> tuple[int, str]:
     return int(msg.metadata.timestamp.timestamp()), msg.data.decode()
 
 
-def _rfc3339(timestamp: int) -> str:
-    return datetime.fromtimestamp(timestamp, timezone.utc).isoformat().replace("+00:00", "Z")
+def _nats_start_time(cutoff: int) -> datetime:
+    return datetime.fromtimestamp(max(0, cutoff - 1), timezone.utc).replace(microsecond=999999)
