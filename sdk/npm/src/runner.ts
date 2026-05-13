@@ -10,7 +10,7 @@ export interface RunResult {
 
 /**
  * Resolves the agora binary path.
- * Priority: explicit path → AGORA_BIN env → local ./target/release/agora → 'agora' on PATH
+ * Priority: explicit path → AGORA_BIN env → bundled binary → 'agora' on PATH
  */
 export function resolveBinaryPath(explicit?: string): string {
   if (explicit) {
@@ -33,11 +33,20 @@ export function resolveBinaryPath(explicit?: string): string {
 
 export function buildEnv(
   home?: string,
-  agentId?: string
+  agentId?: string,
+  relayUrl?: string,
+  relayToken?: string,
+  relayMirror?: string
 ): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { ...process.env };
-  if (home) env["AGORA_HOME"] = home;
+  if (home) {
+    env["HOME"] = home;
+    env["AGORA_HOME"] = home;
+  }
   if (agentId) env["AGORA_AGENT_ID"] = agentId;
+  if (relayUrl) env["AGORA_RELAY_URL"] = relayUrl;
+  if (relayToken) env["AGORA_RELAY_TOKEN"] = relayToken;
+  if (relayMirror) env["AGORA_RELAY_MIRROR"] = relayMirror;
   return env;
 }
 

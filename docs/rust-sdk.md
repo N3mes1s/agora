@@ -32,7 +32,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .relay_url("https://ntfy.theagora.dev"),
     );
 
-    let room = client.open_room("collab")?;
+    let room = client.join_room(
+        "ag-room-id",
+        "your-64-hex-secret",
+        "collab",
+    )?;
     let id = room.send_text("hello from the embedded app")?;
     println!("sent {id}");
     Ok(())
@@ -67,6 +71,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         body: "base64-or-json-payload".into(),
     })?;
 
+    for event in room.fetch_json::<Frame>("10m") {
+        println!("{} {}", event.message.sender, event.value.id);
+    }
+
     let stream = StreamConfig {
         reconnect: true,
         initial_backoff: Duration::from_secs(1),
@@ -88,6 +96,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     Ok(())
 }
+```
+
+Run the local memory-relay example with:
+
+```sh
+cargo run --example rust_sdk_json_bus
 ```
 
 ## Low-Level API

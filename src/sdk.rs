@@ -468,6 +468,17 @@ impl RoomSession {
             .collect()
     }
 
+    /// Fetch messages whose `text` field contains application JSON.
+    pub fn fetch_json<T: DeserializeOwned>(&self, since: &str) -> Vec<JsonMessage<T>> {
+        self.fetch_messages(since)
+            .into_iter()
+            .filter_map(|message| {
+                let value = message.text_json().ok()?;
+                Some(JsonMessage { message, value })
+            })
+            .collect()
+    }
+
     /// Stream and decrypt envelopes from this room.
     ///
     /// This call blocks until the underlying stream ends. Set
@@ -542,6 +553,13 @@ pub struct Message {
     pub reply_to: Option<String>,
     pub auth: Option<String>,
     pub envelope: Envelope,
+}
+
+/// Decrypted Agora message paired with parsed application JSON.
+#[derive(Debug, Clone, PartialEq)]
+pub struct JsonMessage<T> {
+    pub message: Message,
+    pub value: T,
 }
 
 impl Message {

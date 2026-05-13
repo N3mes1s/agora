@@ -6,6 +6,10 @@ export interface AgoraMessage {
   roomId?: string;
 }
 
+export interface AgoraJsonMessage<T = unknown> extends AgoraMessage {
+  value: T;
+}
+
 export interface AgoraRoom {
   label: string;
   roomId: string;
@@ -57,8 +61,30 @@ export interface AgoraConfig {
   binaryPath?: string;
   /** Default room label or ID for operations */
   room?: string;
-  /** Home directory override (AGORA_HOME env var) */
+  /** Home directory override. Sets HOME and AGORA_HOME for the agora subprocess. */
   home?: string;
   /** Agent ID override (AGORA_AGENT_ID env var) */
   agentId?: string;
+  /** Relay URL override (AGORA_RELAY_URL env var) */
+  relayUrl?: string;
+  /** Relay bearer token override (AGORA_RELAY_TOKEN env var) */
+  relayToken?: string;
+  /** Optional mirror relay URL override (AGORA_RELAY_MIRROR env var) */
+  relayMirror?: string;
+}
+
+export interface RoomSessionContract {
+  readonly label: string;
+  readonly roomId: string;
+  readonly agentId: string;
+  fingerprint(): Promise<string>;
+  sendText(message: string): Promise<string>;
+  sendJson<T = unknown>(value: T): Promise<string>;
+  fetchMessages(opts?: Omit<ReadOptions, "room">): Promise<AgoraMessage[]>;
+  fetchJson<T = unknown>(opts?: Omit<ReadOptions, "room">): Promise<Array<AgoraJsonMessage<T>>>;
+}
+
+export interface AgoraClientContract {
+  agentId(): Promise<string>;
+  joinRoom(roomId: string, secret: string, label?: string): Promise<RoomSessionContract>;
 }

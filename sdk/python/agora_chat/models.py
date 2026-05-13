@@ -1,7 +1,8 @@
 """Data models for agora-chat."""
 
-from dataclasses import dataclass, field
-from typing import Optional
+from dataclasses import dataclass
+from typing import Any, Optional
+import json
 
 
 @dataclass
@@ -17,6 +18,10 @@ class Message:
     def is_system(self) -> bool:
         return self.msg_type in ("heartbeat", "receipt")
 
+    def json(self) -> Any:
+        """Parse the message text as an application JSON frame."""
+        return json.loads(self.text)
+
     @classmethod
     def from_envelope(cls, env: dict) -> "Message":
         return cls(
@@ -27,6 +32,12 @@ class Message:
             reply_to=env.get("reply_to"),
             msg_type=env.get("type"),
         )
+
+
+@dataclass
+class JsonMessage:
+    message: Message
+    value: Any
 
 
 @dataclass
@@ -47,3 +58,10 @@ class Room:
     secret: str
     label: str
     agent_id: Optional[str] = None
+
+
+@dataclass
+class RoomMetadata:
+    room_id: str
+    label: str
+    agent_id: str

@@ -11,9 +11,19 @@ Quick start::
         print(f"{msg.sender}: {msg.text}")
 """
 
-from .client import AgoraClient
-from .models import Message, Room, Task
+from .client import AgoraClient, RoomSession
+from .models import JsonMessage, Message, Room, RoomMetadata, Task
 from .crypto import derive_room_key, fingerprint
 
-__all__ = ["AgoraClient", "Message", "Room", "Task", "derive_room_key", "fingerprint"]
+__all__ = [
+    "AgoraClient",
+    "RoomSession",
+    "JsonMessage",
+    "Message",
+    "Room",
+    "RoomMetadata",
+    "Task",
+    "derive_room_key",
+    "fingerprint",
+]
 __version__ = "0.1.0"

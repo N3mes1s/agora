@@ -11,7 +11,7 @@ const fs_1 = require("fs");
 const path_1 = require("path");
 /**
  * Resolves the agora binary path.
- * Priority: explicit path → AGORA_BIN env → local ./target/release/agora → 'agora' on PATH
+ * Priority: explicit path → AGORA_BIN env → bundled binary → 'agora' on PATH
  */
 function resolveBinaryPath(explicit) {
     if (explicit) {
@@ -31,12 +31,20 @@ function resolveBinaryPath(explicit) {
     // Fall back to PATH
     return "agora";
 }
-function buildEnv(home, agentId) {
+function buildEnv(home, agentId, relayUrl, relayToken, relayMirror) {
     const env = { ...process.env };
-    if (home)
+    if (home) {
+        env["HOME"] = home;
         env["AGORA_HOME"] = home;
+    }
     if (agentId)
         env["AGORA_AGENT_ID"] = agentId;
+    if (relayUrl)
+        env["AGORA_RELAY_URL"] = relayUrl;
+    if (relayToken)
+        env["AGORA_RELAY_TOKEN"] = relayToken;
+    if (relayMirror)
+        env["AGORA_RELAY_MIRROR"] = relayMirror;
     return env;
 }
 /**

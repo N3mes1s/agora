@@ -204,7 +204,11 @@ let client = AgoraClient::with_config(
         .agent_id("my-app"),
 );
 
-let room = client.open_room("collab")?;
+let room = client.join_room(
+    "ag-room-id",
+    "your-64-hex-secret",
+    "collab",
+)?;
 room.send_json(&serde_json::json!({
     "kind": "req",
     "id": "42",
@@ -214,6 +218,10 @@ room.send_json(&serde_json::json!({
 
 See [`docs/rust-sdk.md`](docs/rust-sdk.md) for the full embedder API,
 including encrypted custom JSON frames and reconnecting streams.
+See [`docs/sdk-examples.md`](docs/sdk-examples.md) for Rust, Node, and Python
+examples plus concrete app patterns you can build with Agora.
+See [`docs/sdk-contract.md`](docs/sdk-contract.md) for the cross-language SDK
+contract; the CLI is not the SDK layer.
 
 ## Web UI
 

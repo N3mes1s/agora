@@ -1,12 +1,12 @@
 /**
- * agora-chat: JavaScript/TypeScript SDK for agora encrypted agent chat.
+ * agora-chat: JavaScript/TypeScript adapter for agora encrypted agent chat.
  *
  * Usage:
- *   import { Agora } from 'agora-chat';
- *   const agora = new Agora();
- *   await agora.join('my-room', 'secret123', 'home');
- *   await agora.send('Hello, agents!');
- *   const msgs = await agora.read();
+ *   import { AgoraClient } from 'agora-chat';
+ *   const client = new AgoraClient();
+ *   const room = await client.joinRoom('ag-room-id', 'secret', 'home');
+ *   await room.sendText('Hello, agents!');
+ *   const msgs = await room.fetchMessages();
  */
 
 export * from "./types";
@@ -19,12 +19,15 @@ import {
   AgoraMember,
   AgoraTask,
   AgoraStats,
+  AgoraJsonMessage,
+  RoomSessionContract,
   SendOptions,
   ReadOptions,
 } from "./types";
 import { resolveBinaryPath, buildEnv, run, runSync, assertOk, stripAnsi } from "./runner";
 import { parseMessages, parseRooms, parseMembers, parseTasks } from "./parsers";
 
+/** Transitional CLI adapter. The final SDK should use the shared core directly. */
 export class Agora {
   private binary: string;
   private env: NodeJS.ProcessEnv;
@@ -32,13 +35,20 @@ export class Agora {
 
   constructor(config: AgoraConfig = {}) {
     this.binary = resolveBinaryPath(config.binaryPath);
-    this.env = buildEnv(config.home, config.agentId);
+    this.env = buildEnv(
+      config.home,
+      config.agentId,
+      config.relayUrl,
+      config.relayToken,
+      config.relayMirror
+    );
     this.defaultRoom = config.room;
   }
 
-  private args(baseArgs: string[]): string[] {
-    if (this.defaultRoom) {
-      return ["--room", this.defaultRoom, ...baseArgs];
+  private args(baseArgs: string[], room?: string): string[] {
+    const targetRoom = room ?? this.defaultRoom;
+    if (targetRoom) {
+      return ["--room", targetRoom, ...baseArgs];
     }
     return baseArgs;
   }
@@ -48,13 +58,18 @@ export class Agora {
   /** Return this agent's ID. */
   async id(): Promise<string> {
     const result = await run(this.binary, ["id"], this.env);
-    return assertOk(result, "id").trim();
+    return parseAgentId(assertOk(result, "id"));
+  }
+
+  /** Contract-shaped alias for id(). */
+  async agentId(): Promise<string> {
+    return this.id();
   }
 
   /** Return this agent's ID synchronously. */
   idSync(): string {
     const result = runSync(this.binary, ["id"], this.env);
-    return assertOk(result, "id").trim();
+    return parseAgentId(assertOk(result, "id"));
   }
 
   // ─── Rooms ──────────────────────────────────────────────────────────────────
@@ -66,6 +81,12 @@ export class Agora {
       : ["join", roomId, secret];
     const result = await run(this.binary, cmdArgs, this.env);
     return assertOk(result, "join").trim();
+  }
+
+  /** Contract-shaped join that returns a room session adapter. */
+  async joinRoom(roomId: string, secret: string, label: string = "default"): Promise<CliRoomSession> {
+    await this.join(roomId, secret, label);
+    return new CliRoomSession(this, roomId, label, await this.agentId());
   }
 
   /** List joined rooms. */
@@ -91,40 +112,45 @@ export class Agora {
 
   /** Send a message to the active room (or specified room). */
   async send(message: string, opts: Omit<SendOptions, "message"> = {}): Promise<string> {
-    const cmdArgs = this.args(
-      opts.room
-        ? ["--room", opts.room, "send", message]
-        : ["send", message]
-    );
+    const cmdArgs = this.args(["send", message], opts.room);
     const result = await run(this.binary, cmdArgs, this.env);
     return assertOk(result, "send").trim();
   }
 
   /** Send a message synchronously. */
   sendSync(message: string, room?: string): string {
-    const cmdArgs = this.args(
-      room ? ["--room", room, "send", message] : ["send", message]
-    );
+    const cmdArgs = this.args(["send", message], room);
     const result = runSync(this.binary, cmdArgs, this.env);
     return assertOk(result, "send").trim();
   }
 
+  /** Send an application JSON frame in the Agora message text field. */
+  async sendJson<T = unknown>(value: T, opts: Omit<SendOptions, "message"> = {}): Promise<string> {
+    return this.send(JSON.stringify(value), opts);
+  }
+
+  /** Send an application JSON frame synchronously. */
+  sendJsonSync<T = unknown>(value: T, room?: string): string {
+    return this.sendSync(JSON.stringify(value), room);
+  }
+
   /** Read messages from the active room. */
   async read(opts: ReadOptions = {}): Promise<AgoraMessage[]> {
-    const cmdArgs = opts.room
-      ? ["--room", opts.room, "read"]
-      : this.args(["read"]);
-    if (opts.limit) cmdArgs.push("--limit", String(opts.limit));
+    const cmdArgs = this.args(["read"], opts.room);
+    if (opts.limit) cmdArgs.push("--tail", String(opts.limit));
     const result = await run(this.binary, cmdArgs, this.env);
     const raw = assertOk(result, "read");
     return parseMessages(stripAnsi(raw));
   }
 
+  /** Read messages whose content is valid JSON and parse them as application frames. */
+  async readJson<T = unknown>(opts: ReadOptions = {}): Promise<Array<AgoraJsonMessage<T>>> {
+    return parseJsonMessages<T>(await this.read(opts));
+  }
+
   /** Check for new messages. Returns true if there are new messages. */
   async check(room?: string): Promise<boolean> {
-    const cmdArgs = room
-      ? ["--room", room, "check"]
-      : this.args(["check"]);
+    const cmdArgs = this.args(["check"], room);
     const result = await run(this.binary, cmdArgs, this.env);
     // exit code 0 = no new messages, 2 = new messages (with --wake),
     // for plain check: output mentions new messages
@@ -135,9 +161,7 @@ export class Agora {
 
   /** Search messages by text. */
   async search(query: string, room?: string): Promise<AgoraMessage[]> {
-    const cmdArgs = room
-      ? ["--room", room, "search", query]
-      : this.args(["search", query]);
+    const cmdArgs = this.args(["search", query], room);
     const result = await run(this.binary, cmdArgs, this.env);
     const raw = assertOk(result, "search");
     return parseMessages(stripAnsi(raw));
@@ -147,18 +171,14 @@ export class Agora {
 
   /** Send a heartbeat to indicate presence. */
   async heartbeat(room?: string): Promise<string> {
-    const cmdArgs = room
-      ? ["--room", room, "heartbeat"]
-      : this.args(["heartbeat"]);
+    const cmdArgs = this.args(["heartbeat"], room);
     const result = await run(this.binary, cmdArgs, this.env);
     return assertOk(result, "heartbeat").trim();
   }
 
   /** List room members. */
   async who(room?: string): Promise<AgoraMember[]> {
-    const cmdArgs = room
-      ? ["--room", room, "who"]
-      : this.args(["who"]);
+    const cmdArgs = this.args(["who"], room);
     const result = await run(this.binary, cmdArgs, this.env);
     const raw = assertOk(result, "who");
     return parseMembers(stripAnsi(raw));
@@ -168,9 +188,7 @@ export class Agora {
 
   /** List tasks in the room. */
   async tasks(room?: string): Promise<AgoraTask[]> {
-    const cmdArgs = room
-      ? ["--room", room, "tasks"]
-      : this.args(["tasks"]);
+    const cmdArgs = this.args(["tasks"], room);
     const result = await run(this.binary, cmdArgs, this.env);
     const raw = result.exitCode === 0 ? result.stdout : "";
     if (!raw.trim() || raw.includes("(no tasks)")) return [];
@@ -179,9 +197,7 @@ export class Agora {
 
   /** Add a task to the queue. Returns the task ID. */
   async taskAdd(title: string, room?: string): Promise<string> {
-    const cmdArgs = room
-      ? ["--room", room, "task-add", title]
-      : this.args(["task-add", title]);
+    const cmdArgs = this.args(["task-add", title], room);
     const result = await run(this.binary, cmdArgs, this.env);
     const out = assertOk(result, "task-add");
     const match = stripAnsi(out).match(/\[([^\]]+)\]/);
@@ -190,18 +206,14 @@ export class Agora {
 
   /** Claim an open task by ID. */
   async taskClaim(id: string, room?: string): Promise<string> {
-    const cmdArgs = room
-      ? ["--room", room, "task-claim", id]
-      : this.args(["task-claim", id]);
+    const cmdArgs = this.args(["task-claim", id], room);
     const result = await run(this.binary, cmdArgs, this.env);
     return assertOk(result, "task-claim").trim();
   }
 
   /** Mark a task as done. */
   async taskDone(id: string, notes?: string, room?: string): Promise<string> {
-    const cmdArgs = room
-      ? ["--room", room, "task-done", id]
-      : this.args(["task-done", id]);
+    const cmdArgs = this.args(["task-done", id], room);
     if (notes) cmdArgs.push("--notes", notes);
     const result = await run(this.binary, cmdArgs, this.env);
     return assertOk(result, "task-done").trim();
@@ -211,9 +223,7 @@ export class Agora {
 
   /** Get room statistics. */
   async stats(room?: string): Promise<AgoraStats> {
-    const cmdArgs = room
-      ? ["--room", room, "stats"]
-      : this.args(["stats"]);
+    const cmdArgs = this.args(["stats"], room);
     const result = await run(this.binary, cmdArgs, this.env);
     const raw = assertOk(result, "stats");
     const clean = stripAnsi(raw);
@@ -232,9 +242,7 @@ export class Agora {
 
   /** Get room info including fingerprint. */
   async info(room?: string): Promise<string> {
-    const cmdArgs = room
-      ? ["--room", room, "info"]
-      : this.args(["info"]);
+    const cmdArgs = this.args(["info"], room);
     const result = await run(this.binary, cmdArgs, this.env);
     return stripAnsi(assertOk(result, "info")).trim();
   }
@@ -266,27 +274,21 @@ export class Agora {
 
   /** Register a webhook URL. */
   async webhookAdd(url: string, room?: string): Promise<string> {
-    const cmdArgs = room
-      ? ["--room", room, "webhook-add", url]
-      : this.args(["webhook-add", url]);
+    const cmdArgs = this.args(["webhook-add", url], room);
     const result = await run(this.binary, cmdArgs, this.env);
     return assertOk(result, "webhook-add").trim();
   }
 
   /** List registered webhooks. */
   async webhookList(room?: string): Promise<string> {
-    const cmdArgs = room
-      ? ["--room", room, "webhook-list"]
-      : this.args(["webhook-list"]);
+    const cmdArgs = this.args(["webhook-list"], room);
     const result = await run(this.binary, cmdArgs, this.env);
     return stripAnsi(assertOk(result, "webhook-list")).trim();
   }
 
   /** Remove a webhook. */
   async webhookRemove(id: string, room?: string): Promise<string> {
-    const cmdArgs = room
-      ? ["--room", room, "webhook-remove", id]
-      : this.args(["webhook-remove", id]);
+    const cmdArgs = this.args(["webhook-remove", id], room);
     const result = await run(this.binary, cmdArgs, this.env);
     return assertOk(result, "webhook-remove").trim();
   }
@@ -295,26 +297,80 @@ export class Agora {
 
   /** Get a compact activity recap. */
   async recap(room?: string): Promise<string> {
-    const cmdArgs = room
-      ? ["--room", room, "recap"]
-      : this.args(["recap"]);
+    const cmdArgs = this.args(["recap"], room);
     const result = await run(this.binary, cmdArgs, this.env);
     return stripAnsi(assertOk(result, "recap")).trim();
   }
 
   /** Generate a digest report. */
   async digest(period: string = "24h", room?: string): Promise<string> {
-    const cmdArgs = room
-      ? ["--room", room, "digest", period]
-      : this.args(["digest", period]);
+    const cmdArgs = this.args(["digest", period], room);
     const result = await run(this.binary, cmdArgs, this.env);
     return stripAnsi(assertOk(result, "digest")).trim();
+  }
+}
+
+/** RoomSession-shaped wrapper over the transitional CLI adapter. */
+export class CliRoomSession implements RoomSessionContract {
+  constructor(
+    private readonly client: Agora,
+    public readonly roomId: string,
+    public readonly label: string,
+    public readonly agentId: string
+  ) {}
+
+  async fingerprint(): Promise<string> {
+    const info = await this.client.info(this.label);
+    const match = info.match(/Fingerprint:\s*(.+)/);
+    return match ? match[1].trim() : "";
+  }
+
+  sendText(message: string): Promise<string> {
+    return this.client.send(message, { room: this.label });
+  }
+
+  sendJson<T = unknown>(value: T): Promise<string> {
+    return this.client.sendJson(value, { room: this.label });
+  }
+
+  fetchMessages(opts: Omit<ReadOptions, "room"> = {}): Promise<AgoraMessage[]> {
+    return this.client.read({ ...opts, room: this.label });
+  }
+
+  fetchJson<T = unknown>(
+    opts: Omit<ReadOptions, "room"> = {}
+  ): Promise<Array<AgoraJsonMessage<T>>> {
+    return this.client.readJson<T>({ ...opts, room: this.label });
   }
 }
 
 /** Convenience factory: create an Agora instance using environment variables. */
 export function createAgora(config: AgoraConfig = {}): Agora {
   return new Agora(config);
+}
+
+/** Explicit name for the current CLI-backed adapter. */
+export { Agora as AgoraClient, Agora as AgoraCli };
+
+/** Parse messages whose content is valid JSON and preserve the original metadata. */
+export function parseJsonMessages<T = unknown>(
+  messages: AgoraMessage[]
+): Array<AgoraJsonMessage<T>> {
+  const parsed: Array<AgoraJsonMessage<T>> = [];
+  for (const message of messages) {
+    try {
+      parsed.push({ ...message, value: JSON.parse(message.content) as T });
+    } catch {
+      // Mixed rooms are common; ignore regular chat messages.
+    }
+  }
+  return parsed;
+}
+
+function parseAgentId(raw: string): string {
+  const match = raw.match(/Agent ID:\s*([^\s]+)/);
+  if (match) return match[1];
+  return raw.trim();
 }
 
 export default Agora;

@@ -7,6 +7,8 @@ import sys
 
 def main() -> None:
     parser = argparse.ArgumentParser(prog="agora-chat", description="agora encrypted chat")
+    parser.add_argument("--relay-url", help="Relay URL (defaults to AGORA_RELAY_URL or public agora relay)")
+    parser.add_argument("--relay-token", help="Relay bearer token")
     sub = parser.add_subparsers(dest="cmd")
 
     # join
@@ -36,7 +38,7 @@ def main() -> None:
 
     from .client import AgoraClient
 
-    client = AgoraClient()
+    client = AgoraClient(relay_url=args.relay_url, relay_token=args.relay_token)
 
     if args.cmd == "join":
         room = client.join(args.room_id, args.secret, args.label)

@@ -2,6 +2,7 @@
 
 import json
 import base64
+import os
 import pytest
 from unittest.mock import patch, MagicMock
 
@@ -35,6 +36,15 @@ class TestClientJoin:
         assert room.label == "testroom"
         assert client.room.room_id == ROOM_ID
 
+    def test_join_room_returns_session_contract(self):
+        client = AgoraClient(agent_id="test-agent")
+        with patch("agora_chat.transport.publish", return_value=True):
+            session = client.join_room(ROOM_ID, SECRET, "testroom")
+        assert session.room_id == ROOM_ID
+        assert session.label == "testroom"
+        assert session.agent_id == "test-agent"
+        assert session.metadata.room_id == ROOM_ID
+
     def test_join_publishes_join_message(self):
         client = AgoraClient(agent_id="test-agent")
         with patch("agora_chat.transport.publish", return_value=True) as mock_pub:
@@ -55,6 +65,25 @@ class TestClientJoin:
         fp = client.fingerprint()
         parts = fp.split(" ")
         assert len(parts) == 8
+
+    def test_home_is_scoped_to_client(self, tmp_path):
+        with patch.dict(os.environ, {}, clear=True):
+            client = AgoraClient(home=tmp_path)
+        assert client.agent_id
+        assert (tmp_path / ".agora" / "identity.json").exists()
+
+    def test_relay_options_are_passed_to_transport(self):
+        client = AgoraClient(
+            agent_id="test-agent",
+            relay_url="memory://python-sdk",
+            relay_token="secret-token",
+            timeout=7,
+        )
+        with patch("agora_chat.transport.publish", return_value=True) as mock_pub:
+            client.join(ROOM_ID, SECRET, "testroom")
+        assert mock_pub.call_args.kwargs["base_url"] == "memory://python-sdk"
+        assert mock_pub.call_args.kwargs["token"] == "secret-token"
+        assert mock_pub.call_args.kwargs["timeout"] == 7
 
 
 class TestClientSend:
@@ -91,6 +120,26 @@ class TestClientSend:
         room_key = derive_room_key(SECRET, ROOM_ID)
         env = decrypt_payload(payload, room_key, ROOM_ID)
         assert env["reply_to"] == "parent-id"
+
+    def test_send_json_encodes_application_frame(self):
+        frame = {"kind": "req", "id": "frame-1", "body": "payload"}
+        with patch("agora_chat.transport.publish", return_value=True) as mock_pub:
+            self.client.send_json(frame)
+        _, payload = mock_pub.call_args[0]
+        from agora_chat.crypto import decrypt_payload
+        room_key = derive_room_key(SECRET, ROOM_ID)
+        env = decrypt_payload(payload, room_key, ROOM_ID)
+        assert json.loads(env["text"]) == frame
+
+    def test_room_session_send_json_encodes_application_frame(self):
+        frame = {"kind": "req", "id": "frame-2", "body": "payload"}
+        with patch("agora_chat.transport.publish", return_value=True) as mock_pub:
+            self.client.session.send_json(frame)
+        _, payload = mock_pub.call_args[0]
+        from agora_chat.crypto import decrypt_payload
+        room_key = derive_room_key(SECRET, ROOM_ID)
+        env = decrypt_payload(payload, room_key, ROOM_ID)
+        assert json.loads(env["text"]) == frame
 
     def test_send_without_room_raises(self):
         client = AgoraClient(agent_id="orphan")
@@ -145,6 +194,46 @@ class TestClientCheck:
             messages = self.client.check()
         assert messages == []
 
+    def test_read_json_skips_regular_chat(self):
+        json_payload = _make_encrypted_message(
+            ROOM_ID,
+            SECRET,
+            json.dumps({"kind": "event", "id": "json-1"}),
+            "bridge-agent",
+            "msg00003",
+        )
+        plain_payload = _make_encrypted_message(
+            ROOM_ID, SECRET, "plain chat", "human-agent", "msg00004"
+        )
+        with patch(
+            "agora_chat.transport.fetch",
+            return_value=[(1700000000, json_payload), (1700000001, plain_payload)],
+        ):
+            messages = self.client.read_json()
+        assert len(messages) == 1
+        assert messages[0].message.sender == "bridge-agent"
+        assert messages[0].value == {"kind": "event", "id": "json-1"}
+
+    def test_room_session_fetch_json_skips_regular_chat(self):
+        json_payload = _make_encrypted_message(
+            ROOM_ID,
+            SECRET,
+            json.dumps({"kind": "event", "id": "json-2"}),
+            "bridge-agent",
+            "msg00005",
+        )
+        plain_payload = _make_encrypted_message(
+            ROOM_ID, SECRET, "plain chat", "human-agent", "msg00006"
+        )
+        with patch(
+            "agora_chat.transport.fetch",
+            return_value=[(1700000000, json_payload), (1700000001, plain_payload)],
+        ):
+            messages = self.client.session.fetch_json()
+        assert len(messages) == 1
+        assert messages[0].message.sender == "bridge-agent"
+        assert messages[0].value == {"kind": "event", "id": "json-2"}
+
 
 class TestClientHeartbeat:
     def setup_method(self):
@@ -190,6 +279,14 @@ class TestClientCreate:
         assert room.room_id.startswith("ag-")
         assert room.label == "newroom"
         assert len(room.secret) == 64
+
+    def test_create_room_returns_session_contract(self):
+        client = AgoraClient(agent_id="test-agent")
+        with patch("agora_chat.transport.publish", return_value=True):
+            session = client.create_room("newroom")
+        assert session.room_id.startswith("ag-")
+        assert session.label == "newroom"
+        assert session.agent_id == "test-agent"
 
     def test_create_allows_subsequent_send(self):
         client = AgoraClient(agent_id="test-agent")

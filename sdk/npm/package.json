@@ -33,6 +33,7 @@
   },
   "files": [
     "dist/",
+    "examples/",
     "bin/",
     "README.md"
   ],

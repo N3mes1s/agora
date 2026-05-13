@@ -79,11 +79,36 @@ function testStripAnsi() {
     assert_1.strict.equal((0, runner_1.stripAnsi)(withAnsi), "online");
     console.log("  ✓ stripAnsi");
 }
+function testParseJsonMessages() {
+    const messages = (0, index_1.parseMessages)(`
+  [05:29:35] [3fe144] bridge-agent: {"kind":"req","id":"42","body":"payload"}
+  [05:30:01] [abcdef] human: plain chat
+  `);
+    const frames = (0, index_1.parseJsonMessages)(messages);
+    assert_1.strict.equal(frames.length, 1, "should skip non-JSON messages");
+    assert_1.strict.equal(frames[0].agentId, "bridge-agent");
+    assert_1.strict.equal(frames[0].value.kind, "req");
+    assert_1.strict.equal(frames[0].value.id, "42");
+    assert_1.strict.equal(frames[0].value.body, "payload");
+    console.log("  ✓ parseJsonMessages");
+}
+function testBuildEnv() {
+    const env = (0, runner_1.buildEnv)("/tmp/agora-js-home", "agent-js", "memory://js-sdk", "relay-token", "https://mirror.example");
+    assert_1.strict.equal(env.HOME, "/tmp/agora-js-home");
+    assert_1.strict.equal(env.AGORA_HOME, "/tmp/agora-js-home");
+    assert_1.strict.equal(env.AGORA_AGENT_ID, "agent-js");
+    assert_1.strict.equal(env.AGORA_RELAY_URL, "memory://js-sdk");
+    assert_1.strict.equal(env.AGORA_RELAY_TOKEN, "relay-token");
+    assert_1.strict.equal(env.AGORA_RELAY_MIRROR, "https://mirror.example");
+    console.log("  ✓ buildEnv");
+}
 // ─── Integration tests: real binary ──────────────────────────────────────────
 async function testAgoraId(agora) {
     const id = await agora.id();
+    const alias = await agora.agentId();
     assert_1.strict.ok(id.length > 0, "id should be non-empty");
     assert_1.strict.match(id, /^[0-9A-Za-z-]+$/, "id should be alphanumeric");
+    assert_1.strict.equal(alias, id, "agentId should alias id");
     console.log(`  ✓ agora.id() = ${id}`);
 }
 async function testAgoraRooms(agora) {
@@ -98,6 +123,17 @@ async function testAgoraTasks(agora) {
     assert_1.strict.ok(Array.isArray(tasks), "tasks should be an array");
     console.log(`  ✓ agora.tasks() = ${tasks.length} task(s)`);
 }
+async function testJoinRoomSessionContract(agora) {
+    const room = await agora.joinRoom("ag-js-sdk-contract", "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc", "contract-room");
+    assert_1.strict.equal(room.roomId, "ag-js-sdk-contract");
+    assert_1.strict.equal(room.label, "contract-room");
+    assert_1.strict.ok(room.agentId.length > 0, "room session should expose agentId");
+    assert_1.strict.match(await room.fingerprint(), /^([0-9a-f]{4}\s+){7}[0-9a-f]{4}$/);
+    await room.sendJson({ kind: "job", id: "contract-1" });
+    const frames = await room.fetchJson({ limit: 10 });
+    assert_1.strict.ok(frames.some((frame) => frame.value.id === "contract-1"));
+    console.log("  ✓ joinRoom() RoomSession contract");
+}
 // ─── Main ────────────────────────────────────────────────────────────────────
 async function main() {
     console.log("\nagora-chat SDK tests\n");
@@ -108,19 +144,23 @@ async function main() {
     testParseMembers();
     testParseTasks();
     testStripAnsi();
+    testParseJsonMessages();
+    testBuildEnv();
     // Integration tests (require binary)
     const binaryPath = process.env.AGORA_BIN ??
         (0, path_1.join)(__dirname, "../../../../target/release/agora");
     const home = (0, fs_1.mkdtempSync)((0, path_1.join)((0, os_1.tmpdir)(), "agora-sdk-test-"));
     try {
         console.log("\nIntegration tests:");
-        const agora = new index_1.Agora({
+        const agora = new index_1.AgoraClient({
             binaryPath,
             home,
+            relayUrl: "memory://js-sdk-test",
         });
         await testAgoraId(agora);
         await testAgoraRooms(agora);
         await testAgoraTasks(agora);
+        await testJoinRoomSessionContract(agora);
         console.log("\nAll tests passed.\n");
     }
     finally {

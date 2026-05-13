@@ -1,13 +1,13 @@
 "use strict";
 /**
- * agora-chat: JavaScript/TypeScript SDK for agora encrypted agent chat.
+ * agora-chat: JavaScript/TypeScript adapter for agora encrypted agent chat.
  *
  * Usage:
- *   import { Agora } from 'agora-chat';
- *   const agora = new Agora();
- *   await agora.join('my-room', 'secret123', 'home');
- *   await agora.send('Hello, agents!');
- *   const msgs = await agora.read();
+ *   import { AgoraClient } from 'agora-chat';
+ *   const client = new AgoraClient();
+ *   const room = await client.joinRoom('ag-room-id', 'secret', 'home');
+ *   await room.sendText('Hello, agents!');
+ *   const msgs = await room.fetchMessages();
  */
 var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
     if (k2 === undefined) k2 = k;
@@ -24,8 +24,9 @@ var __exportStar = (this && this.__exportStar) || function(m, exports) {
     for (var p in m) if (p !== "default" && !Object.prototype.hasOwnProperty.call(exports, p)) __createBinding(exports, m, p);
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.Agora = exports.parseTasks = exports.parseMembers = exports.parseRooms = exports.parseMessages = void 0;
+exports.AgoraCli = exports.AgoraClient = exports.CliRoomSession = exports.Agora = exports.parseTasks = exports.parseMembers = exports.parseRooms = exports.parseMessages = void 0;
 exports.createAgora = createAgora;
+exports.parseJsonMessages = parseJsonMessages;
 __exportStar(require("./types"), exports);
 var parsers_1 = require("./parsers");
 Object.defineProperty(exports, "parseMessages", { enumerable: true, get: function () { return parsers_1.parseMessages; } });
@@ -34,15 +35,17 @@ Object.defineProperty(exports, "parseMembers", { enumerable: true, get: function
 Object.defineProperty(exports, "parseTasks", { enumerable: true, get: function () { return parsers_1.parseTasks; } });
 const runner_1 = require("./runner");
 const parsers_2 = require("./parsers");
+/** Transitional CLI adapter. The final SDK should use the shared core directly. */
 class Agora {
     constructor(config = {}) {
         this.binary = (0, runner_1.resolveBinaryPath)(config.binaryPath);
-        this.env = (0, runner_1.buildEnv)(config.home, config.agentId);
+        this.env = (0, runner_1.buildEnv)(config.home, config.agentId, config.relayUrl, config.relayToken, config.relayMirror);
         this.defaultRoom = config.room;
     }
-    args(baseArgs) {
-        if (this.defaultRoom) {
-            return ["--room", this.defaultRoom, ...baseArgs];
+    args(baseArgs, room) {
+        const targetRoom = room ?? this.defaultRoom;
+        if (targetRoom) {
+            return ["--room", targetRoom, ...baseArgs];
         }
         return baseArgs;
     }
@@ -50,12 +53,16 @@ class Agora {
     /** Return this agent's ID. */
     async id() {
         const result = await (0, runner_1.run)(this.binary, ["id"], this.env);
-        return (0, runner_1.assertOk)(result, "id").trim();
+        return parseAgentId((0, runner_1.assertOk)(result, "id"));
+    }
+    /** Contract-shaped alias for id(). */
+    async agentId() {
+        return this.id();
     }
     /** Return this agent's ID synchronously. */
     idSync() {
         const result = (0, runner_1.runSync)(this.binary, ["id"], this.env);
-        return (0, runner_1.assertOk)(result, "id").trim();
+        return parseAgentId((0, runner_1.assertOk)(result, "id"));
     }
     // ─── Rooms ──────────────────────────────────────────────────────────────────
     /** Join a room with roomId + secret. Returns the join output. */
@@ -65,6 +72,11 @@ class Agora {
             : ["join", roomId, secret];
         const result = await (0, runner_1.run)(this.binary, cmdArgs, this.env);
         return (0, runner_1.assertOk)(result, "join").trim();
+    }
+    /** Contract-shaped join that returns a room session adapter. */
+    async joinRoom(roomId, secret, label = "default") {
+        await this.join(roomId, secret, label);
+        return new CliRoomSession(this, roomId, label, await this.agentId());
     }
     /** List joined rooms. */
     async rooms() {
@@ -85,34 +97,40 @@ class Agora {
     // ─── Messaging ──────────────────────────────────────────────────────────────
     /** Send a message to the active room (or specified room). */
     async send(message, opts = {}) {
-        const cmdArgs = this.args(opts.room
-            ? ["--room", opts.room, "send", message]
-            : ["send", message]);
+        const cmdArgs = this.args(["send", message], opts.room);
         const result = await (0, runner_1.run)(this.binary, cmdArgs, this.env);
         return (0, runner_1.assertOk)(result, "send").trim();
     }
     /** Send a message synchronously. */
     sendSync(message, room) {
-        const cmdArgs = this.args(room ? ["--room", room, "send", message] : ["send", message]);
+        const cmdArgs = this.args(["send", message], room);
         const result = (0, runner_1.runSync)(this.binary, cmdArgs, this.env);
         return (0, runner_1.assertOk)(result, "send").trim();
     }
+    /** Send an application JSON frame in the Agora message text field. */
+    async sendJson(value, opts = {}) {
+        return this.send(JSON.stringify(value), opts);
+    }
+    /** Send an application JSON frame synchronously. */
+    sendJsonSync(value, room) {
+        return this.sendSync(JSON.stringify(value), room);
+    }
     /** Read messages from the active room. */
     async read(opts = {}) {
-        const cmdArgs = opts.room
-            ? ["--room", opts.room, "read"]
-            : this.args(["read"]);
+        const cmdArgs = this.args(["read"], opts.room);
         if (opts.limit)
-            cmdArgs.push("--limit", String(opts.limit));
+            cmdArgs.push("--tail", String(opts.limit));
         const result = await (0, runner_1.run)(this.binary, cmdArgs, this.env);
         const raw = (0, runner_1.assertOk)(result, "read");
         return (0, parsers_2.parseMessages)((0, runner_1.stripAnsi)(raw));
     }
+    /** Read messages whose content is valid JSON and parse them as application frames. */
+    async readJson(opts = {}) {
+        return parseJsonMessages(await this.read(opts));
+    }
     /** Check for new messages. Returns true if there are new messages. */
     async check(room) {
-        const cmdArgs = room
-            ? ["--room", room, "check"]
-            : this.args(["check"]);
+        const cmdArgs = this.args(["check"], room);
         const result = await (0, runner_1.run)(this.binary, cmdArgs, this.env);
         // exit code 0 = no new messages, 2 = new messages (with --wake),
         // for plain check: output mentions new messages
@@ -123,9 +141,7 @@ class Agora {
     }
     /** Search messages by text. */
     async search(query, room) {
-        const cmdArgs = room
-            ? ["--room", room, "search", query]
-            : this.args(["search", query]);
+        const cmdArgs = this.args(["search", query], room);
         const result = await (0, runner_1.run)(this.binary, cmdArgs, this.env);
         const raw = (0, runner_1.assertOk)(result, "search");
         return (0, parsers_2.parseMessages)((0, runner_1.stripAnsi)(raw));
@@ -133,17 +149,13 @@ class Agora {
     // ─── Presence ───────────────────────────────────────────────────────────────
     /** Send a heartbeat to indicate presence. */
     async heartbeat(room) {
-        const cmdArgs = room
-            ? ["--room", room, "heartbeat"]
-            : this.args(["heartbeat"]);
+        const cmdArgs = this.args(["heartbeat"], room);
         const result = await (0, runner_1.run)(this.binary, cmdArgs, this.env);
         return (0, runner_1.assertOk)(result, "heartbeat").trim();
     }
     /** List room members. */
     async who(room) {
-        const cmdArgs = room
-            ? ["--room", room, "who"]
-            : this.args(["who"]);
+        const cmdArgs = this.args(["who"], room);
         const result = await (0, runner_1.run)(this.binary, cmdArgs, this.env);
         const raw = (0, runner_1.assertOk)(result, "who");
         return (0, parsers_2.parseMembers)((0, runner_1.stripAnsi)(raw));
@@ -151,9 +163,7 @@ class Agora {
     // ─── Tasks ──────────────────────────────────────────────────────────────────
     /** List tasks in the room. */
     async tasks(room) {
-        const cmdArgs = room
-            ? ["--room", room, "tasks"]
-            : this.args(["tasks"]);
+        const cmdArgs = this.args(["tasks"], room);
         const result = await (0, runner_1.run)(this.binary, cmdArgs, this.env);
         const raw = result.exitCode === 0 ? result.stdout : "";
         if (!raw.trim() || raw.includes("(no tasks)"))
@@ -162,9 +172,7 @@ class Agora {
     }
     /** Add a task to the queue. Returns the task ID. */
     async taskAdd(title, room) {
-        const cmdArgs = room
-            ? ["--room", room, "task-add", title]
-            : this.args(["task-add", title]);
+        const cmdArgs = this.args(["task-add", title], room);
         const result = await (0, runner_1.run)(this.binary, cmdArgs, this.env);
         const out = (0, runner_1.assertOk)(result, "task-add");
         const match = (0, runner_1.stripAnsi)(out).match(/\[([^\]]+)\]/);
@@ -172,17 +180,13 @@ class Agora {
     }
     /** Claim an open task by ID. */
     async taskClaim(id, room) {
-        const cmdArgs = room
-            ? ["--room", room, "task-claim", id]
-            : this.args(["task-claim", id]);
+        const cmdArgs = this.args(["task-claim", id], room);
         const result = await (0, runner_1.run)(this.binary, cmdArgs, this.env);
         return (0, runner_1.assertOk)(result, "task-claim").trim();
     }
     /** Mark a task as done. */
     async taskDone(id, notes, room) {
-        const cmdArgs = room
-            ? ["--room", room, "task-done", id]
-            : this.args(["task-done", id]);
+        const cmdArgs = this.args(["task-done", id], room);
         if (notes)
             cmdArgs.push("--notes", notes);
         const result = await (0, runner_1.run)(this.binary, cmdArgs, this.env);
@@ -191,9 +195,7 @@ class Agora {
     // ─── Info ────────────────────────────────────────────────────────────────────
     /** Get room statistics. */
     async stats(room) {
-        const cmdArgs = room
-            ? ["--room", room, "stats"]
-            : this.args(["stats"]);
+        const cmdArgs = this.args(["stats"], room);
         const result = await (0, runner_1.run)(this.binary, cmdArgs, this.env);
         const raw = (0, runner_1.assertOk)(result, "stats");
         const clean = (0, runner_1.stripAnsi)(raw);
@@ -211,9 +213,7 @@ class Agora {
     }
     /** Get room info including fingerprint. */
     async info(room) {
-        const cmdArgs = room
-            ? ["--room", room, "info"]
-            : this.args(["info"]);
+        const cmdArgs = this.args(["info"], room);
         const result = await (0, runner_1.run)(this.binary, cmdArgs, this.env);
         return (0, runner_1.stripAnsi)((0, runner_1.assertOk)(result, "info")).trim();
     }
@@ -238,50 +238,88 @@ class Agora {
     // ─── Webhooks ───────────────────────────────────────────────────────────────
     /** Register a webhook URL. */
     async webhookAdd(url, room) {
-        const cmdArgs = room
-            ? ["--room", room, "webhook-add", url]
-            : this.args(["webhook-add", url]);
+        const cmdArgs = this.args(["webhook-add", url], room);
         const result = await (0, runner_1.run)(this.binary, cmdArgs, this.env);
         return (0, runner_1.assertOk)(result, "webhook-add").trim();
     }
     /** List registered webhooks. */
     async webhookList(room) {
-        const cmdArgs = room
-            ? ["--room", room, "webhook-list"]
-            : this.args(["webhook-list"]);
+        const cmdArgs = this.args(["webhook-list"], room);
         const result = await (0, runner_1.run)(this.binary, cmdArgs, this.env);
         return (0, runner_1.stripAnsi)((0, runner_1.assertOk)(result, "webhook-list")).trim();
     }
     /** Remove a webhook. */
     async webhookRemove(id, room) {
-        const cmdArgs = room
-            ? ["--room", room, "webhook-remove", id]
-            : this.args(["webhook-remove", id]);
+        const cmdArgs = this.args(["webhook-remove", id], room);
         const result = await (0, runner_1.run)(this.binary, cmdArgs, this.env);
         return (0, runner_1.assertOk)(result, "webhook-remove").trim();
     }
     // ─── Recap / Digest ─────────────────────────────────────────────────────────
     /** Get a compact activity recap. */
     async recap(room) {
-        const cmdArgs = room
-            ? ["--room", room, "recap"]
-            : this.args(["recap"]);
+        const cmdArgs = this.args(["recap"], room);
         const result = await (0, runner_1.run)(this.binary, cmdArgs, this.env);
         return (0, runner_1.stripAnsi)((0, runner_1.assertOk)(result, "recap")).trim();
     }
     /** Generate a digest report. */
     async digest(period = "24h", room) {
-        const cmdArgs = room
-            ? ["--room", room, "digest", period]
-            : this.args(["digest", period]);
+        const cmdArgs = this.args(["digest", period], room);
         const result = await (0, runner_1.run)(this.binary, cmdArgs, this.env);
         return (0, runner_1.stripAnsi)((0, runner_1.assertOk)(result, "digest")).trim();
     }
 }
 exports.Agora = Agora;
+exports.AgoraClient = Agora;
+exports.AgoraCli = Agora;
+/** RoomSession-shaped wrapper over the transitional CLI adapter. */
+class CliRoomSession {
+    constructor(client, roomId, label, agentId) {
+        this.client = client;
+        this.roomId = roomId;
+        this.label = label;
+        this.agentId = agentId;
+    }
+    async fingerprint() {
+        const info = await this.client.info(this.label);
+        const match = info.match(/Fingerprint:\s*(.+)/);
+        return match ? match[1].trim() : "";
+    }
+    sendText(message) {
+        return this.client.send(message, { room: this.label });
+    }
+    sendJson(value) {
+        return this.client.sendJson(value, { room: this.label });
+    }
+    fetchMessages(opts = {}) {
+        return this.client.read({ ...opts, room: this.label });
+    }
+    fetchJson(opts = {}) {
+        return this.client.readJson({ ...opts, room: this.label });
+    }
+}
+exports.CliRoomSession = CliRoomSession;
 /** Convenience factory: create an Agora instance using environment variables. */
 function createAgora(config = {}) {
     return new Agora(config);
+}
+/** Parse messages whose content is valid JSON and preserve the original metadata. */
+function parseJsonMessages(messages) {
+    const parsed = [];
+    for (const message of messages) {
+        try {
+            parsed.push({ ...message, value: JSON.parse(message.content) });
+        }
+        catch {
+            // Mixed rooms are common; ignore regular chat messages.
+        }
+    }
+    return parsed;
+}
+function parseAgentId(raw) {
+    const match = raw.match(/Agent ID:\s*([^\s]+)/);
+    if (match)
+        return match[1];
+    return raw.trim();
 }
 exports.default = Agora;
 //# sourceMappingURL=index.js.map

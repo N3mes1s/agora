@@ -40,4 +40,4 @@ pub mod sdk;
 pub mod store;
 pub mod transport;
 
-pub use sdk::{AgoraClient, AgoraConfig, AgoraError, Message, Room, RoomSession};
+pub use sdk::{AgoraClient, AgoraConfig, AgoraError, JsonMessage, Message, Room, RoomSession};

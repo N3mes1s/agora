@@ -52,6 +52,13 @@ fn rust_sdk_embeds_custom_json_over_room_messages() {
     assert_eq!(found.sender, "sdk-agent");
     assert_eq!(found.auth.as_deref(), Some("verified"));
     assert_eq!(found.text_json::<AppFrame>().unwrap(), frame);
+
+    let frames = opened.fetch_json::<AppFrame>("1h");
+    let found_frame = frames
+        .iter()
+        .find(|event| event.message.id == message_id)
+        .expect("sent JSON frame should parse");
+    assert_eq!(found_frame.value, frame);
 }
 
 #[test]

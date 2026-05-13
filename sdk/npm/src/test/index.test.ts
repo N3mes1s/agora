@@ -9,8 +9,8 @@ import { strict as assert } from "assert";
 import { mkdtempSync, rmSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
-import { Agora, parseMessages, parseRooms, parseMembers, parseTasks } from "../index";
-import { stripAnsi } from "../runner";
+import { AgoraClient, parseMessages, parseRooms, parseMembers, parseTasks, parseJsonMessages } from "../index";
+import { buildEnv, stripAnsi } from "../runner";
 
 // ─── Unit tests: parsers ─────────────────────────────────────────────────────
 
@@ -85,27 +85,76 @@ function testStripAnsi() {
   console.log("  ✓ stripAnsi");
 }
 
+function testParseJsonMessages() {
+  const messages = parseMessages(`
+  [05:29:35] [3fe144] bridge-agent: {"kind":"req","id":"42","body":"payload"}
+  [05:30:01] [abcdef] human: plain chat
+  `);
+  const frames = parseJsonMessages<{ kind: string; id: string; body: string }>(messages);
+  assert.equal(frames.length, 1, "should skip non-JSON messages");
+  assert.equal(frames[0].agentId, "bridge-agent");
+  assert.equal(frames[0].value.kind, "req");
+  assert.equal(frames[0].value.id, "42");
+  assert.equal(frames[0].value.body, "payload");
+  console.log("  ✓ parseJsonMessages");
+}
+
+function testBuildEnv() {
+  const env = buildEnv(
+    "/tmp/agora-js-home",
+    "agent-js",
+    "memory://js-sdk",
+    "relay-token",
+    "https://mirror.example"
+  );
+  assert.equal(env.HOME, "/tmp/agora-js-home");
+  assert.equal(env.AGORA_HOME, "/tmp/agora-js-home");
+  assert.equal(env.AGORA_AGENT_ID, "agent-js");
+  assert.equal(env.AGORA_RELAY_URL, "memory://js-sdk");
+  assert.equal(env.AGORA_RELAY_TOKEN, "relay-token");
+  assert.equal(env.AGORA_RELAY_MIRROR, "https://mirror.example");
+  console.log("  ✓ buildEnv");
+}
+
 // ─── Integration tests: real binary ──────────────────────────────────────────
 
-async function testAgoraId(agora: Agora) {
+async function testAgoraId(agora: AgoraClient) {
   const id = await agora.id();
+  const alias = await agora.agentId();
   assert.ok(id.length > 0, "id should be non-empty");
   assert.match(id, /^[0-9A-Za-z-]+$/, "id should be alphanumeric");
+  assert.equal(alias, id, "agentId should alias id");
   console.log(`  ✓ agora.id() = ${id}`);
 }
 
-async function testAgoraRooms(agora: Agora) {
+async function testAgoraRooms(agora: AgoraClient) {
   const rooms = await agora.rooms();
   // After joining, there should be at least one room
   assert.ok(Array.isArray(rooms), "rooms should be an array");
   console.log(`  ✓ agora.rooms() = ${rooms.length} room(s)`);
 }
 
-async function testAgoraTasks(agora: Agora) {
+async function testAgoraTasks(agora: AgoraClient) {
   // Tasks should return an array (may be empty)
   const tasks = await agora.tasks();
   assert.ok(Array.isArray(tasks), "tasks should be an array");
   console.log(`  ✓ agora.tasks() = ${tasks.length} task(s)`);
+}
+
+async function testJoinRoomSessionContract(agora: AgoraClient) {
+  const room = await agora.joinRoom(
+    "ag-js-sdk-contract",
+    "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "contract-room"
+  );
+  assert.equal(room.roomId, "ag-js-sdk-contract");
+  assert.equal(room.label, "contract-room");
+  assert.ok(room.agentId.length > 0, "room session should expose agentId");
+  assert.match(await room.fingerprint(), /^([0-9a-f]{4}\s+){7}[0-9a-f]{4}$/);
+  await room.sendJson({ kind: "job", id: "contract-1" });
+  const frames = await room.fetchJson<{ kind: string; id: string }>({ limit: 10 });
+  assert.ok(frames.some((frame) => frame.value.id === "contract-1"));
+  console.log("  ✓ joinRoom() RoomSession contract");
 }
 
 // ─── Main ────────────────────────────────────────────────────────────────────
@@ -120,6 +169,8 @@ async function main() {
   testParseMembers();
   testParseTasks();
   testStripAnsi();
+  testParseJsonMessages();
+  testBuildEnv();
 
   // Integration tests (require binary)
   const binaryPath =
@@ -129,14 +180,16 @@ async function main() {
   const home = mkdtempSync(join(tmpdir(), "agora-sdk-test-"));
   try {
     console.log("\nIntegration tests:");
-    const agora = new Agora({
+    const agora = new AgoraClient({
       binaryPath,
       home,
+      relayUrl: "memory://js-sdk-test",
     });
 
     await testAgoraId(agora);
     await testAgoraRooms(agora);
     await testAgoraTasks(agora);
+    await testJoinRoomSessionContract(agora);
 
     console.log("\nAll tests passed.\n");
   } finally {
