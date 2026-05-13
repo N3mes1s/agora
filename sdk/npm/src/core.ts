@@ -15,6 +15,24 @@ import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "fs";
 import { homedir } from "os";
 import { join } from "path";
 import {
+  AckPolicy,
+  DeliverPolicy,
+  ReplayPolicy,
+  RetentionPolicy,
+  StorageType,
+  StringCodec,
+  connect as connectNats,
+  type ConnectionOptions,
+  type NatsConnection,
+  type StreamConfig as NatsStreamConfig,
+  type ConsumerConfig as NatsConsumerConfig,
+  type JsMsg,
+  type StreamInfo,
+  type Consumer,
+  type JetStreamManager,
+  type JetStreamClient,
+} from "nats";
+import {
   AgoraConfig,
   AgoraJsonMessage,
   AgoraMember,
@@ -30,6 +48,13 @@ import {
 const ENVELOPE_VERSION = "3.0";
 const SIGNED_WIRE_VERSION = "3.1";
 const DEFAULT_RELAY_URL = "https://ntfy.theagora.dev";
+const DEFAULT_NATS_STREAM = "AGORA";
+const DEFAULT_NATS_SUBJECT_PREFIX = "agora";
+const NATS_FETCH_BATCH_SIZE = 256;
+const NATS_FETCH_EXPIRES_MS = 1_000;
+const NATS_CONSUMER_INACTIVE_NANOS = 10_000_000_000;
+const NATS_CONSUMER_MAX_EXPIRES_NANOS = 30_000_000_000;
+const NATS_CONSUMER_MAX_BYTES = 1_048_576;
 const ED25519_SPKI_PREFIX = Buffer.from("302a300506032b6570032100", "hex");
 const ED25519_PKCS8_V0_PREFIX = Buffer.from("302e020100300506032b657004220420", "hex");
 const ED25519_PKCS8_RING_PREFIX = Buffer.from("3051020101300506032b657004220420", "hex");
@@ -80,6 +105,16 @@ interface RelayEvent {
   message: string;
 }
 
+interface NatsSettings {
+  streamName: string;
+  subjectPrefix: string;
+  streamSubject: string;
+  createStream: boolean;
+  storage: "file" | "memory";
+  maxBytes: number;
+  maxAgeNanos: number;
+}
+
 const memoryRelays = new Map<string, RelayEvent[]>();
 
 /** Direct TypeScript Agora SDK client. */
@@ -87,6 +122,7 @@ export class AgoraClient {
   private readonly homeDir: string;
   private readonly relayUrl?: string;
   private readonly relayToken?: string;
+  private readonly natsSettings: NatsSettings;
   private readonly defaultRoom?: string;
   private readonly configuredAgentId?: string;
   private _agentId?: string;
@@ -95,6 +131,7 @@ export class AgoraClient {
     this.homeDir = resolveHome(config.home);
     this.relayUrl = config.relayUrl ?? process.env.AGORA_RELAY_URL;
     this.relayToken = config.relayToken ?? process.env.AGORA_RELAY_TOKEN;
+    this.natsSettings = natsSettingsFromConfig(config);
     this.defaultRoom = config.room;
     this.configuredAgentId = config.agentId ?? process.env.AGORA_AGENT_ID;
   }
@@ -296,7 +333,7 @@ export class AgoraClient {
   }
 
   _publish(roomId: string, payload: string): Promise<void> {
-    return publish(this.effectiveRelayUrl(), this.relayToken, roomId, payload);
+    return publish(this.effectiveRelayUrl(), this.relayToken, this.natsSettings, roomId, payload);
   }
 
   _publishSync(roomId: string, payload: string): void {
@@ -304,7 +341,7 @@ export class AgoraClient {
   }
 
   _fetch(roomId: string, since: string): Promise<RelayEvent[]> {
-    return fetchRelay(this.effectiveRelayUrl(), this.relayToken, roomId, since);
+    return fetchRelay(this.effectiveRelayUrl(), this.relayToken, this.natsSettings, roomId, since);
   }
 
   _makeEnvelope(text: string, replyTo?: string): Envelope {
@@ -772,11 +809,22 @@ function envelopeToMessage(envelope: Envelope, roomId: string): AgoraMessage {
   };
 }
 
-async function publish(relayUrl: string, token: string | undefined, topic: string, payload: string): Promise<void> {
+async function publish(
+  relayUrl: string,
+  token: string | undefined,
+  natsSettings: NatsSettings,
+  topic: string,
+  payload: string
+): Promise<void> {
   if (relayUrl.startsWith("memory://")) {
     publishMemory(relayUrl, topic, payload);
     return;
   }
+  if (isNatsRelay(relayUrl)) {
+    await publishNats(relayUrl, token, natsSettings, topic, payload);
+    return;
+  }
+
   const headers: Record<string, string> = token ? { Authorization: `Bearer ${token}` } : {};
   const response = await fetch(`${relayUrl}/${topic}`, {
     method: "POST",
@@ -800,10 +848,19 @@ function publishMemory(relayUrl: string, topic: string, payload: string): void {
   memoryRelays.set(key, events);
 }
 
-async function fetchRelay(relayUrl: string, token: string | undefined, topic: string, since: string): Promise<RelayEvent[]> {
+async function fetchRelay(
+  relayUrl: string,
+  token: string | undefined,
+  natsSettings: NatsSettings,
+  topic: string,
+  since: string
+): Promise<RelayEvent[]> {
   if (relayUrl.startsWith("memory://")) {
     const cutoff = sinceCutoff(since);
     return (memoryRelays.get(`${relayUrl}/${topic}`) ?? []).filter((event) => event.time >= cutoff);
+  }
+  if (isNatsRelay(relayUrl)) {
+    return fetchNats(relayUrl, token, natsSettings, topic, since);
   }
 
   const headers: Record<string, string> = token ? { Authorization: `Bearer ${token}` } : {};
@@ -833,4 +890,219 @@ function sinceCutoff(since: string): number {
   const unit = match[2];
   const multiplier = unit === "s" ? 1 : unit === "m" ? 60 : unit === "h" ? 3600 : 86400;
   return now() - value * multiplier;
+}
+
+function isNatsRelay(relayUrl: string): boolean {
+  return relayUrl.startsWith("nats://") || relayUrl.startsWith("tls://");
+}
+
+async function publishNats(
+  relayUrl: string,
+  token: string | undefined,
+  settings: NatsSettings,
+  topic: string,
+  payload: string
+): Promise<void> {
+  const nc = await connectNats(natsConnectionOptions(relayUrl, token));
+  try {
+    const { js } = await natsContexts(nc, settings);
+    const subject = natsSubjectForTopic(settings, topic);
+    await js.publish(subject, StringCodec().encode(payload), {
+      msgID: `agora-${process.pid}-${now()}-${randomBytes(4).toString("hex")}`,
+    });
+    await nc.flush();
+  } finally {
+    await nc.close();
+  }
+}
+
+async function fetchNats(
+  relayUrl: string,
+  token: string | undefined,
+  settings: NatsSettings,
+  topic: string,
+  since: string
+): Promise<RelayEvent[]> {
+  const nc = await connectNats(natsConnectionOptions(relayUrl, token));
+  const decoder = StringCodec();
+  try {
+    const { js, jsm } = await natsContexts(nc, settings);
+    const subject = natsSubjectForTopic(settings, topic);
+    const consumer = await createNatsFetchConsumer(jsm, settings, subject, sinceCutoff(since));
+    try {
+      const events: RelayEvent[] = [];
+      while (true) {
+        let sawMessages = false;
+        const batch = await consumer.fetch({
+          max_messages: NATS_FETCH_BATCH_SIZE,
+          expires: NATS_FETCH_EXPIRES_MS,
+        });
+        for await (const message of batch) {
+          sawMessages = true;
+          events.push(natsMessageToEvent(message, decoder));
+          message.ack();
+        }
+        if (!sawMessages) break;
+      }
+      return events;
+    } finally {
+      await consumer.delete().catch(() => undefined);
+    }
+  } finally {
+    await nc.close();
+  }
+}
+
+function natsConnectionOptions(relayUrl: string, token: string | undefined): ConnectionOptions {
+  const options: ConnectionOptions = {
+    servers: relayUrl,
+    name: "agora-sdk",
+    timeout: 5_000,
+    maxReconnectAttempts: 10,
+  };
+  if (token) options.token = token;
+  if (relayUrl.startsWith("tls://")) options.tls = {};
+  return options;
+}
+
+async function natsContexts(
+  nc: NatsConnection,
+  settings: NatsSettings
+): Promise<{ js: JetStreamClient; jsm: JetStreamManager }> {
+  const jsm = await nc.jetstreamManager();
+  await ensureNatsStream(jsm, settings);
+  return { js: nc.jetstream(), jsm };
+}
+
+async function ensureNatsStream(jsm: JetStreamManager, settings: NatsSettings): Promise<StreamInfo> {
+  if (!settings.createStream) {
+    return jsm.streams.info(settings.streamName);
+  }
+  try {
+    return await jsm.streams.info(settings.streamName);
+  } catch {
+    return jsm.streams.add(natsStreamConfig(settings));
+  }
+}
+
+function natsStreamConfig(settings: NatsSettings): Partial<NatsStreamConfig> {
+  return {
+    name: settings.streamName,
+    subjects: [settings.streamSubject],
+    retention: RetentionPolicy.Limits,
+    storage: settings.storage === "memory" ? StorageType.Memory : StorageType.File,
+    max_bytes: settings.maxBytes,
+    max_age: settings.maxAgeNanos,
+    allow_direct: true,
+    description: "Agora encrypted room relay events",
+  };
+}
+
+async function createNatsFetchConsumer(
+  jsm: JetStreamManager,
+  settings: NatsSettings,
+  subject: string,
+  cutoff: number
+): Promise<Consumer> {
+  const name = `agora_fetch_${Date.now()}_${randomBytes(4).toString("hex")}`;
+  const config: Partial<NatsConsumerConfig> = {
+    name,
+    ack_policy: AckPolicy.Explicit,
+    deliver_policy: cutoff === 0 ? DeliverPolicy.All : DeliverPolicy.StartTime,
+    replay_policy: ReplayPolicy.Instant,
+    filter_subject: subject,
+    inactive_threshold: NATS_CONSUMER_INACTIVE_NANOS,
+    max_batch: NATS_FETCH_BATCH_SIZE,
+    max_expires: NATS_CONSUMER_MAX_EXPIRES_NANOS,
+    max_bytes: NATS_CONSUMER_MAX_BYTES,
+  };
+  if (cutoff > 0) {
+    config.opt_start_time = new Date(cutoff * 1000).toISOString();
+  }
+  const info = await jsm.consumers.add(settings.streamName, config);
+  return jsm.jetstream().consumers.get(settings.streamName, info.name);
+}
+
+function natsMessageToEvent(message: JsMsg, decoder: ReturnType<typeof StringCodec>): RelayEvent {
+  return {
+    time: Math.floor(message.info.timestampNanos / 1_000_000_000),
+    message: decoder.decode(message.data),
+  };
+}
+
+function natsSubjectForTopic(settings: NatsSettings, topic: string): string {
+  return `${settings.subjectPrefix}.${base64Url(Buffer.from(topic, "utf8"))}`;
+}
+
+function base64Url(value: Buffer): string {
+  return value.toString("base64").replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+}
+
+function natsSettingsFromConfig(config: AgoraConfig): NatsSettings {
+  const streamName = normalizeNatsStreamName(config.natsStream ?? process.env.AGORA_NATS_STREAM ?? DEFAULT_NATS_STREAM);
+  const subjectPrefix = normalizeNatsSubjectPrefix(
+    config.natsSubjectPrefix ?? process.env.AGORA_NATS_SUBJECT_PREFIX ?? DEFAULT_NATS_SUBJECT_PREFIX
+  );
+  return {
+    streamName,
+    subjectPrefix,
+    streamSubject: `${subjectPrefix}.>`,
+    createStream: parseBool(config.natsCreateStream ?? process.env.AGORA_NATS_CREATE_STREAM, true),
+    storage: parseNatsStorage(config.natsStorage ?? process.env.AGORA_NATS_STORAGE),
+    maxBytes: Math.max(0, Number(config.natsMaxBytes ?? process.env.AGORA_NATS_MAX_BYTES ?? 0) || 0),
+    maxAgeNanos: parseNatsMaxAge(config.natsMaxAge ?? process.env.AGORA_NATS_MAX_AGE),
+  };
+}
+
+function parseBool(value: boolean | string | undefined, defaultValue: boolean): boolean {
+  if (typeof value === "boolean") return value;
+  if (typeof value !== "string") return defaultValue;
+  switch (value.trim().toLowerCase()) {
+    case "1":
+    case "true":
+    case "yes":
+    case "on":
+      return true;
+    case "0":
+    case "false":
+    case "no":
+    case "off":
+      return false;
+    default:
+      return defaultValue;
+  }
+}
+
+function parseNatsStorage(value: string | undefined): "file" | "memory" {
+  const normalized = (value ?? "").trim().toLowerCase();
+  return normalized === "memory" || normalized === "mem" ? "memory" : "file";
+}
+
+function parseNatsMaxAge(value: number | string | undefined): number {
+  if (typeof value === "number") return Math.max(0, value) * 1_000_000_000;
+  if (!value) return 0;
+  const match = value.trim().match(/^(\d+)([smhd])?$/);
+  if (!match) return 0;
+  const amount = Number(match[1]);
+  const unit = match[2] ?? "s";
+  const seconds = unit === "s" ? amount : unit === "m" ? amount * 60 : unit === "h" ? amount * 3600 : amount * 86_400;
+  return seconds * 1_000_000_000;
+}
+
+function normalizeNatsStreamName(raw: string): string {
+  const normalized = raw
+    .trim()
+    .replace(/[^0-9A-Za-z_-]/g, "_")
+    .replace(/^_+|_+$/g, "");
+  return normalized || DEFAULT_NATS_STREAM;
+}
+
+function normalizeNatsSubjectPrefix(raw: string): string {
+  const tokens = raw
+    .trim()
+    .replace(/^\.+|\.+$/g, "")
+    .split(".")
+    .map((token) => token.replace(/[^0-9A-Za-z_-]/g, "_").replace(/^_+|_+$/g, ""))
+    .filter(Boolean);
+  return tokens.length > 0 ? tokens.join(".") : DEFAULT_NATS_SUBJECT_PREFIX;
 }

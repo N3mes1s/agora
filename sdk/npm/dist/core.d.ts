@@ -18,6 +18,7 @@ export declare class AgoraClient {
     private readonly homeDir;
     private readonly relayUrl?;
     private readonly relayToken?;
+    private readonly natsSettings;
     private readonly defaultRoom?;
     private readonly configuredAgentId?;
     private _agentId?;

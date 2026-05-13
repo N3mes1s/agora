@@ -8,6 +8,15 @@ export interface RunResult {
   exitCode: number;
 }
 
+export interface NatsEnvOptions {
+  natsStream?: string;
+  natsSubjectPrefix?: string;
+  natsCreateStream?: boolean;
+  natsStorage?: string;
+  natsMaxBytes?: number;
+  natsMaxAge?: number | string;
+}
+
 /**
  * Resolves the agora binary path.
  * Priority: explicit path → AGORA_BIN env → bundled binary → 'agora' on PATH
@@ -36,7 +45,8 @@ export function buildEnv(
   agentId?: string,
   relayUrl?: string,
   relayToken?: string,
-  relayMirror?: string
+  relayMirror?: string,
+  nats?: NatsEnvOptions
 ): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { ...process.env };
   if (home) {
@@ -47,6 +57,14 @@ export function buildEnv(
   if (relayUrl) env["AGORA_RELAY_URL"] = relayUrl;
   if (relayToken) env["AGORA_RELAY_TOKEN"] = relayToken;
   if (relayMirror) env["AGORA_RELAY_MIRROR"] = relayMirror;
+  if (nats?.natsStream) env["AGORA_NATS_STREAM"] = nats.natsStream;
+  if (nats?.natsSubjectPrefix) env["AGORA_NATS_SUBJECT_PREFIX"] = nats.natsSubjectPrefix;
+  if (typeof nats?.natsCreateStream === "boolean") {
+    env["AGORA_NATS_CREATE_STREAM"] = String(nats.natsCreateStream);
+  }
+  if (nats?.natsStorage) env["AGORA_NATS_STORAGE"] = nats.natsStorage;
+  if (typeof nats?.natsMaxBytes === "number") env["AGORA_NATS_MAX_BYTES"] = String(nats.natsMaxBytes);
+  if (typeof nats?.natsMaxAge !== "undefined") env["AGORA_NATS_MAX_AGE"] = String(nats.natsMaxAge);
   return env;
 }
 

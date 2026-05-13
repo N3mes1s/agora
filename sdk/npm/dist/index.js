@@ -45,7 +45,14 @@ const core_2 = require("./core");
 class AgoraCli {
     constructor(config = {}) {
         this.binary = (0, runner_1.resolveBinaryPath)(config.binaryPath);
-        this.env = (0, runner_1.buildEnv)(config.home, config.agentId, config.relayUrl, config.relayToken, config.relayMirror);
+        this.env = (0, runner_1.buildEnv)(config.home, config.agentId, config.relayUrl, config.relayToken, config.relayMirror, {
+            natsStream: config.natsStream,
+            natsSubjectPrefix: config.natsSubjectPrefix,
+            natsCreateStream: config.natsCreateStream,
+            natsStorage: config.natsStorage,
+            natsMaxBytes: config.natsMaxBytes,
+            natsMaxAge: config.natsMaxAge,
+        });
         this.defaultRoom = config.room;
     }
     args(baseArgs, room) {

@@ -93,13 +93,26 @@ function testParseJsonMessages() {
     console.log("  ✓ parseJsonMessages");
 }
 function testBuildEnv() {
-    const env = (0, runner_1.buildEnv)("/tmp/agora-js-home", "agent-js", "memory://js-sdk", "relay-token", "https://mirror.example");
+    const env = (0, runner_1.buildEnv)("/tmp/agora-js-home", "agent-js", "memory://js-sdk", "relay-token", "https://mirror.example", {
+        natsStream: "AGORA_PROD",
+        natsSubjectPrefix: "prod.agora",
+        natsCreateStream: false,
+        natsStorage: "memory",
+        natsMaxBytes: 1048576,
+        natsMaxAge: "7d",
+    });
     assert_1.strict.equal(env.HOME, "/tmp/agora-js-home");
     assert_1.strict.equal(env.AGORA_HOME, "/tmp/agora-js-home");
     assert_1.strict.equal(env.AGORA_AGENT_ID, "agent-js");
     assert_1.strict.equal(env.AGORA_RELAY_URL, "memory://js-sdk");
     assert_1.strict.equal(env.AGORA_RELAY_TOKEN, "relay-token");
     assert_1.strict.equal(env.AGORA_RELAY_MIRROR, "https://mirror.example");
+    assert_1.strict.equal(env.AGORA_NATS_STREAM, "AGORA_PROD");
+    assert_1.strict.equal(env.AGORA_NATS_SUBJECT_PREFIX, "prod.agora");
+    assert_1.strict.equal(env.AGORA_NATS_CREATE_STREAM, "false");
+    assert_1.strict.equal(env.AGORA_NATS_STORAGE, "memory");
+    assert_1.strict.equal(env.AGORA_NATS_MAX_BYTES, "1048576");
+    assert_1.strict.equal(env.AGORA_NATS_MAX_AGE, "7d");
     console.log("  ✓ buildEnv");
 }
 // ─── Integration tests: direct SDK core ──────────────────────────────────────

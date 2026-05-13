@@ -42,7 +42,15 @@ export class AgoraCli {
       config.agentId,
       config.relayUrl,
       config.relayToken,
-      config.relayMirror
+      config.relayMirror,
+      {
+        natsStream: config.natsStream,
+        natsSubjectPrefix: config.natsSubjectPrefix,
+        natsCreateStream: config.natsCreateStream,
+        natsStorage: config.natsStorage,
+        natsMaxBytes: config.natsMaxBytes,
+        natsMaxAge: config.natsMaxAge,
+      }
     );
     this.defaultRoom = config.room;
   }

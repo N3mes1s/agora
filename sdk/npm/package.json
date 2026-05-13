@@ -36,5 +36,8 @@
   "repository": {
     "type": "git",
     "url": "https://github.com/N3mes1s/agora"
+  },
+  "dependencies": {
+    "nats": "^2.29.3"
   }
 }

@@ -105,7 +105,15 @@ function testBuildEnv() {
     "agent-js",
     "memory://js-sdk",
     "relay-token",
-    "https://mirror.example"
+    "https://mirror.example",
+    {
+      natsStream: "AGORA_PROD",
+      natsSubjectPrefix: "prod.agora",
+      natsCreateStream: false,
+      natsStorage: "memory",
+      natsMaxBytes: 1048576,
+      natsMaxAge: "7d",
+    }
   );
   assert.equal(env.HOME, "/tmp/agora-js-home");
   assert.equal(env.AGORA_HOME, "/tmp/agora-js-home");
@@ -113,6 +121,12 @@ function testBuildEnv() {
   assert.equal(env.AGORA_RELAY_URL, "memory://js-sdk");
   assert.equal(env.AGORA_RELAY_TOKEN, "relay-token");
   assert.equal(env.AGORA_RELAY_MIRROR, "https://mirror.example");
+  assert.equal(env.AGORA_NATS_STREAM, "AGORA_PROD");
+  assert.equal(env.AGORA_NATS_SUBJECT_PREFIX, "prod.agora");
+  assert.equal(env.AGORA_NATS_CREATE_STREAM, "false");
+  assert.equal(env.AGORA_NATS_STORAGE, "memory");
+  assert.equal(env.AGORA_NATS_MAX_BYTES, "1048576");
+  assert.equal(env.AGORA_NATS_MAX_AGE, "7d");
   console.log("  ✓ buildEnv");
 }
 

@@ -31,7 +31,7 @@ function resolveBinaryPath(explicit) {
     // Fall back to PATH
     return "agora";
 }
-function buildEnv(home, agentId, relayUrl, relayToken, relayMirror) {
+function buildEnv(home, agentId, relayUrl, relayToken, relayMirror, nats) {
     const env = { ...process.env };
     if (home) {
         env["HOME"] = home;
@@ -45,6 +45,19 @@ function buildEnv(home, agentId, relayUrl, relayToken, relayMirror) {
         env["AGORA_RELAY_TOKEN"] = relayToken;
     if (relayMirror)
         env["AGORA_RELAY_MIRROR"] = relayMirror;
+    if (nats?.natsStream)
+        env["AGORA_NATS_STREAM"] = nats.natsStream;
+    if (nats?.natsSubjectPrefix)
+        env["AGORA_NATS_SUBJECT_PREFIX"] = nats.natsSubjectPrefix;
+    if (typeof nats?.natsCreateStream === "boolean") {
+        env["AGORA_NATS_CREATE_STREAM"] = String(nats.natsCreateStream);
+    }
+    if (nats?.natsStorage)
+        env["AGORA_NATS_STORAGE"] = nats.natsStorage;
+    if (typeof nats?.natsMaxBytes === "number")
+        env["AGORA_NATS_MAX_BYTES"] = String(nats.natsMaxBytes);
+    if (typeof nats?.natsMaxAge !== "undefined")
+        env["AGORA_NATS_MAX_AGE"] = String(nats.natsMaxAge);
     return env;
 }
 /**

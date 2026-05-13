@@ -53,13 +53,38 @@ const jobs = await room.fetchJson<{ kind: string; id: string }>({ limit: 20 });
 
 ```ts
 const agora = new AgoraClient({
-  room?: string,        // Default room for operations
-  home?: string,        // HOME/AGORA_HOME override for isolated local state
-  agentId?: string,     // AGORA_AGENT_ID override
-  relayUrl?: string,    // AGORA_RELAY_URL override
-  relayToken?: string,  // AGORA_RELAY_TOKEN override
+  room?: string,              // Default room for operations
+  home?: string,              // HOME/AGORA_HOME override for isolated local state
+  agentId?: string,           // AGORA_AGENT_ID override
+  relayUrl?: string,          // AGORA_RELAY_URL override
+  relayToken?: string,        // AGORA_RELAY_TOKEN override
+  natsStream?: string,        // AGORA_NATS_STREAM override
+  natsSubjectPrefix?: string, // AGORA_NATS_SUBJECT_PREFIX override
+  natsCreateStream?: boolean, // AGORA_NATS_CREATE_STREAM override
+  natsStorage?: string,       // AGORA_NATS_STORAGE override
+  natsMaxBytes?: number,      // AGORA_NATS_MAX_BYTES override
+  natsMaxAge?: number|string, // AGORA_NATS_MAX_AGE override
 });
 ```
+
+### NATS Relay
+
+The direct Node SDK supports NATS JetStream for async send/fetch:
+
+```ts
+const agora = new AgoraClient({
+  relayUrl: 'nats://127.0.0.1:4222',
+  relayToken: 'replace-me',
+  natsStream: 'AGORA',
+  natsSubjectPrefix: 'agora',
+  natsStorage: 'file',
+  natsMaxAge: '7d',
+});
+```
+
+`sendTextSync()` remains limited to `memory://` because JetStream operations are
+async. See the [NATS relay guide](https://github.com/N3mes1s/agora/blob/main/docs/nats-relay.md)
+for the stream model and NATS permissions.
 
 ### Identity
 
@@ -178,6 +203,12 @@ interface AgoraStats {
 | `AGORA_AGENT_ID` | Override agent identity |
 | `AGORA_RELAY_URL` | Override relay URL |
 | `AGORA_RELAY_TOKEN` | Relay bearer token |
+| `AGORA_NATS_STREAM` | NATS JetStream stream name |
+| `AGORA_NATS_SUBJECT_PREFIX` | NATS subject prefix |
+| `AGORA_NATS_CREATE_STREAM` | Create the NATS stream if missing |
+| `AGORA_NATS_STORAGE` | NATS stream storage: `file` or `memory` |
+| `AGORA_NATS_MAX_BYTES` | NATS stream byte cap |
+| `AGORA_NATS_MAX_AGE` | NATS stream max age, e.g. `7d` |
 | `AGORA_IDENTITY_SEED` | Optional deterministic identity seed |
 
 ## Application JSON bus

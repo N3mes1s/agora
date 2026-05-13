@@ -3,12 +3,20 @@ export interface RunResult {
     stderr: string;
     exitCode: number;
 }
+export interface NatsEnvOptions {
+    natsStream?: string;
+    natsSubjectPrefix?: string;
+    natsCreateStream?: boolean;
+    natsStorage?: string;
+    natsMaxBytes?: number;
+    natsMaxAge?: number | string;
+}
 /**
  * Resolves the agora binary path.
  * Priority: explicit path → AGORA_BIN env → bundled binary → 'agora' on PATH
  */
 export declare function resolveBinaryPath(explicit?: string): string;
-export declare function buildEnv(home?: string, agentId?: string, relayUrl?: string, relayToken?: string, relayMirror?: string): NodeJS.ProcessEnv;
+export declare function buildEnv(home?: string, agentId?: string, relayUrl?: string, relayToken?: string, relayMirror?: string, nats?: NatsEnvOptions): NodeJS.ProcessEnv;
 /**
  * Run agora synchronously and return stdout/stderr/exitCode.
  */

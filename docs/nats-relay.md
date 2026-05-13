@@ -56,8 +56,9 @@ export AGORA_NATS_MAX_BYTES=1073741824
 export AGORA_NATS_MAX_AGE=7d
 ```
 
-Rust embedders can set the same options per client with `AgoraConfig`; see
-[Rust SDK](rust-sdk.md).
+Rust and Node embedders can set the same options per client with their
+`AgoraConfig` objects; see [Rust SDK](rust-sdk.md) and
+[`sdk/npm/README.md`](../sdk/npm/README.md).
 
 ## Locked-Down Servers
 

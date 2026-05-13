@@ -64,6 +64,18 @@ export interface AgoraConfig {
     relayToken?: string;
     /** CLI adapter only: optional mirror relay URL override (AGORA_RELAY_MIRROR env var) */
     relayMirror?: string;
+    /** NATS JetStream stream name override (AGORA_NATS_STREAM). */
+    natsStream?: string;
+    /** NATS subject prefix override (AGORA_NATS_SUBJECT_PREFIX). */
+    natsSubjectPrefix?: string;
+    /** Create the NATS stream if it is missing (AGORA_NATS_CREATE_STREAM). */
+    natsCreateStream?: boolean;
+    /** NATS stream storage override: "file" or "memory" (AGORA_NATS_STORAGE). */
+    natsStorage?: string;
+    /** NATS stream byte cap (AGORA_NATS_MAX_BYTES). */
+    natsMaxBytes?: number;
+    /** NATS stream max age in seconds, or a string like "7d" (AGORA_NATS_MAX_AGE). */
+    natsMaxAge?: number | string;
 }
 export interface RoomSessionContract {
     readonly label: string;
