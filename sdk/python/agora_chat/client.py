@@ -132,6 +132,7 @@ class RoomSession:
             since=since,
             base_url=self._client.relay_url,
             token=self._client.relay_token,
+            nats=self._client.nats_settings,
         ):
             env = decrypt_payload(payload, self._room_key, self.room_id)
             if env is None:
@@ -170,11 +171,25 @@ class AgoraClient:
         relay_url: Optional[str] = None,
         relay_token: Optional[str] = None,
         timeout: int = transport.DEFAULT_TIMEOUT,
+        nats_stream: Optional[str] = None,
+        nats_subject_prefix: Optional[str] = None,
+        nats_create_stream: Optional[bool] = None,
+        nats_storage: Optional[str] = None,
+        nats_max_bytes: Optional[int] = None,
+        nats_max_age: Optional[int | float | str] = None,
     ):
         self.home = Path(home).expanduser() if home is not None else None
         self.relay_url = relay_url
         self.relay_token = relay_token
         self.timeout = timeout
+        self.nats_settings = transport.NatsSettings.current(
+            stream_name=nats_stream,
+            subject_prefix=nats_subject_prefix,
+            create_stream=nats_create_stream,
+            storage=nats_storage,
+            max_bytes=nats_max_bytes,
+            max_age=nats_max_age,
+        )
         self.agent_id = agent_id or _load_identity(self.home)
         self._room: Optional[Room] = None
         self._room_key: Optional[bytes] = None
@@ -400,6 +415,7 @@ class AgoraClient:
             timeout=self.timeout,
             base_url=self.relay_url,
             token=self.relay_token,
+            nats=self.nats_settings,
         )
 
     def _fetch_raw(self, room_id: str, since: str) -> list[tuple[int, str]]:
@@ -409,6 +425,7 @@ class AgoraClient:
             timeout=self.timeout,
             base_url=self.relay_url,
             token=self.relay_token,
+            nats=self.nats_settings,
         )
 
     @staticmethod

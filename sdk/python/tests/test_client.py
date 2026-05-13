@@ -6,7 +6,7 @@ import os
 import pytest
 from unittest.mock import patch, MagicMock
 
-from agora_chat import AgoraClient
+from agora_chat import AgoraClient, transport
 from agora_chat.crypto import derive_room_key, derive_message_keys, decrypt, encrypt_envelope
 
 
@@ -78,12 +78,98 @@ class TestClientJoin:
             relay_url="memory://python-sdk",
             relay_token="secret-token",
             timeout=7,
+            nats_stream="AGORA_PROD",
+            nats_subject_prefix="prod.agora",
+            nats_create_stream=False,
+            nats_storage="memory",
+            nats_max_bytes=1048576,
+            nats_max_age="7d",
         )
         with patch("agora_chat.transport.publish", return_value=True) as mock_pub:
             client.join(ROOM_ID, SECRET, "testroom")
         assert mock_pub.call_args.kwargs["base_url"] == "memory://python-sdk"
         assert mock_pub.call_args.kwargs["token"] == "secret-token"
         assert mock_pub.call_args.kwargs["timeout"] == 7
+        settings = mock_pub.call_args.kwargs["nats"]
+        assert settings.stream_name == "AGORA_PROD"
+        assert settings.subject_prefix == "prod.agora"
+        assert settings.create_stream is False
+        assert settings.storage == "memory"
+        assert settings.max_bytes == 1048576
+        assert settings.max_age == 7 * 86400
+
+
+class TestNatsTransport:
+    def test_settings_read_env_overrides(self):
+        with patch.dict(
+            os.environ,
+            {
+                "AGORA_NATS_STREAM": "prod.agora/stream",
+                "AGORA_NATS_SUBJECT_PREFIX": ".prod/agora.room.",
+                "AGORA_NATS_CREATE_STREAM": "false",
+                "AGORA_NATS_STORAGE": "memory",
+                "AGORA_NATS_MAX_BYTES": "1048576",
+                "AGORA_NATS_MAX_AGE": "7d",
+            },
+            clear=True,
+        ):
+            settings = transport.NatsSettings.current()
+        assert settings.stream_name == "prod_agora_stream"
+        assert settings.subject_prefix == "prod_agora.room"
+        assert settings.create_stream is False
+        assert settings.storage == "memory"
+        assert settings.max_bytes == 1048576
+        assert settings.max_age == 7 * 86400
+
+    def test_subject_for_topic_is_stable_and_nats_safe(self):
+        settings = transport.NatsSettings()
+        subject = transport.subject_for_topic(settings, "dm-agent.alice-agent:bob")
+        assert subject.startswith("agora.")
+        assert " " not in subject
+        assert "*" not in subject
+        assert ">" not in subject
+
+    def test_publish_dispatches_to_nats_transport(self):
+        calls = []
+
+        async def fake_publish(relay_url, token, settings, topic, payload, timeout):
+            calls.append((relay_url, token, settings, topic, payload, timeout))
+
+        settings = transport.NatsSettings(stream_name="AGORA_TEST")
+        with patch("agora_chat.transport._publish_nats", fake_publish):
+            ok = transport.publish(
+                ROOM_ID,
+                "payload",
+                base_url="nats://127.0.0.1:4222",
+                token="secret-token",
+                timeout=3,
+                nats=settings,
+            )
+        assert ok is True
+        assert calls == [
+            ("nats://127.0.0.1:4222", "secret-token", settings, ROOM_ID, "payload", 3)
+        ]
+
+    def test_fetch_dispatches_to_nats_transport(self):
+        async def fake_fetch(relay_url, token, settings, topic, since, timeout):
+            assert relay_url == "tls://nats.example:4222"
+            assert token == "secret-token"
+            assert topic == ROOM_ID
+            assert since == "1h"
+            assert timeout == 4
+            return [(1700000000, "payload")]
+
+        settings = transport.NatsSettings(stream_name="AGORA_TEST")
+        with patch("agora_chat.transport._fetch_nats", fake_fetch):
+            events = transport.fetch(
+                ROOM_ID,
+                "1h",
+                base_url="tls://nats.example:4222",
+                token="secret-token",
+                timeout=4,
+                nats=settings,
+            )
+        assert events == [(1700000000, "payload")]
 
 
 class TestClientSend:

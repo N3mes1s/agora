@@ -22,6 +22,7 @@ classifiers = [
 ]
 dependencies = [
     "cryptography>=41.0",
+    "nats-py>=2.10.0",
     "requests>=2.31",
 ]
 
