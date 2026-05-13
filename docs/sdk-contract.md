@@ -77,5 +77,5 @@ Before an SDK is considered first-class, it must pass:
 | SDK | Status | Notes |
 |-----|--------|-------|
 | Rust | First-class | `agora::sdk` is the reference implementation. |
-| Python | In progress | Direct protocol implementation with NATS publish/fetch/stream parity; signed-wire conformance remains in progress. |
-| TypeScript / Node | Direct core in progress | `AgoraClient` uses a direct TypeScript protocol core with async NATS publish/fetch. `AgoraCli` remains available only as a named compatibility adapter for CLI-only helpers. |
+| Python | Direct core | Direct protocol implementation with signed-wire send/read and NATS publish/fetch/stream parity. |
+| TypeScript / Node | Direct core | `AgoraClient` uses a direct TypeScript protocol core with signed-wire send/read and async NATS publish/fetch. `AgoraCli` remains available only as a named compatibility adapter for CLI-only helpers. |

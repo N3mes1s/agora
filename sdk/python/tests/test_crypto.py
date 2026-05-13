@@ -1,5 +1,8 @@
 """Tests for agora_chat.crypto — mirrors the Rust test suite."""
 
+import base64
+import json
+
 import pytest
 from agora_chat.crypto import (
     derive_room_key,
@@ -128,7 +131,7 @@ class TestFingerprint:
 
 
 class TestEnvelopeCrypto:
-    def test_encrypt_decrypt_envelope_roundtrip(self):
+    def test_encrypt_decrypt_envelope_roundtrip(self, tmp_path):
         room_key = derive_room_key("secret", "ag-testroom")
         room_id = "ag-testroom"
         envelope = {
@@ -138,19 +141,45 @@ class TestEnvelopeCrypto:
             "ts": 1700000000,
             "text": "Hello from Python!",
         }
-        payload = encrypt_envelope(envelope, room_key, room_id)
-        result = decrypt_payload(payload, room_key, room_id)
+        payload = encrypt_envelope(envelope, room_key, room_id, home=tmp_path)
+        assert payload.startswith("{")
+        result = decrypt_payload(payload, room_key, room_id, home=tmp_path)
         assert result is not None
         assert result["text"] == "Hello from Python!"
         assert result["from"] == "agent-x"
         assert result["id"] == "abcd1234"
+        assert result["_auth"] == "verified"
 
-    def test_wrong_room_id_returns_none(self):
+    def test_signed_wire_rejects_trusted_key_mismatch(self, tmp_path):
+        room_key = derive_room_key("secret", "ag-testroom")
+        room_id = "ag-testroom"
+        first_home = tmp_path / "first"
+        second_home = tmp_path / "second"
+        recv_home = tmp_path / "receiver"
+        envelope = {"v": "3.0", "id": "x", "from": "agent-x", "ts": 0, "text": "hi"}
+        trusted_payload = encrypt_envelope(envelope, room_key, room_id, home=first_home)
+        assert decrypt_payload(trusted_payload, room_key, room_id, home=recv_home) is not None
+
+        mismatch_payload = encrypt_envelope(envelope, room_key, room_id, home=second_home)
+        assert decrypt_payload(mismatch_payload, room_key, room_id, home=recv_home) is None
+
+    def test_legacy_unsigned_payload_still_decrypts(self):
+        room_key = derive_room_key("secret", "ag-testroom")
+        room_id = "ag-testroom"
+        envelope = {"v": "3.0", "id": "x", "from": "legacy", "ts": 0, "text": "hi"}
+        enc_key, _ = derive_message_keys(room_key)
+        payload = base64.b64encode(encrypt(json.dumps(envelope).encode(), enc_key, room_id.encode())).decode()
+        result = decrypt_payload(payload, room_key, room_id)
+        assert result is not None
+        assert result["text"] == "hi"
+        assert result["_auth"] == "unsigned"
+
+    def test_wrong_room_id_returns_none(self, tmp_path):
         room_key = derive_room_key("secret", "ag-room1")
         envelope = {"v": "3.0", "id": "x", "from": "a", "ts": 0, "text": "hi"}
-        payload = encrypt_envelope(envelope, room_key, "ag-room1")
+        payload = encrypt_envelope(envelope, room_key, "ag-room1", home=tmp_path)
         # Try to decrypt with wrong room_id
-        result = decrypt_payload(payload, room_key, "ag-room2")
+        result = decrypt_payload(payload, room_key, "ag-room2", home=tmp_path)
         assert result is None
 
     def test_invalid_base64_returns_none(self):

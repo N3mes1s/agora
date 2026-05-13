@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any, Iterator, Optional
 
 from .crypto import (
+    create_identity,
     derive_room_key,
     encrypt_envelope,
     decrypt_payload,
@@ -59,16 +60,7 @@ def _load_identity(home: Optional[Path] = None) -> str:
         except (json.JSONDecodeError, KeyError):
             pass
 
-    # Derive from session env or generate
-    sid = os.environ.get("CLAUDE_CODE_SESSION_ID", "")
-    if sid:
-        agent_id = sid[4:12] if sid.startswith("cse_") else sid[:8]
-    else:
-        agent_id = os.urandom(4).hex()
-
-    agora_dir.mkdir(parents=True, exist_ok=True)
-    id_file.write_text(json.dumps({"agent_id": agent_id}, indent=2))
-    return agent_id
+    return create_identity(home)
 
 
 class RoomSession:
@@ -100,7 +92,7 @@ class RoomSession:
 
     def send_text(self, text: str, reply_to: Optional[str] = None) -> str:
         env = self._client._make_envelope(text, reply_to=reply_to)
-        encrypted = encrypt_envelope(env, self._room_key, self.room_id)
+        encrypted = self._client._encrypt_envelope(env, self._room_key, self.room_id)
         self._client._publish_encrypted(self.room_id, encrypted)
         return env["id"]
 
@@ -110,7 +102,7 @@ class RoomSession:
     def fetch_messages(self, since: str = "all", include_system: bool = False) -> list[Message]:
         messages: list[Message] = []
         for _ts, payload in self._client._fetch_raw(self.room_id, since):
-            env = decrypt_payload(payload, self._room_key, self.room_id)
+            env = self._client._decrypt_payload(payload, self._room_key, self.room_id)
             if env is None:
                 continue
             msg = Message.from_envelope(env)
@@ -134,7 +126,7 @@ class RoomSession:
             token=self._client.relay_token,
             nats=self._client.nats_settings,
         ):
-            env = decrypt_payload(payload, self._room_key, self.room_id)
+            env = self._client._decrypt_payload(payload, self._room_key, self.room_id)
             if env is None:
                 continue
             msg = Message.from_envelope(env)
@@ -213,7 +205,7 @@ class AgoraClient:
 
         # Announce presence
         env = self._make_envelope("Joined (agora v3, Python SDK).")
-        encrypted = encrypt_envelope(env, room_key, room_id)
+        encrypted = self._encrypt_envelope(env, room_key, room_id)
         self._publish_encrypted(room_id, encrypted)
         return self._session
 
@@ -234,7 +226,7 @@ class AgoraClient:
         self._seen = set()
 
         env = self._make_envelope("Room created (agora v3, Python SDK).")
-        encrypted = encrypt_envelope(env, room_key, room_id)
+        encrypted = self._encrypt_envelope(env, room_key, room_id)
         self._publish_encrypted(room_id, encrypted)
         return self._session
 
@@ -282,7 +274,7 @@ class AgoraClient:
         raw_events = self._fetch_raw(self.room.room_id, since)
         messages = []
         for ts, payload in raw_events:
-            env = decrypt_payload(payload, self.room_key, self.room.room_id)
+            env = self._decrypt_payload(payload, self.room_key, self.room.room_id)
             if env is None:
                 continue
             msg = Message.from_envelope(env)
@@ -304,7 +296,7 @@ class AgoraClient:
         raw_events = self._fetch_raw(self.room.room_id, since)
         messages = []
         for ts, payload in raw_events:
-            env = decrypt_payload(payload, self.room_key, self.room.room_id)
+            env = self._decrypt_payload(payload, self.room_key, self.room.room_id)
             if env is None:
                 continue
             msg = Message.from_envelope(env)
@@ -339,7 +331,7 @@ class AgoraClient:
             "type": "heartbeat",
             "text": "",
         }
-        encrypted = encrypt_envelope(env, self.room_key, self.room.room_id)
+        encrypted = self._encrypt_envelope(env, self.room_key, self.room.room_id)
         return self._publish_encrypted(self.room.room_id, encrypted)
 
     def react(self, target_id: str, emoji: str) -> bool:
@@ -354,7 +346,7 @@ class AgoraClient:
             "emoji": emoji,
             "text": "",
         }
-        encrypted = encrypt_envelope(env, self.room_key, self.room.room_id)
+        encrypted = self._encrypt_envelope(env, self.room_key, self.room.room_id)
         return self._publish_encrypted(self.room.room_id, encrypted)
 
     # ── Task Queue ───────────────────────────────────────────────
@@ -375,7 +367,7 @@ class AgoraClient:
         # Announce in room
         env = self._make_envelope(f"[task] New: {title} (id: {task_id[:6]})")
         env["task"] = task
-        encrypted = encrypt_envelope(env, self.room_key, self.room.room_id)
+        encrypted = self._encrypt_envelope(env, self.room_key, self.room.room_id)
         self._publish_encrypted(self.room.room_id, encrypted)
         return task_id
 
@@ -383,7 +375,7 @@ class AgoraClient:
         """Announce claiming a task."""
         env = self._make_envelope(f"[task] Claimed: {task_id[:6]} by {self.agent_id}")
         env["task_update"] = {"id": task_id, "status": "claimed", "claimed_by": self.agent_id}
-        encrypted = encrypt_envelope(env, self.room_key, self.room.room_id)
+        encrypted = self._encrypt_envelope(env, self.room_key, self.room.room_id)
         return self._publish_encrypted(self.room.room_id, encrypted)
 
     def task_done(self, task_id: str, notes: Optional[str] = None) -> bool:
@@ -391,7 +383,7 @@ class AgoraClient:
         note_str = f" — {notes}" if notes else ""
         env = self._make_envelope(f"[task] Done: {task_id[:6]}{note_str}")
         env["task_update"] = {"id": task_id, "status": "done", "notes": notes}
-        encrypted = encrypt_envelope(env, self.room_key, self.room.room_id)
+        encrypted = self._encrypt_envelope(env, self.room_key, self.room.room_id)
         return self._publish_encrypted(self.room.room_id, encrypted)
 
     # ── Internal ─────────────────────────────────────────────────
@@ -417,6 +409,12 @@ class AgoraClient:
             token=self.relay_token,
             nats=self.nats_settings,
         )
+
+    def _encrypt_envelope(self, env: dict, room_key: bytes, room_id: str) -> str:
+        return encrypt_envelope(env, room_key, room_id, home=self.home)
+
+    def _decrypt_payload(self, payload: str, room_key: bytes, room_id: str) -> dict | None:
+        return decrypt_payload(payload, room_key, room_id, home=self.home)
 
     def _fetch_raw(self, room_id: str, since: str) -> list[tuple[int, str]]:
         return transport.fetch(

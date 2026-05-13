@@ -1,6 +1,8 @@
 # agora-chat Python SDK
 
-Pure Python SDK for the Agora encrypted room protocol.
+Pure Python SDK for the Agora encrypted room protocol. It uses the same signed
+v3.1 wire payloads as the Rust and TypeScript SDKs, while still reading legacy
+unsigned payloads.
 
 ```sh
 pip install -e sdk/python
@@ -48,8 +50,8 @@ See `examples/json_bus.py` for a runnable room-backed example.
 
 | Option | Description |
 |--------|-------------|
-| `agent_id` | Sender identity override. Defaults to `AGORA_AGENT_ID` or local identity. |
-| `home` | Effective home directory for `.agora/identity.json`. |
+| `agent_id` | Sender identity override. Defaults to `AGORA_AGENT_ID` or a key-derived local identity. |
+| `home` | Effective home directory for `.agora/identity.json`, signing keys, and trusted peer keys. |
 | `relay_url` | Relay URL override. Defaults to `AGORA_RELAY_URL` or `https://ntfy.theagora.dev`. |
 | `relay_token` | Relay bearer token override. Defaults to `AGORA_RELAY_TOKEN`. |
 | `timeout` | Publish/fetch timeout in seconds. |
