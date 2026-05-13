@@ -9,7 +9,7 @@ use async_nats::jetstream;
 use async_nats::jetstream::consumer::{self, DeliverPolicy};
 use async_nats::jetstream::context::traits::Publisher as _;
 use async_nats::jetstream::message::PublishMessage;
-use async_nats::jetstream::stream::{Config as StreamConfigJs, Stream as JetStream};
+use async_nats::jetstream::stream::{Config as StreamConfigJs, StorageType, Stream as JetStream};
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use futures_util::StreamExt;
@@ -18,8 +18,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
-const STREAM_NAME: &str = "AGORA";
-const STREAM_SUBJECTS: &[&str] = &["agora.>"];
+const DEFAULT_STREAM_NAME: &str = "AGORA";
+const DEFAULT_SUBJECT_PREFIX: &str = "agora";
 const MESSAGE_ID_HEADER: &str = "Agora-Message-Id";
 const JETSTREAM_TIMEOUT: Duration = Duration::from_secs(5);
 const JETSTREAM_ACK_TIMEOUT: Duration = Duration::from_secs(30);
@@ -36,6 +36,7 @@ const STREAM_BATCH_SIZE: i64 = 512;
 struct NatsCacheKey {
     relay_url: String,
     relay_token: Option<String>,
+    settings: NatsSettings,
 }
 
 struct NatsState {
@@ -49,11 +50,72 @@ enum NatsStateError {
     Runtime(String),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum NatsStorage {
+    File,
+    Memory,
+}
+
+impl NatsStorage {
+    fn to_jetstream(self) -> StorageType {
+        match self {
+            Self::File => StorageType::File,
+            Self::Memory => StorageType::Memory,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct NatsSettings {
+    stream_name: String,
+    subject_prefix: String,
+    create_stream: bool,
+    storage: NatsStorage,
+    max_bytes: i64,
+    max_age: Duration,
+}
+
+impl NatsSettings {
+    fn current() -> Self {
+        Self {
+            stream_name: nats_stream_name(),
+            subject_prefix: nats_subject_prefix(),
+            create_stream: nats_create_stream(),
+            storage: nats_storage(),
+            max_bytes: nats_max_bytes(),
+            max_age: nats_max_age(),
+        }
+    }
+
+    fn stream_subject(&self) -> String {
+        format!("{}.>", self.subject_prefix)
+    }
+}
+
+impl Default for NatsSettings {
+    fn default() -> Self {
+        Self {
+            stream_name: DEFAULT_STREAM_NAME.to_string(),
+            subject_prefix: DEFAULT_SUBJECT_PREFIX.to_string(),
+            create_stream: true,
+            storage: NatsStorage::File,
+            max_bytes: 0,
+            max_age: Duration::default(),
+        }
+    }
+}
+
 pub(super) struct NatsTransport;
 
 impl Transport for NatsTransport {
     fn relay_status_label(&self, config: &TransportConfig) -> String {
-        format!("Relay ({})", config.relay_url)
+        let settings = NatsSettings::current();
+        format!(
+            "Relay ({} stream={} subjects={})",
+            config.relay_url,
+            settings.stream_name,
+            settings.stream_subject()
+        )
     }
 
     fn publish_limits(&self, _config: &TransportConfig) -> PublishLimits {
@@ -71,10 +133,11 @@ impl Transport for NatsTransport {
         payload: &str,
     ) -> Result<(), PublishError> {
         block_on(async {
-            let state = shared_state(config)
+            let settings = NatsSettings::current();
+            let state = shared_state(config, &settings)
                 .await
                 .map_err(classify_publish_state_error)?;
-            let subject = subject_for_topic(topic);
+            let subject = subject_for_topic(&settings, topic);
             let message_id = message_id();
             let publish = PublishMessage::build()
                 .message_id(message_id.clone())
@@ -95,10 +158,11 @@ impl Transport for NatsTransport {
     fn fetch(&self, config: &TransportConfig, topic: &str, since: &str) -> Vec<(u64, String)> {
         let cutoff = parse_since_cutoff(since, runtime::unix_now());
         match block_on(async {
-            let state = shared_state(config)
+            let settings = NatsSettings::current();
+            let state = shared_state(config, &settings)
                 .await
                 .map_err(classify_stream_state_error)?;
-            fetch_since(&state, topic, cutoff).await
+            fetch_since(&state, &settings, topic, cutoff).await
         }) {
             Ok(events) => events,
             Err(err) => {
@@ -129,10 +193,11 @@ impl Transport for NatsTransport {
 
         loop {
             let stream_result = block_on(async {
-                let state = shared_state(config)
+                let settings = NatsSettings::current();
+                let state = shared_state(config, &settings)
                     .await
                     .map_err(classify_stream_state_error)?;
-                let subject = subject_for_topic(topic);
+                let subject = subject_for_topic(&settings, topic);
                 let deliver_policy = stream_deliver_policy(cursor.as_ref());
                 let consumer = state
                     .stream
@@ -210,10 +275,14 @@ fn state_cache() -> &'static Mutex<HashMap<NatsCacheKey, Arc<NatsState>>> {
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-async fn shared_state(config: &TransportConfig) -> Result<Arc<NatsState>, NatsStateError> {
+async fn shared_state(
+    config: &TransportConfig,
+    settings: &NatsSettings,
+) -> Result<Arc<NatsState>, NatsStateError> {
     let key = NatsCacheKey {
         relay_url: config.relay_url.clone(),
         relay_token: config.relay_token.clone(),
+        settings: settings.clone(),
     };
 
     if let Some(existing) = state_cache().lock().unwrap().get(&key).cloned() {
@@ -228,7 +297,7 @@ async fn shared_state(config: &TransportConfig) -> Result<Arc<NatsState>, NatsSt
         .backpressure_on_inflight(true)
         .concurrency_limit(Some(JETSTREAM_ACK_CONCURRENCY))
         .build(client);
-    let stream = ensure_stream(&context)
+    let stream = ensure_stream(&context, settings)
         .await
         .map_err(NatsStateError::Runtime)?;
     let state = Arc::new(NatsState { context, stream });
@@ -237,28 +306,49 @@ async fn shared_state(config: &TransportConfig) -> Result<Arc<NatsState>, NatsSt
     Ok(cache.entry(key).or_insert_with(|| state.clone()).clone())
 }
 
-async fn ensure_stream(context: &jetstream::Context) -> Result<JetStream, String> {
+async fn ensure_stream(
+    context: &jetstream::Context,
+    settings: &NatsSettings,
+) -> Result<JetStream, String> {
+    if !settings.create_stream {
+        return context
+            .get_stream(&settings.stream_name)
+            .await
+            .map_err(|err| {
+                format!(
+                    "failed to open existing NATS JetStream stream '{}': {err}",
+                    settings.stream_name
+                )
+            });
+    }
+
     context
-        .get_or_create_stream(StreamConfigJs {
-            name: STREAM_NAME.to_string(),
-            subjects: STREAM_SUBJECTS
-                .iter()
-                .map(|subject| (*subject).to_string())
-                .collect(),
-            allow_direct: true,
-            ..Default::default()
-        })
+        .get_or_create_stream(stream_config(settings))
         .await
         .map_err(|err| err.to_string())
 }
 
+fn stream_config(settings: &NatsSettings) -> StreamConfigJs {
+    StreamConfigJs {
+        name: settings.stream_name.clone(),
+        subjects: vec![settings.stream_subject()],
+        allow_direct: true,
+        storage: settings.storage.to_jetstream(),
+        max_bytes: settings.max_bytes,
+        max_age: settings.max_age,
+        description: Some("Agora encrypted room relay events".to_string()),
+        ..Default::default()
+    }
+}
+
 async fn fetch_since(
     state: &NatsState,
+    settings: &NatsSettings,
     topic: &str,
     cutoff: u64,
 ) -> Result<Vec<(u64, String)>, StreamDisconnect> {
     let mut events = Vec::new();
-    let subject = subject_for_topic(topic);
+    let subject = subject_for_topic(settings, topic);
     let consumer = state
         .stream
         .create_consumer(consumer::pull::Config {
@@ -325,8 +415,12 @@ fn stream_deliver_policy(cursor: Option<&StreamCursor>) -> DeliverPolicy {
     }
 }
 
-fn subject_for_topic(topic: &str) -> String {
-    format!("agora.{}", URL_SAFE_NO_PAD.encode(topic.as_bytes()))
+fn subject_for_topic(settings: &NatsSettings, topic: &str) -> String {
+    format!(
+        "{}.{}",
+        settings.subject_prefix,
+        URL_SAFE_NO_PAD.encode(topic.as_bytes())
+    )
 }
 
 fn message_id() -> String {
@@ -360,6 +454,133 @@ fn jetstream_message_timestamp(
 fn unix_timestamp_to_offset(raw: u64) -> time::OffsetDateTime {
     let raw = raw.min(i64::MAX as u64) as i64;
     time::OffsetDateTime::from_unix_timestamp(raw).unwrap_or(time::OffsetDateTime::UNIX_EPOCH)
+}
+
+fn nats_stream_name() -> String {
+    normalize_stream_name(
+        runtime::var("AGORA_NATS_STREAM")
+            .as_deref()
+            .unwrap_or(DEFAULT_STREAM_NAME),
+    )
+}
+
+fn nats_subject_prefix() -> String {
+    normalize_subject_prefix(
+        runtime::var("AGORA_NATS_SUBJECT_PREFIX")
+            .as_deref()
+            .unwrap_or(DEFAULT_SUBJECT_PREFIX),
+    )
+}
+
+fn nats_create_stream() -> bool {
+    runtime::var("AGORA_NATS_CREATE_STREAM")
+        .map(|value| parse_env_bool(&value, true))
+        .unwrap_or(true)
+}
+
+fn nats_storage() -> NatsStorage {
+    match runtime::var("AGORA_NATS_STORAGE")
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "memory" | "mem" => NatsStorage::Memory,
+        _ => NatsStorage::File,
+    }
+}
+
+fn nats_max_bytes() -> i64 {
+    runtime::var("AGORA_NATS_MAX_BYTES")
+        .and_then(|value| value.trim().parse::<i64>().ok())
+        .unwrap_or(0)
+        .max(0)
+}
+
+fn nats_max_age() -> Duration {
+    runtime::var("AGORA_NATS_MAX_AGE")
+        .as_deref()
+        .and_then(parse_duration)
+        .unwrap_or_default()
+}
+
+fn parse_env_bool(raw: &str, default: bool) -> bool {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => true,
+        "0" | "false" | "no" | "off" => false,
+        _ => default,
+    }
+}
+
+fn parse_duration(raw: &str) -> Option<Duration> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    let (digits, suffix) = raw
+        .trim()
+        .split_at(raw.find(|c: char| !c.is_ascii_digit()).unwrap_or(raw.len()));
+    let value = digits.parse::<u64>().ok()?;
+    match suffix {
+        "" | "s" => Some(Duration::from_secs(value)),
+        "m" => Some(Duration::from_secs(value.saturating_mul(60))),
+        "h" => Some(Duration::from_secs(value.saturating_mul(3600))),
+        "d" => Some(Duration::from_secs(value.saturating_mul(86400))),
+        _ => None,
+    }
+}
+
+fn normalize_stream_name(raw: &str) -> String {
+    let normalized = raw
+        .trim()
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '_' || ch == '-' {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>()
+        .trim_matches('_')
+        .to_string();
+    if normalized.is_empty() {
+        DEFAULT_STREAM_NAME.to_string()
+    } else {
+        normalized
+    }
+}
+
+fn normalize_subject_prefix(raw: &str) -> String {
+    let tokens = raw
+        .trim()
+        .trim_matches('.')
+        .split('.')
+        .filter_map(|token| {
+            let normalized = token
+                .chars()
+                .map(|ch| {
+                    if ch.is_ascii_alphanumeric() || ch == '_' || ch == '-' {
+                        ch
+                    } else {
+                        '_'
+                    }
+                })
+                .collect::<String>()
+                .trim_matches('_')
+                .to_string();
+            if normalized.is_empty() {
+                None
+            } else {
+                Some(normalized)
+            }
+        })
+        .collect::<Vec<_>>();
+    if tokens.is_empty() {
+        DEFAULT_SUBJECT_PREFIX.to_string()
+    } else {
+        tokens.join(".")
+    }
 }
 
 #[cfg(test)]
@@ -444,8 +665,10 @@ fn runtime_handle() -> &'static tokio::runtime::Runtime {
 #[cfg(test)]
 mod tests {
     use super::{
-        DeliverPolicy, MESSAGE_ID_HEADER, deliver_policy_for_cutoff, message_id_from_headers,
-        parse_rfc3339_timestamp, shared_state, stream_deliver_policy, subject_for_topic,
+        DeliverPolicy, MESSAGE_ID_HEADER, NatsSettings, NatsStorage, deliver_policy_for_cutoff,
+        message_id_from_headers, normalize_stream_name, normalize_subject_prefix, parse_duration,
+        parse_rfc3339_timestamp, shared_state, stream_config, stream_deliver_policy,
+        subject_for_topic,
     };
     use crate::{runtime, transport};
     use async_nats::HeaderMap;
@@ -460,7 +683,8 @@ mod tests {
     #[test]
     fn subject_for_topic_is_stable_and_nats_safe() {
         let topic = "dm-agent.alice-agent:bob";
-        let subject = subject_for_topic(topic);
+        let settings = NatsSettings::default();
+        let subject = subject_for_topic(&settings, topic);
         assert_eq!(
             subject,
             format!("agora.{}", URL_SAFE_NO_PAD.encode(topic.as_bytes()))
@@ -468,6 +692,72 @@ mod tests {
         assert!(!subject.contains(' '));
         assert!(!subject.contains('*'));
         assert!(!subject.contains('>'));
+    }
+
+    #[test]
+    fn nats_settings_read_env_overrides() {
+        let _runtime = runtime::TestRuntime::new()
+            .var("AGORA_NATS_STREAM", "prod.agora/stream")
+            .var("AGORA_NATS_SUBJECT_PREFIX", ".prod/agora.room.")
+            .var("AGORA_NATS_CREATE_STREAM", "false")
+            .var("AGORA_NATS_STORAGE", "memory")
+            .var("AGORA_NATS_MAX_BYTES", "1048576")
+            .var("AGORA_NATS_MAX_AGE", "7d")
+            .enter();
+
+        let settings = NatsSettings::current();
+        assert_eq!(settings.stream_name, "prod_agora_stream");
+        assert_eq!(settings.subject_prefix, "prod_agora.room");
+        assert!(!settings.create_stream);
+        assert_eq!(settings.storage, NatsStorage::Memory);
+        assert_eq!(settings.max_bytes, 1_048_576);
+        assert_eq!(settings.max_age, Duration::from_secs(7 * 86_400));
+    }
+
+    #[test]
+    fn nats_settings_sanitize_empty_or_invalid_names() {
+        assert_eq!(normalize_stream_name("..."), "AGORA");
+        assert_eq!(
+            normalize_stream_name("prod/room.events"),
+            "prod_room_events"
+        );
+        assert_eq!(normalize_subject_prefix("..."), "agora");
+        assert_eq!(
+            normalize_subject_prefix(".prod/room.events."),
+            "prod_room.events"
+        );
+    }
+
+    #[test]
+    fn stream_config_uses_nats_settings() {
+        let settings = NatsSettings {
+            stream_name: "AGORA_PROD".to_string(),
+            subject_prefix: "prod.agora".to_string(),
+            create_stream: true,
+            storage: NatsStorage::Memory,
+            max_bytes: 4_096,
+            max_age: Duration::from_secs(600),
+        };
+
+        let config = stream_config(&settings);
+        assert_eq!(config.name, "AGORA_PROD");
+        assert_eq!(config.subjects, vec!["prod.agora.>".to_string()]);
+        assert!(config.allow_direct);
+        assert_eq!(
+            config.storage,
+            async_nats::jetstream::stream::StorageType::Memory
+        );
+        assert_eq!(config.max_bytes, 4_096);
+        assert_eq!(config.max_age, Duration::from_secs(600));
+    }
+
+    #[test]
+    fn parse_duration_supports_operational_units() {
+        assert_eq!(parse_duration("30"), Some(Duration::from_secs(30)));
+        assert_eq!(parse_duration("5m"), Some(Duration::from_secs(300)));
+        assert_eq!(parse_duration("2h"), Some(Duration::from_secs(7_200)));
+        assert_eq!(parse_duration("1d"), Some(Duration::from_secs(86_400)));
+        assert_eq!(parse_duration("bad"), None);
     }
 
     #[test]
@@ -690,8 +980,9 @@ mod tests {
             .enter();
 
         let config = super::TransportConfig::current();
-        let first = super::block_on(shared_state(&config)).unwrap();
-        let second = super::block_on(shared_state(&config)).unwrap();
+        let settings = NatsSettings::current();
+        let first = super::block_on(shared_state(&config, &settings)).unwrap();
+        let second = super::block_on(shared_state(&config, &settings)).unwrap();
         assert!(Arc::ptr_eq(&first, &second));
         let _ = std::fs::remove_dir_all(home);
     }

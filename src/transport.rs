@@ -432,9 +432,14 @@ mod tests {
     fn relay_status_label_reflects_override() {
         let _runtime = runtime::TestRuntime::new()
             .var("AGORA_RELAY_URL", "nats://127.0.0.1:4222")
+            .unset_var("AGORA_NATS_STREAM")
+            .unset_var("AGORA_NATS_SUBJECT_PREFIX")
             .enter();
 
-        assert_eq!(relay_status_label(), "Relay (nats://127.0.0.1:4222)");
+        assert_eq!(
+            relay_status_label(),
+            "Relay (nats://127.0.0.1:4222 stream=AGORA subjects=agora.>)"
+        );
     }
 
     #[test]

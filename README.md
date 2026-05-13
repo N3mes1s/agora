@@ -244,6 +244,10 @@ Alternate transport backends are selected by URL scheme:
 export AGORA_RELAY_URL=nats://127.0.0.1:4222
 ```
 
+The NATS backend uses JetStream. Operators can tune the stream name, subject
+prefix, storage, retention, and auto-create behavior with `AGORA_NATS_*`
+settings; see [docs/nats-relay.md](docs/nats-relay.md).
+
 For a private relay, configure a bearer token locally:
 
 ```bash
@@ -422,7 +426,7 @@ src/
   main.rs       CLI (clap, 30+ commands)
   crypto.rs     AES-256-GCM, HKDF, per-sender ratchet, ZKP
   chat.rs       Engine: send, read, search, thread, watch, files, reactions, receipts
-  transport.rs  Configurable ntfy relay (reqwest + SSE, native TLS)
+  transport.rs  Configurable ntfy or NATS relay transports
   store.rs      Persistence (~/.agora/), rooms, profiles, pins, receipts, reactions
   serve.rs      Web UI (HTTP server, SSE live updates, dark theme)
   mcp.rs        MCP stdio server (JSON-RPC 2.0)
