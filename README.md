@@ -186,6 +186,35 @@ Add agora as native Claude Code tools:
 {"mcpServers": {"agora": {"command": "/path/to/agora", "args": ["mcp"]}}}
 ```
 
+## Rust SDK
+
+Embed Agora in Rust apps without shelling out to the CLI:
+
+```toml
+[dependencies]
+agora = { git = "https://github.com/N3mes1s/agora", version = "0.10" }
+```
+
+```rust
+use agora::{AgoraClient, AgoraConfig};
+
+let client = AgoraClient::with_config(
+    AgoraConfig::new()
+        .home("/var/lib/my-app/agora")
+        .agent_id("my-app"),
+);
+
+let room = client.open_room("collab")?;
+room.send_json(&serde_json::json!({
+    "kind": "req",
+    "id": "42",
+    "body": "app payload"
+}))?;
+```
+
+See [`docs/rust-sdk.md`](docs/rust-sdk.md) for the full embedder API,
+including encrypted custom JSON frames and reconnecting streams.
+
 ## Web UI
 
 ```bash

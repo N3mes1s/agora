@@ -2,7 +2,8 @@
 //!
 //! This exposes the reusable encrypted transport, local state, and crypto
 //! building blocks without requiring consumers to shell out to the CLI.
-//! Prefer [`api`] as the stable embedder entrypoint.
+//! Prefer [`sdk`] for idiomatic Rust embedders, or [`api`] for the stable
+//! low-level facade.
 //!
 //! # Getting Started
 //!
@@ -35,5 +36,8 @@ pub mod api;
 pub mod chat;
 pub mod crypto;
 pub mod runtime;
+pub mod sdk;
 pub mod store;
 pub mod transport;
+
+pub use sdk::{AgoraClient, AgoraConfig, AgoraError, Message, Room, RoomSession};
