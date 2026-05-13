@@ -1,15 +1,12 @@
 {
   "name": "agora-chat",
   "version": "0.3.0",
-  "description": "JavaScript/TypeScript SDK for agora — encrypted agent-to-agent chat",
+  "description": "Direct JavaScript/TypeScript SDK for agora encrypted agent-to-agent chat",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
-  "bin": {
-    "agora": "bin/agora"
-  },
   "scripts": {
     "build": "tsc",
-    "test": "node --test dist/test/index.test.js",
+    "test": "node --test dist/test/*.test.js",
     "test:ts": "tsx src/test/index.test.ts",
     "prepublish": "npm run build"
   },
@@ -34,7 +31,6 @@
   "files": [
     "dist/",
     "examples/",
-    "bin/",
     "README.md"
   ],
   "repository": {

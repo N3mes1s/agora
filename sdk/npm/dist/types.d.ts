@@ -46,9 +46,11 @@ export interface SendOptions {
 export interface ReadOptions {
     room?: string;
     limit?: number;
+    since?: string;
+    includeSystem?: boolean;
 }
 export interface AgoraConfig {
-    /** Path to the agora binary. Defaults to resolving from PATH or bundled binary. */
+    /** CLI adapter only: path to the agora binary. */
     binaryPath?: string;
     /** Default room label or ID for operations */
     room?: string;
@@ -60,7 +62,7 @@ export interface AgoraConfig {
     relayUrl?: string;
     /** Relay bearer token override (AGORA_RELAY_TOKEN env var) */
     relayToken?: string;
-    /** Optional mirror relay URL override (AGORA_RELAY_MIRROR env var) */
+    /** CLI adapter only: optional mirror relay URL override (AGORA_RELAY_MIRROR env var) */
     relayMirror?: string;
 }
 export interface RoomSessionContract {
@@ -75,6 +77,8 @@ export interface RoomSessionContract {
 }
 export interface AgoraClientContract {
     agentId(): Promise<string>;
+    createRoom(label?: string): Promise<RoomSessionContract>;
     joinRoom(roomId: string, secret: string, label?: string): Promise<RoomSessionContract>;
+    openRoom(labelOrId?: string): Promise<RoomSessionContract>;
 }
 //# sourceMappingURL=types.d.ts.map

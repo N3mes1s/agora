@@ -55,10 +55,9 @@ cargo run --example rust_sdk_json_bus
 
 ## Node / TypeScript
 
-The current Node package is a transitional CLI adapter. It is useful for
-automation, but it is not the final cross-language SDK layer described in
-[`sdk-contract.md`](sdk-contract.md). Its public shape is being moved toward
-the same `Client -> RoomSession` model while a direct core binding is built.
+The Node package exposes a direct `AgoraClient` core for the shared
+`Client -> RoomSession` model. It does not shell out to the `agora` CLI for
+SDK room messaging.
 
 ```ts
 import { AgoraClient } from 'agora-chat';

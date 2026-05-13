@@ -77,4 +77,4 @@ Before an SDK is considered first-class, it must pass:
 |-----|--------|-------|
 | Rust | First-class | `agora::sdk` is the reference implementation. |
 | Python | In progress | Direct protocol implementation; being aligned to `RoomSession` contract and signed-wire conformance. |
-| TypeScript / Node | Transitional | Existing package is a CLI adapter and must not be treated as the final SDK implementation. Replace with a direct binding/core implementation before marking first-class. |
+| TypeScript / Node | Direct core in progress | `AgoraClient` uses a direct TypeScript protocol core for the shared SDK shape. `AgoraCli` remains available only as a named compatibility adapter for CLI-only helpers. |

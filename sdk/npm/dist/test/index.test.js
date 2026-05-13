@@ -2,8 +2,8 @@
 /**
  * Tests for agora-chat SDK.
  *
- * These tests use the real agora binary pointed at an isolated AGORA_HOME.
- * They require the agora binary to be present at AGORA_BIN or on PATH.
+ * These tests exercise the direct TypeScript SDK core. They intentionally set
+ * AGORA_BIN to an invalid path so regressions back to CLI shell-out fail.
  */
 Object.defineProperty(exports, "__esModule", { value: true });
 const assert_1 = require("assert");
@@ -102,7 +102,7 @@ function testBuildEnv() {
     assert_1.strict.equal(env.AGORA_RELAY_MIRROR, "https://mirror.example");
     console.log("  ✓ buildEnv");
 }
-// ─── Integration tests: real binary ──────────────────────────────────────────
+// ─── Integration tests: direct SDK core ──────────────────────────────────────
 async function testAgoraId(agora) {
     const id = await agora.id();
     const alias = await agora.agentId();
@@ -129,9 +129,13 @@ async function testJoinRoomSessionContract(agora) {
     assert_1.strict.equal(room.label, "contract-room");
     assert_1.strict.ok(room.agentId.length > 0, "room session should expose agentId");
     assert_1.strict.match(await room.fingerprint(), /^([0-9a-f]{4}\s+){7}[0-9a-f]{4}$/);
+    assert_1.strict.equal((await agora.openRoom("contract-room")).roomId, room.roomId);
     await room.sendJson({ kind: "job", id: "contract-1" });
+    await room.sendText("plain chat");
     const frames = await room.fetchJson({ limit: 10 });
     assert_1.strict.ok(frames.some((frame) => frame.value.id === "contract-1"));
+    const messages = await room.fetchMessages({ limit: 10 });
+    assert_1.strict.ok(messages.some((message) => message.content === "plain chat"));
     console.log("  ✓ joinRoom() RoomSession contract");
 }
 // ─── Main ────────────────────────────────────────────────────────────────────
@@ -146,14 +150,12 @@ async function main() {
     testStripAnsi();
     testParseJsonMessages();
     testBuildEnv();
-    // Integration tests (require binary)
-    const binaryPath = process.env.AGORA_BIN ??
-        (0, path_1.join)(__dirname, "../../../../target/release/agora");
+    // Integration tests (no binary allowed)
+    process.env.AGORA_BIN = "/definitely/not/the/agora/binary";
     const home = (0, fs_1.mkdtempSync)((0, path_1.join)((0, os_1.tmpdir)(), "agora-sdk-test-"));
     try {
         console.log("\nIntegration tests:");
         const agora = new index_1.AgoraClient({
-            binaryPath,
             home,
             relayUrl: "memory://js-sdk-test",
         });

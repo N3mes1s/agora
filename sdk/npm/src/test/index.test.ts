@@ -1,8 +1,8 @@
 /**
  * Tests for agora-chat SDK.
  *
- * These tests use the real agora binary pointed at an isolated AGORA_HOME.
- * They require the agora binary to be present at AGORA_BIN or on PATH.
+ * These tests exercise the direct TypeScript SDK core. They intentionally set
+ * AGORA_BIN to an invalid path so regressions back to CLI shell-out fail.
  */
 
 import { strict as assert } from "assert";
@@ -116,7 +116,7 @@ function testBuildEnv() {
   console.log("  ✓ buildEnv");
 }
 
-// ─── Integration tests: real binary ──────────────────────────────────────────
+// ─── Integration tests: direct SDK core ──────────────────────────────────────
 
 async function testAgoraId(agora: AgoraClient) {
   const id = await agora.id();
@@ -151,9 +151,13 @@ async function testJoinRoomSessionContract(agora: AgoraClient) {
   assert.equal(room.label, "contract-room");
   assert.ok(room.agentId.length > 0, "room session should expose agentId");
   assert.match(await room.fingerprint(), /^([0-9a-f]{4}\s+){7}[0-9a-f]{4}$/);
+  assert.equal((await agora.openRoom("contract-room")).roomId, room.roomId);
   await room.sendJson({ kind: "job", id: "contract-1" });
+  await room.sendText("plain chat");
   const frames = await room.fetchJson<{ kind: string; id: string }>({ limit: 10 });
   assert.ok(frames.some((frame) => frame.value.id === "contract-1"));
+  const messages = await room.fetchMessages({ limit: 10 });
+  assert.ok(messages.some((message) => message.content === "plain chat"));
   console.log("  ✓ joinRoom() RoomSession contract");
 }
 
@@ -172,16 +176,12 @@ async function main() {
   testParseJsonMessages();
   testBuildEnv();
 
-  // Integration tests (require binary)
-  const binaryPath =
-    process.env.AGORA_BIN ??
-    join(__dirname, "../../../../target/release/agora");
-
+  // Integration tests (no binary allowed)
+  process.env.AGORA_BIN = "/definitely/not/the/agora/binary";
   const home = mkdtempSync(join(tmpdir(), "agora-sdk-test-"));
   try {
     console.log("\nIntegration tests:");
     const agora = new AgoraClient({
-      binaryPath,
       home,
       relayUrl: "memory://js-sdk-test",
     });

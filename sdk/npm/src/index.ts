@@ -1,5 +1,5 @@
 /**
- * agora-chat: JavaScript/TypeScript adapter for agora encrypted agent chat.
+ * agora-chat: JavaScript/TypeScript SDK for agora encrypted agent chat.
  *
  * Usage:
  *   import { AgoraClient } from 'agora-chat';
@@ -11,6 +11,7 @@
 
 export * from "./types";
 export { parseMessages, parseRooms, parseMembers, parseTasks } from "./parsers";
+export { Agora, AgoraClient, RoomSession, createAgora, parseJsonMessages } from "./core";
 
 import {
   AgoraConfig,
@@ -26,9 +27,10 @@ import {
 } from "./types";
 import { resolveBinaryPath, buildEnv, run, runSync, assertOk, stripAnsi } from "./runner";
 import { parseMessages, parseRooms, parseMembers, parseTasks } from "./parsers";
+import { parseJsonMessages } from "./core";
 
-/** Transitional CLI adapter. The final SDK should use the shared core directly. */
-export class Agora {
+/** Compatibility wrapper for the agora binary. Prefer AgoraClient for the direct SDK core. */
+export class AgoraCli {
   private binary: string;
   private env: NodeJS.ProcessEnv;
   private defaultRoom?: string;
@@ -310,10 +312,10 @@ export class Agora {
   }
 }
 
-/** RoomSession-shaped wrapper over the transitional CLI adapter. */
+/** RoomSession-shaped wrapper over the CLI compatibility adapter. */
 export class CliRoomSession implements RoomSessionContract {
   constructor(
-    private readonly client: Agora,
+    private readonly client: AgoraCli,
     public readonly roomId: string,
     public readonly label: string,
     public readonly agentId: string
@@ -344,27 +346,9 @@ export class CliRoomSession implements RoomSessionContract {
   }
 }
 
-/** Convenience factory: create an Agora instance using environment variables. */
-export function createAgora(config: AgoraConfig = {}): Agora {
-  return new Agora(config);
-}
-
-/** Explicit name for the current CLI-backed adapter. */
-export { Agora as AgoraClient, Agora as AgoraCli };
-
-/** Parse messages whose content is valid JSON and preserve the original metadata. */
-export function parseJsonMessages<T = unknown>(
-  messages: AgoraMessage[]
-): Array<AgoraJsonMessage<T>> {
-  const parsed: Array<AgoraJsonMessage<T>> = [];
-  for (const message of messages) {
-    try {
-      parsed.push({ ...message, value: JSON.parse(message.content) as T });
-    } catch {
-      // Mixed rooms are common; ignore regular chat messages.
-    }
-  }
-  return parsed;
+/** Convenience factory for the CLI compatibility adapter. */
+export function createAgoraCli(config: AgoraConfig = {}): AgoraCli {
+  return new AgoraCli(config);
 }
 
 function parseAgentId(raw: string): string {
@@ -373,4 +357,4 @@ function parseAgentId(raw: string): string {
   return raw.trim();
 }
 
-export default Agora;
+export { AgoraClient as default } from "./core";

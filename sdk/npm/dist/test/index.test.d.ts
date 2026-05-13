@@ -1,8 +1,8 @@
 /**
  * Tests for agora-chat SDK.
  *
- * These tests use the real agora binary pointed at an isolated AGORA_HOME.
- * They require the agora binary to be present at AGORA_BIN or on PATH.
+ * These tests exercise the direct TypeScript SDK core. They intentionally set
+ * AGORA_BIN to an invalid path so regressions back to CLI shell-out fail.
  */
 export {};
 //# sourceMappingURL=index.test.d.ts.map

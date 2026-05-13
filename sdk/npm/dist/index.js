@@ -1,6 +1,6 @@
 "use strict";
 /**
- * agora-chat: JavaScript/TypeScript adapter for agora encrypted agent chat.
+ * agora-chat: JavaScript/TypeScript SDK for agora encrypted agent chat.
  *
  * Usage:
  *   import { AgoraClient } from 'agora-chat';
@@ -24,19 +24,25 @@ var __exportStar = (this && this.__exportStar) || function(m, exports) {
     for (var p in m) if (p !== "default" && !Object.prototype.hasOwnProperty.call(exports, p)) __createBinding(exports, m, p);
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.AgoraCli = exports.AgoraClient = exports.CliRoomSession = exports.Agora = exports.parseTasks = exports.parseMembers = exports.parseRooms = exports.parseMessages = void 0;
-exports.createAgora = createAgora;
-exports.parseJsonMessages = parseJsonMessages;
+exports.default = exports.CliRoomSession = exports.AgoraCli = exports.parseJsonMessages = exports.createAgora = exports.RoomSession = exports.AgoraClient = exports.Agora = exports.parseTasks = exports.parseMembers = exports.parseRooms = exports.parseMessages = void 0;
+exports.createAgoraCli = createAgoraCli;
 __exportStar(require("./types"), exports);
 var parsers_1 = require("./parsers");
 Object.defineProperty(exports, "parseMessages", { enumerable: true, get: function () { return parsers_1.parseMessages; } });
 Object.defineProperty(exports, "parseRooms", { enumerable: true, get: function () { return parsers_1.parseRooms; } });
 Object.defineProperty(exports, "parseMembers", { enumerable: true, get: function () { return parsers_1.parseMembers; } });
 Object.defineProperty(exports, "parseTasks", { enumerable: true, get: function () { return parsers_1.parseTasks; } });
+var core_1 = require("./core");
+Object.defineProperty(exports, "Agora", { enumerable: true, get: function () { return core_1.Agora; } });
+Object.defineProperty(exports, "AgoraClient", { enumerable: true, get: function () { return core_1.AgoraClient; } });
+Object.defineProperty(exports, "RoomSession", { enumerable: true, get: function () { return core_1.RoomSession; } });
+Object.defineProperty(exports, "createAgora", { enumerable: true, get: function () { return core_1.createAgora; } });
+Object.defineProperty(exports, "parseJsonMessages", { enumerable: true, get: function () { return core_1.parseJsonMessages; } });
 const runner_1 = require("./runner");
 const parsers_2 = require("./parsers");
-/** Transitional CLI adapter. The final SDK should use the shared core directly. */
-class Agora {
+const core_2 = require("./core");
+/** Compatibility wrapper for the agora binary. Prefer AgoraClient for the direct SDK core. */
+class AgoraCli {
     constructor(config = {}) {
         this.binary = (0, runner_1.resolveBinaryPath)(config.binaryPath);
         this.env = (0, runner_1.buildEnv)(config.home, config.agentId, config.relayUrl, config.relayToken, config.relayMirror);
@@ -126,7 +132,7 @@ class Agora {
     }
     /** Read messages whose content is valid JSON and parse them as application frames. */
     async readJson(opts = {}) {
-        return parseJsonMessages(await this.read(opts));
+        return (0, core_2.parseJsonMessages)(await this.read(opts));
     }
     /** Check for new messages. Returns true if there are new messages. */
     async check(room) {
@@ -268,10 +274,8 @@ class Agora {
         return (0, runner_1.stripAnsi)((0, runner_1.assertOk)(result, "digest")).trim();
     }
 }
-exports.Agora = Agora;
-exports.AgoraClient = Agora;
-exports.AgoraCli = Agora;
-/** RoomSession-shaped wrapper over the transitional CLI adapter. */
+exports.AgoraCli = AgoraCli;
+/** RoomSession-shaped wrapper over the CLI compatibility adapter. */
 class CliRoomSession {
     constructor(client, roomId, label, agentId) {
         this.client = client;
@@ -298,22 +302,9 @@ class CliRoomSession {
     }
 }
 exports.CliRoomSession = CliRoomSession;
-/** Convenience factory: create an Agora instance using environment variables. */
-function createAgora(config = {}) {
-    return new Agora(config);
-}
-/** Parse messages whose content is valid JSON and preserve the original metadata. */
-function parseJsonMessages(messages) {
-    const parsed = [];
-    for (const message of messages) {
-        try {
-            parsed.push({ ...message, value: JSON.parse(message.content) });
-        }
-        catch {
-            // Mixed rooms are common; ignore regular chat messages.
-        }
-    }
-    return parsed;
+/** Convenience factory for the CLI compatibility adapter. */
+function createAgoraCli(config = {}) {
+    return new AgoraCli(config);
 }
 function parseAgentId(raw) {
     const match = raw.match(/Agent ID:\s*([^\s]+)/);
@@ -321,5 +312,6 @@ function parseAgentId(raw) {
         return match[1];
     return raw.trim();
 }
-exports.default = Agora;
+var core_3 = require("./core");
+Object.defineProperty(exports, "default", { enumerable: true, get: function () { return core_3.AgoraClient; } });
 //# sourceMappingURL=index.js.map

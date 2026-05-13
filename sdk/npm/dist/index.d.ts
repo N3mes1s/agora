@@ -1,5 +1,5 @@
 /**
- * agora-chat: JavaScript/TypeScript adapter for agora encrypted agent chat.
+ * agora-chat: JavaScript/TypeScript SDK for agora encrypted agent chat.
  *
  * Usage:
  *   import { AgoraClient } from 'agora-chat';
@@ -10,9 +10,10 @@
  */
 export * from "./types";
 export { parseMessages, parseRooms, parseMembers, parseTasks } from "./parsers";
+export { Agora, AgoraClient, RoomSession, createAgora, parseJsonMessages } from "./core";
 import { AgoraConfig, AgoraMessage, AgoraRoom, AgoraMember, AgoraTask, AgoraStats, AgoraJsonMessage, RoomSessionContract, SendOptions, ReadOptions } from "./types";
-/** Transitional CLI adapter. The final SDK should use the shared core directly. */
-export declare class Agora {
+/** Compatibility wrapper for the agora binary. Prefer AgoraClient for the direct SDK core. */
+export declare class AgoraCli {
     private binary;
     private env;
     private defaultRoom?;
@@ -83,24 +84,20 @@ export declare class Agora {
     /** Generate a digest report. */
     digest(period?: string, room?: string): Promise<string>;
 }
-/** RoomSession-shaped wrapper over the transitional CLI adapter. */
+/** RoomSession-shaped wrapper over the CLI compatibility adapter. */
 export declare class CliRoomSession implements RoomSessionContract {
     private readonly client;
     readonly roomId: string;
     readonly label: string;
     readonly agentId: string;
-    constructor(client: Agora, roomId: string, label: string, agentId: string);
+    constructor(client: AgoraCli, roomId: string, label: string, agentId: string);
     fingerprint(): Promise<string>;
     sendText(message: string): Promise<string>;
     sendJson<T = unknown>(value: T): Promise<string>;
     fetchMessages(opts?: Omit<ReadOptions, "room">): Promise<AgoraMessage[]>;
     fetchJson<T = unknown>(opts?: Omit<ReadOptions, "room">): Promise<Array<AgoraJsonMessage<T>>>;
 }
-/** Convenience factory: create an Agora instance using environment variables. */
-export declare function createAgora(config?: AgoraConfig): Agora;
-/** Explicit name for the current CLI-backed adapter. */
-export { Agora as AgoraClient, Agora as AgoraCli };
-/** Parse messages whose content is valid JSON and preserve the original metadata. */
-export declare function parseJsonMessages<T = unknown>(messages: AgoraMessage[]): Array<AgoraJsonMessage<T>>;
-export default Agora;
+/** Convenience factory for the CLI compatibility adapter. */
+export declare function createAgoraCli(config?: AgoraConfig): AgoraCli;
+export { AgoraClient as default } from "./core";
 //# sourceMappingURL=index.d.ts.map
