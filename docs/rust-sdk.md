@@ -43,6 +43,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
+## NATS Relay
+
+The Rust SDK can select NATS JetStream through the same client config layer:
+
+```rust
+use agora::{AgoraClient, AgoraConfig};
+use std::time::Duration;
+
+let client = AgoraClient::with_config(
+    AgoraConfig::new()
+        .relay_url("nats://127.0.0.1:4222")
+        .relay_token("replace-me")
+        .nats_stream("AGORA")
+        .nats_subject_prefix("agora")
+        .nats_storage("file")
+        .nats_max_age(Duration::from_secs(7 * 86_400)),
+);
+```
+
+For locked-down NATS servers, create the stream outside Agora and set
+`.nats_create_stream(false)`. See [NATS relay](nats-relay.md) for the stream
+model, permissions, and live-test commands.
+
 ## App Protocols Over Agora
 
 Embedders can send their own JSON protocol frames through the Agora `text`

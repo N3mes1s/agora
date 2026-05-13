@@ -96,6 +96,12 @@ pub struct AgoraConfig {
     relay_url: Option<String>,
     relay_token: Option<String>,
     relay_mirror: Option<String>,
+    nats_stream: Option<String>,
+    nats_subject_prefix: Option<String>,
+    nats_create_stream: Option<bool>,
+    nats_storage: Option<String>,
+    nats_max_bytes: Option<i64>,
+    nats_max_age: Option<Duration>,
 }
 
 impl AgoraConfig {
@@ -140,6 +146,42 @@ impl AgoraConfig {
         self
     }
 
+    /// Override the NATS JetStream stream name.
+    pub fn nats_stream(mut self, stream: impl Into<String>) -> Self {
+        self.nats_stream = Some(stream.into());
+        self
+    }
+
+    /// Override the NATS subject prefix used for Agora relay topics.
+    pub fn nats_subject_prefix(mut self, prefix: impl Into<String>) -> Self {
+        self.nats_subject_prefix = Some(prefix.into());
+        self
+    }
+
+    /// Control whether Agora creates the NATS stream if it is missing.
+    pub fn nats_create_stream(mut self, create: bool) -> Self {
+        self.nats_create_stream = Some(create);
+        self
+    }
+
+    /// Override NATS stream storage. Supported values are `file` and `memory`.
+    pub fn nats_storage(mut self, storage: impl Into<String>) -> Self {
+        self.nats_storage = Some(storage.into());
+        self
+    }
+
+    /// Override the NATS stream byte cap. `0` leaves the cap unset.
+    pub fn nats_max_bytes(mut self, max_bytes: i64) -> Self {
+        self.nats_max_bytes = Some(max_bytes);
+        self
+    }
+
+    /// Override the NATS stream max age.
+    pub fn nats_max_age(mut self, max_age: Duration) -> Self {
+        self.nats_max_age = Some(max_age);
+        self
+    }
+
     fn has_overrides(&self) -> bool {
         self.home.is_some()
             || self.agent_id.is_some()
@@ -147,6 +189,12 @@ impl AgoraConfig {
             || self.relay_url.is_some()
             || self.relay_token.is_some()
             || self.relay_mirror.is_some()
+            || self.nats_stream.is_some()
+            || self.nats_subject_prefix.is_some()
+            || self.nats_create_stream.is_some()
+            || self.nats_storage.is_some()
+            || self.nats_max_bytes.is_some()
+            || self.nats_max_age.is_some()
     }
 
     fn runtime_context(&self) -> runtime::TestRuntime {
@@ -168,6 +216,24 @@ impl AgoraConfig {
         }
         if let Some(relay_mirror) = &self.relay_mirror {
             rt = rt.var("AGORA_RELAY_MIRROR", relay_mirror.clone());
+        }
+        if let Some(stream) = &self.nats_stream {
+            rt = rt.var("AGORA_NATS_STREAM", stream.clone());
+        }
+        if let Some(prefix) = &self.nats_subject_prefix {
+            rt = rt.var("AGORA_NATS_SUBJECT_PREFIX", prefix.clone());
+        }
+        if let Some(create) = self.nats_create_stream {
+            rt = rt.var("AGORA_NATS_CREATE_STREAM", create.to_string());
+        }
+        if let Some(storage) = &self.nats_storage {
+            rt = rt.var("AGORA_NATS_STORAGE", storage.clone());
+        }
+        if let Some(max_bytes) = self.nats_max_bytes {
+            rt = rt.var("AGORA_NATS_MAX_BYTES", max_bytes.to_string());
+        }
+        if let Some(max_age) = self.nats_max_age {
+            rt = rt.var("AGORA_NATS_MAX_AGE", max_age.as_secs().to_string());
         }
         rt
     }
@@ -594,4 +660,46 @@ fn message_id() -> String {
         .fill(&mut bytes)
         .expect("random message id");
     hex::encode(bytes)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::AgoraConfig;
+    use crate::runtime;
+    use std::time::Duration;
+
+    #[test]
+    fn agora_config_scopes_nats_env_overrides() {
+        let config = AgoraConfig::new()
+            .nats_stream("AGORA_PROD")
+            .nats_subject_prefix("prod.agora")
+            .nats_create_stream(false)
+            .nats_storage("memory")
+            .nats_max_bytes(1_048_576)
+            .nats_max_age(Duration::from_secs(600));
+
+        let _guard = config.runtime_context().enter();
+
+        assert_eq!(
+            runtime::var("AGORA_NATS_STREAM").as_deref(),
+            Some("AGORA_PROD")
+        );
+        assert_eq!(
+            runtime::var("AGORA_NATS_SUBJECT_PREFIX").as_deref(),
+            Some("prod.agora")
+        );
+        assert_eq!(
+            runtime::var("AGORA_NATS_CREATE_STREAM").as_deref(),
+            Some("false")
+        );
+        assert_eq!(
+            runtime::var("AGORA_NATS_STORAGE").as_deref(),
+            Some("memory")
+        );
+        assert_eq!(
+            runtime::var("AGORA_NATS_MAX_BYTES").as_deref(),
+            Some("1048576")
+        );
+        assert_eq!(runtime::var("AGORA_NATS_MAX_AGE").as_deref(), Some("600"));
+    }
 }

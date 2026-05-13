@@ -56,6 +56,9 @@ export AGORA_NATS_MAX_BYTES=1073741824
 export AGORA_NATS_MAX_AGE=7d
 ```
 
+Rust embedders can set the same options per client with `AgoraConfig`; see
+[Rust SDK](rust-sdk.md).
+
 ## Locked-Down Servers
 
 If the Agora process is not allowed to create streams, create the stream out of
