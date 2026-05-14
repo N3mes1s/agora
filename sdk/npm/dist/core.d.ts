@@ -27,6 +27,23 @@ export declare class AgoraClient {
     idSync(): string;
     agentId(): Promise<string>;
     createRoom(label?: string): Promise<RoomSession>;
+    /**
+     * Create a new encrypted room without publishing the "Room created..."
+     * presence envelope. Mirrors AgoraClient::create_room_silent in the Rust
+     * SDK; use for embedders (cfs-mesh expose_uds, transient bridges, tests)
+     * that don't want a stray system message landing as the first envelope
+     * receivers see.
+     */
+    createRoomSilent(label?: string): Promise<RoomSession>;
+    /**
+     * Eagerly materialize the local identity and return its agent id.
+     * Mirrors AgoraClient::init_identity in the Rust SDK. The Node SDK
+     * materializes identity on first agentId() call; this method is an
+     * explicit-intent alias so embedder call sites can express "set up
+     * identity now" without it reading like an accidental getter.
+     */
+    initIdentity(): Promise<string>;
+    private mintRoomSession;
     create(label?: string): Promise<{
         roomId: string;
         secret: string;

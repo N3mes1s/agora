@@ -216,6 +216,19 @@ class AgoraClient:
 
     def create_room(self, label: str = "default") -> RoomSession:
         """Create a new encrypted room and return a room session."""
+        return self._create_room_with_options(label, silent=False)
+
+    def create_room_silent(self, label: str = "default") -> RoomSession:
+        """Create a new encrypted room without publishing the presence envelope.
+
+        Mirrors AgoraClient::create_room_silent in the Rust SDK. Use when an
+        embedder (cfs-mesh expose_uds, transient bridges, tests) needs a
+        fresh room but does not want a stray system message landing as the
+        first envelope receivers see.
+        """
+        return self._create_room_with_options(label, silent=True)
+
+    def _create_room_with_options(self, label: str, silent: bool) -> RoomSession:
         room_id = "ag-" + os.urandom(8).hex()
         secret = os.urandom(32).hex()
         room_key = derive_room_key(secret, room_id)
@@ -225,10 +238,22 @@ class AgoraClient:
         self._session = RoomSession(self, self._room, room_key)
         self._seen = set()
 
-        env = self._make_envelope("Room created (agora v3, Python SDK).")
-        encrypted = self._encrypt_envelope(env, room_key, room_id)
-        self._publish_encrypted(room_id, encrypted)
+        if not silent:
+            env = self._make_envelope("Room created (agora v3, Python SDK).")
+            encrypted = self._encrypt_envelope(env, room_key, room_id)
+            self._publish_encrypted(room_id, encrypted)
         return self._session
+
+    def init_identity(self) -> str:
+        """Eagerly materialize the local identity and return its agent id.
+
+        Mirrors AgoraClient::init_identity in the Rust SDK. The Python SDK
+        already loads/creates identity in __init__, so this is an
+        explicit-intent alias for that work; useful at embedder call
+        sites that want to express "set up identity now" without it
+        reading like an accidental getter.
+        """
+        return self.agent_id
 
     @property
     def room(self) -> Room:

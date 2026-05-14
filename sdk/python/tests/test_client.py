@@ -422,6 +422,29 @@ class TestClientCreate:
             msg_id = client.send("First message!")
         assert isinstance(msg_id, str)
 
+    def test_create_room_publishes_presence_envelope(self, tmp_path):
+        client = AgoraClient(agent_id="test-agent", home=tmp_path)
+        with patch("agora_chat.transport.publish", return_value=True) as mock:
+            session = client.create_room("loud-room")
+        assert session.label == "loud-room"
+        assert mock.call_count == 1, "create_room must publish the presence envelope"
+
+    def test_create_room_silent_skips_presence_envelope(self, tmp_path):
+        client = AgoraClient(agent_id="test-agent", home=tmp_path)
+        with patch("agora_chat.transport.publish", return_value=True) as mock:
+            session = client.create_room_silent("silent-room")
+        assert session.label == "silent-room"
+        assert session.room_id.startswith("ag-")
+        assert session.agent_id == "test-agent"
+        assert mock.call_count == 0, "create_room_silent must not publish the presence envelope"
+
+
+class TestInitIdentity:
+    def test_init_identity_returns_agent_id(self, tmp_path):
+        client = AgoraClient(agent_id="explicit-init", home=tmp_path)
+        assert client.init_identity() == "explicit-init"
+        assert client.init_identity() == client.agent_id
+
 
 class TestContextManager:
     def test_context_manager(self, tmp_path):

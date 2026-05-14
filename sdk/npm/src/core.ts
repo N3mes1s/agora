@@ -149,11 +149,37 @@ export class AgoraClient {
   }
 
   async createRoom(label: string = "default"): Promise<RoomSession> {
-    const roomId = `ag-${randomBytes(8).toString("hex")}`;
-    const secret = randomBytes(32).toString("hex");
-    const session = this.saveRoom(roomId, secret, label, "Admin");
+    const session = this.mintRoomSession(label);
     await session.sendText("Room created (agora v3, TypeScript SDK).");
     return session;
+  }
+
+  /**
+   * Create a new encrypted room without publishing the "Room created..."
+   * presence envelope. Mirrors AgoraClient::create_room_silent in the Rust
+   * SDK; use for embedders (cfs-mesh expose_uds, transient bridges, tests)
+   * that don't want a stray system message landing as the first envelope
+   * receivers see.
+   */
+  createRoomSilent(label: string = "default"): Promise<RoomSession> {
+    return Promise.resolve(this.mintRoomSession(label));
+  }
+
+  /**
+   * Eagerly materialize the local identity and return its agent id.
+   * Mirrors AgoraClient::init_identity in the Rust SDK. The Node SDK
+   * materializes identity on first agentId() call; this method is an
+   * explicit-intent alias so embedder call sites can express "set up
+   * identity now" without it reading like an accidental getter.
+   */
+  initIdentity(): Promise<string> {
+    return Promise.resolve(this.agentIdSync());
+  }
+
+  private mintRoomSession(label: string): RoomSession {
+    const roomId = `ag-${randomBytes(8).toString("hex")}`;
+    const secret = randomBytes(32).toString("hex");
+    return this.saveRoom(roomId, secret, label, "Admin");
   }
 
   async create(label: string = "default"): Promise<{ roomId: string; secret: string; label: string }> {

@@ -175,6 +175,35 @@ async function testJoinRoomSessionContract(agora: AgoraClient) {
   console.log("  ✓ joinRoom() RoomSession contract");
 }
 
+async function testCreateRoomSilent(agora: AgoraClient) {
+  const loud = await agora.createRoom("loud-room");
+  const loudMessages = await loud.fetchMessages({ includeSystem: true });
+  assert.ok(
+    loudMessages.length >= 1,
+    "createRoom must publish the presence envelope"
+  );
+
+  const silent = await agora.createRoomSilent("silent-room");
+  assert.equal(silent.label, "silent-room");
+  assert.ok(silent.roomId.startsWith("ag-"));
+  assert.ok(silent.agentId.length > 0);
+  const silentMessages = await silent.fetchMessages({ includeSystem: true });
+  assert.equal(
+    silentMessages.length,
+    0,
+    "createRoomSilent must not publish the presence envelope"
+  );
+  console.log("  ✓ createRoomSilent() skips presence envelope");
+}
+
+async function testInitIdentity(agora: AgoraClient) {
+  const fromInit = await agora.initIdentity();
+  const fromGetter = await agora.agentId();
+  assert.ok(fromInit.length > 0);
+  assert.equal(fromInit, fromGetter, "initIdentity must equal agentId");
+  console.log("  ✓ initIdentity() returns agent id");
+}
+
 // ─── Main ────────────────────────────────────────────────────────────────────
 
 async function main() {
@@ -204,6 +233,8 @@ async function main() {
     await testAgoraRooms(agora);
     await testAgoraTasks(agora);
     await testJoinRoomSessionContract(agora);
+    await testCreateRoomSilent(agora);
+    await testInitIdentity(agora);
 
     console.log("\nAll tests passed.\n");
   } finally {

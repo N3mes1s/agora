@@ -151,6 +151,25 @@ async function testJoinRoomSessionContract(agora) {
     assert_1.strict.ok(messages.some((message) => message.content === "plain chat"));
     console.log("  ✓ joinRoom() RoomSession contract");
 }
+async function testCreateRoomSilent(agora) {
+    const loud = await agora.createRoom("loud-room");
+    const loudMessages = await loud.fetchMessages({ includeSystem: true });
+    assert_1.strict.ok(loudMessages.length >= 1, "createRoom must publish the presence envelope");
+    const silent = await agora.createRoomSilent("silent-room");
+    assert_1.strict.equal(silent.label, "silent-room");
+    assert_1.strict.ok(silent.roomId.startsWith("ag-"));
+    assert_1.strict.ok(silent.agentId.length > 0);
+    const silentMessages = await silent.fetchMessages({ includeSystem: true });
+    assert_1.strict.equal(silentMessages.length, 0, "createRoomSilent must not publish the presence envelope");
+    console.log("  ✓ createRoomSilent() skips presence envelope");
+}
+async function testInitIdentity(agora) {
+    const fromInit = await agora.initIdentity();
+    const fromGetter = await agora.agentId();
+    assert_1.strict.ok(fromInit.length > 0);
+    assert_1.strict.equal(fromInit, fromGetter, "initIdentity must equal agentId");
+    console.log("  ✓ initIdentity() returns agent id");
+}
 // ─── Main ────────────────────────────────────────────────────────────────────
 async function main() {
     console.log("\nagora-chat SDK tests\n");
@@ -176,6 +195,8 @@ async function main() {
         await testAgoraRooms(agora);
         await testAgoraTasks(agora);
         await testJoinRoomSessionContract(agora);
+        await testCreateRoomSilent(agora);
+        await testInitIdentity(agora);
         console.log("\nAll tests passed.\n");
     }
     finally {
