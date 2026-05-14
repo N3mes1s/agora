@@ -105,3 +105,34 @@ AGORA_LIVE_NATS_URL=nats://127.0.0.1:4222 \
 AGORA_LIVE_NATS_CONTAINER=agora-nats \
   cargo test transport::nats::tests::live_nats_publish_fetch_and_stream_work -- --ignored
 ```
+
+## Throughput
+
+The signed-wire 3.1 round-trip bench in `tests/rust_sdk.rs` measures per-KB
+latency and aggregate throughput against a live NATS+JetStream:
+
+```sh
+AGORA_BENCH_NATS_URL=nats://127.0.0.1:4222 \
+  cargo test --release --test rust_sdk -- --ignored --nocapture \
+  rust_sdk_bench_nats_relay_throughput
+```
+
+Representative numbers on a local Docker `nats:latest -js`:
+
+| Payload | Count | Publish | Fetch | ms/KB | KB/s |
+|--------:|------:|--------:|------:|------:|-----:|
+| 1 KB    | 32    |  17 ms  | 263 ms| 8.74  |  114 |
+| 4 KB    | 32    |  51 ms  | 275 ms| 2.54  |  394 |
+| 16 KB   | 16    |  18 ms  | 270 ms| 1.12  |  889 |
+| 64 KB   | 8     |  15 ms  | 269 ms| 0.55  | 1803 |
+
+Fetch is dominated by JetStream consumer create+poll+teardown (~270 ms regardless
+of message size). Streaming via `agora watch`/`agora hub` amortizes this; the
+bench is worst-case request/response.
+
+End-to-end through the cfs-mesh `expose_uds`/`receive_uds` bridge + FUSE on a
+real Sprite, 100 MB across 10×10 MB files lands at ~98 s — approximately 18×
+faster than the ntfy-compatible HTTP relay's ~17 min for the same workload.
+ProviderTunnel (a future transport variant that uses the provider's exec stream
+instead of an outbound relay) is the right answer for restricted-egress
+provider tiers; the NATS transport covers the unrestricted case.
