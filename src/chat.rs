@@ -656,6 +656,19 @@ fn resolve_room(label: Option<&str>) -> Result<store::RoomEntry, String> {
 }
 
 pub fn create(label: &str) -> Result<(String, String), String> {
+    create_with_options(label, false)
+}
+
+/// Create a room without publishing the "Room created..." presence envelope.
+///
+/// Mirrors [`crate::sdk::AgoraClient::create_room_silent`]. Used by embedders
+/// (cfs-mesh `expose_uds`, transient bridges, tests) that don't want a stray
+/// system message landing as the first envelope receivers see.
+pub fn create_silent(label: &str) -> Result<(String, String), String> {
+    create_with_options(label, true)
+}
+
+fn create_with_options(label: &str, silent: bool) -> Result<(String, String), String> {
     let room_id = crypto::generate_room_id();
     let secret = crypto::generate_secret();
     let room_key = crypto::derive_room_key(&secret, &room_id);
@@ -663,10 +676,12 @@ pub fn create(label: &str) -> Result<(String, String), String> {
     store::add_room(&room_id, &secret, label, store::Role::Admin);
     store::set_active_room(label);
 
-    let env = make_envelope("Room created (agora v3, AES-256-GCM).", None);
-    let encrypted = encrypt_envelope(&env, &room_key, &room_id);
-    transport::publish(&room_id, &encrypted);
-    store::save_message(&room_id, &env);
+    if !silent {
+        let env = make_envelope("Room created (agora v3, AES-256-GCM).", None);
+        let encrypted = encrypt_envelope(&env, &room_key, &room_id);
+        transport::publish(&room_id, &encrypted);
+        store::save_message(&room_id, &env);
+    }
 
     Ok((room_id, secret))
 }

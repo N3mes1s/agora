@@ -82,6 +82,9 @@ enum Commands {
         /// Room label
         #[arg(default_value = "default")]
         label: String,
+        /// Skip publishing the "Room created..." presence envelope
+        #[arg(long)]
+        silent: bool,
     },
 
     /// Join an existing room
@@ -1237,7 +1240,11 @@ fn main() {
     let room = cli.room.as_deref();
 
     match cli.command {
-        Commands::Create { label } => match chat::create(&label) {
+        Commands::Create { label, silent } => match if silent {
+            chat::create_silent(&label)
+        } else {
+            chat::create(&label)
+        } {
             Ok((room_id, secret)) => {
                 let room_key = crypto::derive_room_key(&secret, &room_id);
                 println!("  Created encrypted room '{label}'");
