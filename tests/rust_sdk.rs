@@ -105,3 +105,73 @@ fn rust_sdk_client_config_is_scoped_per_client() {
     assert!(client_a.rooms().is_empty());
     assert!(client_b.rooms().is_empty());
 }
+
+#[test]
+fn rust_sdk_init_identity_materializes_persistent_identity() {
+    let home = temp_home("init-identity");
+    std::fs::create_dir_all(&home).unwrap();
+    // No explicit agent_id — force the SDK to derive one from the seed and
+    // write the identity file on first use. init_identity must trigger that.
+    let client = AgoraClient::with_config(
+        AgoraConfig::new()
+            .home(&home)
+            .identity_seed("rfd-0029-init-identity-seed")
+            .relay_url("memory://rust-sdk-init-identity"),
+    );
+
+    assert!(
+        !home.join(".agora/identity.json").exists(),
+        "fixture precondition: identity not yet written"
+    );
+    let from_init = client.init_identity();
+    let from_getter = client.agent_id();
+    assert!(!from_init.is_empty());
+    assert_eq!(from_init, from_getter);
+    assert!(
+        home.join(".agora/identity.json").exists(),
+        "init_identity must materialize the identity file"
+    );
+}
+
+#[test]
+fn rust_sdk_create_room_silent_skips_presence_message() {
+    let home = temp_home("create-room-silent");
+    std::fs::create_dir_all(&home).unwrap();
+    let client = AgoraClient::with_config(
+        AgoraConfig::new()
+            .home(&home)
+            .agent_id("silent-admin")
+            .relay_url("memory://rust-sdk-create-room-silent"),
+    );
+
+    let silent = client.create_room_silent("silent-room").unwrap();
+    assert_eq!(silent.label(), "silent-room");
+    assert_eq!(silent.agent_id(), "silent-admin");
+    assert!(silent.room_id().starts_with("ag-"));
+    assert!(!silent.secret().is_empty());
+
+    // The room must contain no envelopes from this admin — create_room_silent
+    // did not publish the "Room created..." presence message.
+    let from_admin = silent
+        .fetch_messages("1h")
+        .into_iter()
+        .filter(|message| message.sender == "silent-admin")
+        .count();
+    assert_eq!(
+        from_admin, 0,
+        "create_room_silent must not publish a presence envelope"
+    );
+
+    // For comparison, create_room SHOULD publish a presence envelope into the
+    // same memory bus (same home, different room).
+    let loud = client.create_room("loud-room").unwrap();
+    let from_admin_loud = loud
+        .fetch_messages("1h")
+        .into_iter()
+        .filter(|message| message.sender == "silent-admin")
+        .count();
+    assert!(
+        from_admin_loud >= 1,
+        "create_room (non-silent) should publish at least one presence envelope"
+    );
+}

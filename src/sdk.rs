@@ -275,6 +275,17 @@ impl AgoraClient {
         self.config.with_runtime(api::agent_id)
     }
 
+    /// Eagerly materialize the local identity and return its agent id.
+    ///
+    /// Equivalent to [`agent_id`](Self::agent_id) — `agora::api::agent_id`
+    /// already writes the identity file on first call. Exposed under an
+    /// explicit name so embedders (cfs-mesh, pi-sandbox, etc.) can express
+    /// "set up identity now" at the call site without it reading like an
+    /// accidental getter.
+    pub fn init_identity(&self) -> String {
+        self.agent_id()
+    }
+
     /// Return client-side publish guidance for the configured relay.
     pub fn publish_limits(&self) -> PublishLimits {
         self.config.with_runtime(api::publish_limits)
@@ -321,6 +332,23 @@ impl AgoraClient {
             let env = session.message_envelope("Room created (agora v3, Rust SDK).", None);
             session.publish_envelope(&env)?;
             Ok(session)
+        })
+    }
+
+    /// Create and persist a new room without publishing the "Room created"
+    /// presence envelope.
+    ///
+    /// Use this when an embedder (cfs-mesh `expose_uds`, transient bridges,
+    /// tests) needs a fresh room but does not want a stray system message
+    /// landing as the first envelope receivers see.
+    pub fn create_room_silent(&self, label: impl AsRef<str>) -> Result<RoomSession> {
+        let label = label.as_ref();
+        self.config.with_runtime(|| {
+            let room_id = crypto::generate_room_id();
+            let secret = crypto::generate_secret();
+            let entry = store::add_room(&room_id, &secret, label, store::Role::Admin);
+            store::set_active_room(label);
+            Ok(self.session_from_entry(entry))
         })
     }
 
