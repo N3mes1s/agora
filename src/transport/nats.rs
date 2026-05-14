@@ -256,6 +256,17 @@ impl Transport for NatsTransport {
                     return;
                 }
                 Err(error) => {
+                    // Evict the cached state so the next `shared_state`
+                    // call rebuilds the client + context + stream
+                    // handle. Defense-in-depth: async_nats's Client
+                    // typically auto-reconnects the underlying TCP
+                    // transparently (verified locally by the
+                    // container-restart probe), but if state-level
+                    // corruption survives a reconnect — JetStream
+                    // consumer references gone stale, etc. — the
+                    // eviction forces a clean rebuild.
+                    let settings = NatsSettings::current();
+                    evict_shared_state(config, &settings);
                     on_disconnect(error, Some(backoff));
                     runtime::sleep(backoff);
                     backoff = std::cmp::min(backoff.saturating_mul(2), stream_config.max_backoff);
@@ -315,6 +326,28 @@ async fn shared_state(
 
     let mut cache = state_cache().lock().unwrap();
     Ok(cache.entry(key).or_insert_with(|| state.clone()).clone())
+}
+
+/// Evict the cached `NatsState` for the given key so the next call to
+/// [`shared_state`] establishes a fresh client connection + JetStream
+/// context + stream handle. The reconnect loop in [`Transport::stream`]
+/// calls this on every transport-level error so a dead TCP connection
+/// (e.g. Railway TCP-proxy closing an idle stream) doesn't leave the
+/// cache poisoned with a stale state that all subsequent reconnect
+/// attempts inherit. Surfaced during the RFD-0029 dogfood (room
+/// cfs-rfd-0029 [323909]) where the empirical OrderedConfig-expire
+/// probe ruled out [17a4d0]'s expire hypothesis, leaving cache-poisoned-
+/// state as the remaining transport-level failure mode for a long-idle
+/// agora-bridge whose underlying TCP got closed by an intermediate proxy.
+fn evict_shared_state(config: &TransportConfig, settings: &NatsSettings) {
+    let key = NatsCacheKey {
+        relay_url: config.relay_url.clone(),
+        relay_token: config.relay_token.clone(),
+        settings: settings.clone(),
+    };
+    if let Ok(mut cache) = state_cache().lock() {
+        cache.remove(&key);
+    }
 }
 
 async fn ensure_stream(
@@ -975,6 +1008,228 @@ mod tests {
             );
         }
         let _ = std::fs::remove_dir_all(home);
+    }
+
+    /// Characterize what `messages.next()` actually returns when the
+    /// server-side pull request expires. Drives the
+    /// reconnect-on-idle bug surfaced by pi-rs's RFD-0029 dogfood
+    /// (room cfs-rfd-0029 [251124]).
+    ///
+    /// Uses async_nats directly (not the agora SDK stream wrapper)
+    /// so we observe the raw library behavior with no SDK
+    /// interpretation in between. Sets `max_expires` to 1s, waits 2s,
+    /// then publishes — and prints what `messages.next()` returns at
+    /// each step.
+    #[test]
+    #[ignore = "requires AGORA_LIVE_NATS_URL pointing at a real NATS+JetStream server"]
+    fn live_nats_ordered_consumer_behavior_on_expire() {
+        let relay_url = std::env::var("AGORA_LIVE_NATS_URL")
+            .expect("AGORA_LIVE_NATS_URL must point at a live NATS server");
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let stream_name = format!("AGORA_EXPIRE_{unique}");
+        let subject = format!("expire-test.{unique}.x");
+
+        let outcome = super::block_on(async {
+            let client = async_nats::connect(relay_url)
+                .await
+                .map_err(|e| format!("connect: {e}"))?;
+            let context = jetstream::new(client);
+            let _stream = context
+                .get_or_create_stream(JetStreamConfig {
+                    name: stream_name.clone(),
+                    subjects: vec![format!("expire-test.{unique}.>")],
+                    allow_direct: true,
+                    ..Default::default()
+                })
+                .await
+                .map_err(|e| format!("stream: {e}"))?;
+            let stream = context
+                .get_stream(&stream_name)
+                .await
+                .map_err(|e| format!("get_stream: {e}"))?;
+            let consumer = stream
+                .create_consumer(async_nats::jetstream::consumer::pull::OrderedConfig {
+                    filter_subject: subject.clone(),
+                    deliver_policy: async_nats::jetstream::consumer::DeliverPolicy::All,
+                    max_batch: 16,
+                    max_bytes: 1_048_576,
+                    max_expires: Duration::from_secs(1),
+                    ..Default::default()
+                })
+                .await
+                .map_err(|e| format!("create_consumer: {e}"))?;
+            let mut messages = consumer
+                .messages()
+                .await
+                .map_err(|e| format!("messages: {e}"))?;
+
+            // Step 1: poll with 2-second tokio timeout while the
+            // server's max_expires=1s is in effect. What does
+            // messages.next() return?
+            use futures_util::StreamExt as _;
+            let t0 = std::time::Instant::now();
+            let step1 = tokio::time::timeout(Duration::from_secs(2), messages.next()).await;
+            let step1_elapsed = t0.elapsed();
+            let step1_repr = match &step1 {
+                Ok(Some(Ok(m))) => format!(
+                    "Some(Ok({} bytes))",
+                    m.message.payload.len()
+                ),
+                Ok(Some(Err(e))) => format!("Some(Err({e}))"),
+                Ok(None) => "None — stream ended".to_string(),
+                Err(_) => "Err(tokio timeout) — messages.next() still pending".to_string(),
+            };
+            eprintln!(
+                "[expire-probe] step1 elapsed={:?} result={}",
+                step1_elapsed, step1_repr
+            );
+
+            // Step 2: publish a message, see if a subsequent
+            // messages.next() picks it up.
+            context
+                .publish(subject, "post-expire".into())
+                .await
+                .map_err(|e| format!("publish: {e}"))?
+                .await
+                .map_err(|e| format!("publish-ack: {e}"))?;
+            let t1 = std::time::Instant::now();
+            let step2 = tokio::time::timeout(Duration::from_secs(5), messages.next()).await;
+            let step2_elapsed = t1.elapsed();
+            let step2_repr = match &step2 {
+                Ok(Some(Ok(m))) => format!(
+                    "Some(Ok({} bytes: {:?}))",
+                    m.message.payload.len(),
+                    String::from_utf8_lossy(&m.message.payload)
+                ),
+                Ok(Some(Err(e))) => format!("Some(Err({e}))"),
+                Ok(None) => "None — stream ended".to_string(),
+                Err(_) => "Err(tokio timeout) — messages.next() still pending".to_string(),
+            };
+            eprintln!(
+                "[expire-probe] step2 elapsed={:?} result={}",
+                step2_elapsed, step2_repr
+            );
+
+            Ok::<_, String>((step1_repr, step2_repr))
+        });
+
+        let (step1, step2) = outcome.expect("probe should complete");
+        // Behavioral assertions — what we EXPECT from a healthy
+        // OrderedConfig consumer:
+        //   - step1 should be `Err(tokio timeout)` because OrderedConfig
+        //     SHOULD internally re-issue the pull request on expire and
+        //     keep polling.
+        //   - step2 should be `Some(Ok(...))` with the published message.
+        //
+        // What we currently SEE (per pi-rs's bug report and the agora
+        // SDK falling through to `Err("stream ended")`):
+        //   - step1 might be `None — stream ended` (the smoking gun).
+        //
+        // This test PRINTS the actual behavior; the assertions below
+        // document the expected-healthy behavior. If they fail, the
+        // SDK's `while let Some(...)` loop is misinterpreting the
+        // library's API.
+        assert!(
+            !step1.starts_with("None"),
+            "OrderedConfig should NOT end stream on pull expire — got: {step1}"
+        );
+        assert!(
+            step2.starts_with("Some(Ok"),
+            "post-publish poll should deliver the message — got: {step2}"
+        );
+    }
+
+    /// Repro for the cache-poison-on-disconnect bug surfaced by
+    /// pi-rs's RFD-0029 dogfood (room cfs-rfd-0029 [739a9c]). Spawns
+    /// an agora stream against a docker NATS container, kills the
+    /// container, restarts it, and asserts the stream delivers a
+    /// message published after the restart. Requires
+    /// `AGORA_LIVE_NATS_URL` AND `AGORA_LIVE_NATS_CONTAINER` (the
+    /// docker container name so we can stop+start it). Before the
+    /// shared_state cache-eviction fix this test hung — the SDK
+    /// kept returning the dead state from cache on every
+    /// reconnect attempt.
+    #[test]
+    #[ignore = "requires AGORA_LIVE_NATS_URL + AGORA_LIVE_NATS_CONTAINER"]
+    fn live_nats_stream_recovers_from_container_restart() {
+        let relay_url = std::env::var("AGORA_LIVE_NATS_URL")
+            .expect("AGORA_LIVE_NATS_URL must point at a live NATS server");
+        let container = std::env::var("AGORA_LIVE_NATS_CONTAINER")
+            .expect("AGORA_LIVE_NATS_CONTAINER must name the docker container");
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let home = std::env::temp_dir().join(format!("agora-live-nats-restart-{unique}"));
+        let topic = format!("ag-live-restart-{unique}");
+        std::fs::create_dir_all(&home).unwrap();
+
+        let _runtime = runtime::TestRuntime::new()
+            .home(&home)
+            .var("AGORA_RELAY_URL", relay_url)
+            .enter();
+
+        // Initial publish + stream startup. Capture every payload via
+        // the stream callback.
+        assert_eq!(transport::publish_detailed(&topic, "pre-restart"), Ok(()));
+
+        let (tx, rx) = mpsc::channel();
+        let stream_topic = topic.clone();
+        let stream_handle = runtime::spawn_with_current(move || {
+            transport::stream_with_config(
+                &stream_topic,
+                &transport::StreamConfig {
+                    reconnect: true,
+                    initial_backoff: Duration::from_millis(500),
+                    max_backoff: Duration::from_secs(4),
+                },
+                |_ts, payload| {
+                    let _ = tx.send(payload.to_string());
+                },
+                |_reason, _next_backoff| {},
+            );
+        });
+
+        // Confirm the pre-restart message lands.
+        let pre = rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("pre-restart message should arrive");
+        assert_eq!(pre, "pre-restart");
+
+        // Kill the container — simulates the upstream proxy / NATS
+        // server closing the TCP connection from the SDK's POV.
+        let stop = std::process::Command::new("docker")
+            .args(["stop", &container])
+            .status()
+            .expect("docker stop should run");
+        assert!(stop.success(), "docker stop should succeed");
+
+        // Bring it back. The cached NatsState now points at a dead
+        // TCP; without 5bb3d9f, every reconnect cycle uses it.
+        let start = std::process::Command::new("docker")
+            .args(["start", &container])
+            .status()
+            .expect("docker start should run");
+        assert!(start.success(), "docker start should succeed");
+        // Tiny settle window for the container to bind 4222 again.
+        std::thread::sleep(Duration::from_secs(2));
+
+        // Publish post-restart. With the cache-eviction fix, the
+        // stream's reconnect loop should evict the dead state and
+        // rebuild — the new message should land within a few backoff
+        // cycles. Generous timeout for the reconnect dance.
+        assert_eq!(transport::publish_detailed(&topic, "post-restart"), Ok(()));
+        let got = rx.recv_timeout(Duration::from_secs(20)).ok();
+        let _ = stream_handle;
+        let _ = std::fs::remove_dir_all(home);
+        assert_eq!(
+            got.as_deref(),
+            Some("post-restart"),
+            "stream must recover from container restart and deliver post-restart message"
+        );
     }
 
     #[test]
