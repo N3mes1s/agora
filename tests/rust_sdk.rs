@@ -197,8 +197,8 @@ fn rust_sdk_bench_nats_relay_throughput() {
     );
 
     let sizes: &[(usize, usize)] = &[
-        (1024, 32),   // 1 KB × 32 = 32 KB
-        (4096, 32),   // 4 KB × 32 = 128 KB
+        (1024, 32),  // 1 KB × 32 = 32 KB
+        (4096, 32),  // 4 KB × 32 = 128 KB
         (16384, 16), // 16 KB × 16 = 256 KB
         (65536, 8),  // 64 KB × 8  = 512 KB
     ];
