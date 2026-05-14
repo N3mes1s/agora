@@ -175,3 +175,71 @@ fn rust_sdk_create_room_silent_skips_presence_message() {
         "create_room (non-silent) should publish at least one presence envelope"
     );
 }
+
+#[test]
+#[ignore = "set AGORA_BENCH_NATS_URL=nats://host:port and run with --ignored --nocapture"]
+fn rust_sdk_bench_nats_relay_throughput() {
+    let relay_url = std::env::var("AGORA_BENCH_NATS_URL")
+        .expect("AGORA_BENCH_NATS_URL must point at a live NATS+JetStream server");
+    let home = temp_home("nats-bench");
+    std::fs::create_dir_all(&home).unwrap();
+    let client = AgoraClient::with_config(
+        AgoraConfig::new()
+            .home(&home)
+            .agent_id("nats-bench")
+            .relay_url(&relay_url),
+    );
+    let session = client.create_room("nats-bench-room").unwrap();
+    eprintln!(
+        "\n=== agora-NATS bench (room={}, relay={}) ===",
+        session.room_id(),
+        relay_url
+    );
+
+    let sizes: &[(usize, usize)] = &[
+        (1024, 32),   // 1 KB × 32 = 32 KB
+        (4096, 32),   // 4 KB × 32 = 128 KB
+        (16384, 16), // 16 KB × 16 = 256 KB
+        (65536, 8),  // 64 KB × 8  = 512 KB
+    ];
+
+    eprintln!(
+        "{:>10}  {:>5}  {:>10}  {:>12}  {:>14}  {:>12}",
+        "size", "count", "publish", "fetch", "round-trip", "throughput"
+    );
+    eprintln!(
+        "{:>10}  {:>5}  {:>10}  {:>12}  {:>14}  {:>12}",
+        "", "", "(ms)", "(ms)", "(ms/KB)", "(KB/s)"
+    );
+    for &(size, count) in sizes {
+        let payload: String = "x".repeat(size);
+        let pub_start = std::time::Instant::now();
+        for _ in 0..count {
+            session.send_text(&payload).unwrap();
+        }
+        let pub_ms = pub_start.elapsed().as_secs_f64() * 1000.0;
+
+        let fetch_start = std::time::Instant::now();
+        let fetched = session.fetch_messages("1h");
+        let fetch_ms = fetch_start.elapsed().as_secs_f64() * 1000.0;
+        let from_us: Vec<_> = fetched
+            .iter()
+            .filter(|m| m.sender == "nats-bench" && m.text.len() == size)
+            .collect();
+        assert!(
+            from_us.len() >= count,
+            "expected >= {count} payloads of size {size}, got {}",
+            from_us.len()
+        );
+
+        let total_kb = (size * count) as f64 / 1024.0;
+        let total_ms = pub_ms + fetch_ms;
+        let per_kb_ms = total_ms / total_kb;
+        let kb_per_s = total_kb / (total_ms / 1000.0);
+        eprintln!(
+            "{:>8} B  {:>5}  {:>10.1}  {:>12.1}  {:>14.2}  {:>12.0}",
+            size, count, pub_ms, fetch_ms, per_kb_ms, kb_per_s
+        );
+    }
+    eprintln!("===");
+}
