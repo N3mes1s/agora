@@ -26,7 +26,18 @@ const JETSTREAM_ACK_TIMEOUT: Duration = Duration::from_secs(30);
 const JETSTREAM_MAX_ACK_INFLIGHT: usize = 8_192;
 const JETSTREAM_ACK_CONCURRENCY: usize = 256;
 const CONSUMER_INACTIVE_THRESHOLD: Duration = Duration::from_secs(10);
-const CONSUMER_MAX_EXPIRES: Duration = Duration::from_secs(30);
+/// Per-pull-request server-side timeout for stream consumers. Under
+/// `async_nats::jetstream::consumer::pull::OrderedConfig`, the `messages()`
+/// stream returns `None` when the pull request expires server-side without
+/// new traffic, which forces the outer reconnect loop into exponential
+/// backoff and creates a window where messages published during the sleep
+/// can sit in the stream unobserved until the next pull subscription. The
+/// cursor recovers them on replay, but the gap is operator-visible as a
+/// freeze. Bumped from 30s (RFD-0029 dogfood, 2026-05-14) — pi-rs's
+/// SpritesProvider smoke surfaced the freeze on quiet RPC patterns where
+/// init traffic completes inside the first 5s, then 30s of idle expires
+/// the consumer right before the first bash-side op publishes a request.
+const CONSUMER_MAX_EXPIRES: Duration = Duration::from_secs(300);
 const CONSUMER_MAX_BYTES: i64 = 1_048_576;
 const FETCH_BATCH_SIZE: usize = 256;
 const FETCH_EXPIRES: Duration = Duration::from_millis(250);
