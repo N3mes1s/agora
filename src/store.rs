@@ -152,6 +152,33 @@ pub fn load_or_create_signing_keypair(agent_id: &str) -> Result<Vec<u8>, String>
         return Ok(data);
     }
 
+    // When AGORA_IDENTITY_SEED is set, the caller expects a deterministic
+    // seed-derived keypair. Silently generating a random keypair here for
+    // an unknown `agent_id` produces a stable-but-WRONG key that
+    // downstream TOFU caches as legitimate — and the next message signed
+    // with the (different) seed-derived key fails verify with no signal
+    // beyond `[auth] signing key no longer matches`. Surfaced during the
+    // RFD-0029 dogfood (room cfs-rfd-0029 [b67570] / [d562fe]).
+    //
+    // Refuse the silent random-fabrication when a seed is configured.
+    // Callers that intentionally want a random key for `agent_id` must
+    // explicitly unset AGORA_IDENTITY_SEED before this call.
+    if let Some(seed) = runtime::var("AGORA_IDENTITY_SEED")
+        && !seed.is_empty()
+    {
+        return Err(format!(
+            "refusing to fabricate random signing key for agent_id={agent_id} \
+             at {} while AGORA_IDENTITY_SEED is set — the caller likely \
+             passed an agent_id that does not match the seed-derived \
+             identity, which would silently corrupt TOFU on the receiver \
+             side. Either (a) clear AGORA_IDENTITY_SEED if random is \
+             intended, (b) pass the correct seed-derived agent_id \
+             (key_id from identity.json), or (c) pre-create the keypair \
+             file out of band.",
+            path.display()
+        ));
+    }
+
     let pkcs8 = crypto::generate_signing_keypair_pkcs8().map_err(|e| e.to_string())?;
     fs::write(&path, &pkcs8).map_err(|e| format!("failed to persist signing key: {e}"))?;
     Ok(pkcs8)
