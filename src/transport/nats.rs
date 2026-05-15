@@ -1074,10 +1074,7 @@ mod tests {
             let step1 = tokio::time::timeout(Duration::from_secs(2), messages.next()).await;
             let step1_elapsed = t0.elapsed();
             let step1_repr = match &step1 {
-                Ok(Some(Ok(m))) => format!(
-                    "Some(Ok({} bytes))",
-                    m.message.payload.len()
-                ),
+                Ok(Some(Ok(m))) => format!("Some(Ok({} bytes))", m.message.payload.len()),
                 Ok(Some(Err(e))) => format!("Some(Err({e}))"),
                 Ok(None) => "None — stream ended".to_string(),
                 Err(_) => "Err(tokio timeout) — messages.next() still pending".to_string(),
