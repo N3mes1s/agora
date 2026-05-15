@@ -1229,6 +1229,86 @@ mod tests {
         );
     }
 
+    /// Verify per-room subject isolation. Two streams subscribed to two
+    /// different room_ids — a publish to room_A must NOT be observed by
+    /// the room_B subscriber. Drives the CROSS-ROOM-RECEIVE diagnostic
+    /// pi-rs surfaced in cfs-rfd-0029 [b35c3b].
+    #[test]
+    #[ignore = "requires AGORA_LIVE_NATS_URL"]
+    fn live_nats_two_rooms_dont_cross_receive() {
+        let relay_url = std::env::var("AGORA_LIVE_NATS_URL")
+            .expect("AGORA_LIVE_NATS_URL must point at a live NATS server");
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let home = std::env::temp_dir().join(format!("agora-cross-room-{unique}"));
+        let topic_a = format!("ag-cross-room-A-{unique}");
+        let topic_b = format!("ag-cross-room-B-{unique}");
+        std::fs::create_dir_all(&home).unwrap();
+
+        let _runtime = runtime::TestRuntime::new()
+            .home(&home)
+            .var("AGORA_RELAY_URL", relay_url)
+            .enter();
+
+        let (tx_a, rx_a) = mpsc::channel();
+        let (tx_b, rx_b) = mpsc::channel();
+        let topic_a_for_stream = topic_a.clone();
+        let topic_b_for_stream = topic_b.clone();
+        let stream_a = runtime::spawn_with_current(move || {
+            transport::stream_with_config(
+                &topic_a_for_stream,
+                &transport::StreamConfig::default(),
+                |_, payload| {
+                    let _ = tx_a.send(payload.to_string());
+                },
+                |_, _| {},
+            );
+        });
+        let stream_b = runtime::spawn_with_current(move || {
+            transport::stream_with_config(
+                &topic_b_for_stream,
+                &transport::StreamConfig::default(),
+                |_, payload| {
+                    let _ = tx_b.send(payload.to_string());
+                },
+                |_, _| {},
+            );
+        });
+
+        // Give subscribers a moment to bind their consumers.
+        std::thread::sleep(Duration::from_millis(500));
+
+        // Publish to A only.
+        assert_eq!(transport::publish_detailed(&topic_a, "to-A"), Ok(()));
+
+        // A should receive within a couple seconds; B should NOT.
+        let got_a = rx_a.recv_timeout(Duration::from_secs(5)).ok();
+        let got_b = rx_b.recv_timeout(Duration::from_millis(750)).ok();
+
+        // Publish to B only.
+        assert_eq!(transport::publish_detailed(&topic_b, "to-B"), Ok(()));
+
+        let got_b_after = rx_b.recv_timeout(Duration::from_secs(5)).ok();
+        let got_a_after_b = rx_a.recv_timeout(Duration::from_millis(750)).ok();
+
+        let _ = stream_a;
+        let _ = stream_b;
+        let _ = std::fs::remove_dir_all(home);
+
+        assert_eq!(got_a.as_deref(), Some("to-A"), "room A subscriber must see room A publish");
+        assert_eq!(
+            got_b, None,
+            "room B subscriber must NOT see room A publish (cross-room leak)"
+        );
+        assert_eq!(got_b_after.as_deref(), Some("to-B"), "room B subscriber must see room B publish");
+        assert_eq!(
+            got_a_after_b, None,
+            "room A subscriber must NOT see room B publish (cross-room leak)"
+        );
+    }
+
     #[test]
     #[ignore = "requires AGORA_LIVE_NATS_URL pointing at a real NATS+JetStream server"]
     fn live_nats_reuses_cached_state() {
