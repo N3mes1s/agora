@@ -68,7 +68,12 @@ pub fn get_agent_id() -> String {
     let (agent_id, pkcs8) = generate_identity();
 
     let dir = agora_dir();
-    ensure_dir(&dir);
+    if let Err(e) = fs::create_dir_all(&dir) {
+        panic!(
+            "agora: failed to create agora_dir at {}: {e}",
+            dir.display()
+        );
+    }
     let pubkey = crypto::signing_public_key(&pkcs8).unwrap_or_default();
     let json = serde_json::json!({
         "key_id": agent_id,
@@ -77,12 +82,39 @@ pub fn get_agent_id() -> String {
         "created_at": now(),
         "ephemeral": runtime::var("AGORA_IDENTITY_SEED").is_none(),
     });
-    let _ = fs::write(&id_file, serde_json::to_string_pretty(&json).unwrap());
 
-    // Also store the signing key
+    // Write signing-keys/<agent_id>.pkcs8 FIRST, then identity.json.
+    // Atomicity-of-pair invariant: identity.json must NEVER exist on disk
+    // without its corresponding signing-keys/<key_id>.pkcs8. Otherwise a
+    // later get_agent_id() call would early-return the cached identity
+    // (line 53-65) and downstream encrypt_envelope would fail to find the
+    // signing key. Surfaced during the RFD-0029 dogfood (cfs-rfd-0029
+    // [84efc2]) where pi-rs's SpritesProvider smoke hit exactly this
+    // half-written state — silent `let _ = fs::write(...)` swallowed the
+    // pkcs8 write error, identity.json got persisted alone, every
+    // subsequent publish path panicked at the load_or_create_signing_keypair
+    // refuse-to-fabricate check landed in 520f078.
     let keys_dir = agora_dir().join("signing-keys");
-    ensure_dir(&keys_dir);
-    let _ = fs::write(keys_dir.join(format!("{agent_id}.pkcs8")), &pkcs8);
+    if let Err(e) = fs::create_dir_all(&keys_dir) {
+        panic!(
+            "agora: failed to create signing-keys dir at {}: {e}",
+            keys_dir.display()
+        );
+    }
+    let pkcs8_path = keys_dir.join(format!("{agent_id}.pkcs8"));
+    if let Err(e) = fs::write(&pkcs8_path, &pkcs8) {
+        panic!(
+            "agora: failed to persist signing keypair at {}: {e}",
+            pkcs8_path.display()
+        );
+    }
+
+    if let Err(e) = fs::write(&id_file, serde_json::to_string_pretty(&json).unwrap()) {
+        panic!(
+            "agora: failed to persist identity.json at {}: {e}",
+            id_file.display()
+        );
+    }
 
     agent_id
 }
