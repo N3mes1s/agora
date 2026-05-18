@@ -1297,12 +1297,20 @@ mod tests {
         let _ = stream_b;
         let _ = std::fs::remove_dir_all(home);
 
-        assert_eq!(got_a.as_deref(), Some("to-A"), "room A subscriber must see room A publish");
+        assert_eq!(
+            got_a.as_deref(),
+            Some("to-A"),
+            "room A subscriber must see room A publish"
+        );
         assert_eq!(
             got_b, None,
             "room B subscriber must NOT see room A publish (cross-room leak)"
         );
-        assert_eq!(got_b_after.as_deref(), Some("to-B"), "room B subscriber must see room B publish");
+        assert_eq!(
+            got_b_after.as_deref(),
+            Some("to-B"),
+            "room B subscriber must see room B publish"
+        );
         assert_eq!(
             got_a_after_b, None,
             "room A subscriber must NOT see room B publish (cross-room leak)"
