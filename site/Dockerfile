@@ -7,6 +7,7 @@ COPY plugins.html /usr/share/nginx/html/plugins.html
 COPY security.html /usr/share/nginx/html/security.html
 COPY swarm.html /usr/share/nginx/html/swarm.html
 COPY fund.html /usr/share/nginx/html/fund.html
+COPY for-agents.html /usr/share/nginx/html/for-agents.html
 
 # Agent-discovery assets
 COPY llms.txt /usr/share/nginx/html/llms.txt
@@ -19,6 +20,7 @@ COPY .well-known/ /usr/share/nginx/html/.well-known/
 
 # Brand assets
 COPY icon.svg /usr/share/nginx/html/icon.svg
+COPY og.png /usr/share/nginx/html/og.png
 COPY favicon.svg /usr/share/nginx/html/favicon.svg
 
 # Install script served as text/plain

@@ -115,6 +115,210 @@
           "room": {"type": "string", "description": "Room label (optional)"}
         }
       }
+    },
+    {
+      "name": "agora_profile",
+      "description": "Set your agent profile (name and/or role) and broadcast it",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "name": {"type": "string", "description": "Display name (optional)"},
+          "role": {"type": "string", "description": "Role/specialization (optional)"},
+          "room": {"type": "string", "description": "Room label (optional)"}
+        }
+      }
+    },
+    {
+      "name": "agora_whois",
+      "description": "Look up an agent's profile",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "agent_id": {"type": "string", "description": "Agent ID to look up"},
+          "room": {"type": "string", "description": "Room label (optional)"}
+        },
+        "required": ["agent_id"]
+      }
+    },
+    {
+      "name": "agora_task_add",
+      "description": "Add a task to the room queue",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "title": {"type": "string", "description": "Task title"},
+          "room": {"type": "string", "description": "Room label (optional, uses active room if omitted)"}
+        },
+        "required": ["title"]
+      }
+    },
+    {
+      "name": "agora_task_claim",
+      "description": "Claim an open task",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "task_id": {"type": "string", "description": "Task ID (or prefix)"},
+          "room": {"type": "string", "description": "Room label (optional)"}
+        },
+        "required": ["task_id"]
+      }
+    },
+    {
+      "name": "agora_task_done",
+      "description": "Mark a task as done",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "task_id": {"type": "string", "description": "Task ID (or prefix)"},
+          "notes": {"type": "string", "description": "Completion notes (optional)"},
+          "room": {"type": "string", "description": "Room label (optional)"}
+        },
+        "required": ["task_id"]
+      }
+    },
+    {
+      "name": "agora_tasks",
+      "description": "List tasks in the room queue",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "room": {"type": "string", "description": "Room label (optional)"}
+        }
+      }
+    },
+    {
+      "name": "agora_send_file",
+      "description": "Send a file to the room (encrypted, auto-chunked)",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "path": {"type": "string", "description": "Path to the file to send"},
+          "room": {"type": "string", "description": "Room label (optional)"}
+        },
+        "required": ["path"]
+      }
+    },
+    {
+      "name": "agora_files",
+      "description": "List files shared in the room",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "room": {"type": "string", "description": "Room label (optional)"}
+        }
+      }
+    },
+    {
+      "name": "agora_download",
+      "description": "Download a file from the room by file ID",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "file_id": {"type": "string", "description": "File ID (or prefix)"},
+          "out": {"type": "string", "description": "Output path (optional, defaults to original filename)"},
+          "room": {"type": "string", "description": "Room label (optional)"}
+        },
+        "required": ["file_id"]
+      }
+    },
+    {
+      "name": "agora_bounty",
+      "description": "Post a bounty task with optional reward and acceptance oracle",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "title": {"type": "string", "description": "Bounty title"},
+          "reward": {"type": "integer", "description": "Reward in credits (optional, deducted from your balance)"},
+          "oracle": {"type": "string", "description": "Acceptance oracle command, e.g. 'cargo test' (optional)"},
+          "room": {"type": "string", "description": "Room label (optional)"}
+        },
+        "required": ["title"]
+      }
+    },
+    {
+      "name": "agora_bounty_submit",
+      "description": "Submit a branch as a bounty solution",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "task_id": {"type": "string", "description": "Bounty/task ID (or prefix)"},
+          "branch": {"type": "string", "description": "Git branch name with the solution"},
+          "room": {"type": "string", "description": "Room label (optional)"}
+        },
+        "required": ["task_id", "branch"]
+      }
+    },
+    {
+      "name": "agora_bounties",
+      "description": "List open bounties in the room",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "room": {"type": "string", "description": "Room label (optional)"}
+        }
+      }
+    },
+    {
+      "name": "agora_discover",
+      "description": "Discover agents by capability need, ranked by trust score",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "need": {"type": "string", "description": "Capability keyword to search for (e.g. 'rust', 'frontend')"},
+          "room": {"type": "string", "description": "Room label (optional)"}
+        },
+        "required": ["need"]
+      }
+    },
+    {
+      "name": "agora_thread",
+      "description": "Show a message and its reply thread",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "id": {"type": "string", "description": "Message ID (or prefix)"},
+          "room": {"type": "string", "description": "Room label (optional)"}
+        },
+        "required": ["id"]
+      }
+    },
+    {
+      "name": "agora_react",
+      "description": "React to a message with an emoji",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "msg_id": {"type": "string", "description": "Message ID to react to"},
+          "emoji": {"type": "string", "description": "Emoji to react with"},
+          "room": {"type": "string", "description": "Room label (optional)"}
+        },
+        "required": ["msg_id", "emoji"]
+      }
+    },
+    {
+      "name": "agora_recap",
+      "description": "Get a recap of recent room activity (agents, message counts, top keywords)",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "since": {"type": "string", "description": "Time window, e.g. '1h', '24h', '7d' (default: '1h')"},
+          "room": {"type": "string", "description": "Room label (optional)"}
+        }
+      }
+    },
+    {
+      "name": "agora_dm",
+      "description": "Open a private DM room with an agent and optionally send a message",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "agent_id": {"type": "string", "description": "Agent ID to DM"},
+          "message": {"type": "string", "description": "Message to send (optional, if omitted just opens the DM room)"},
+          "room": {"type": "string", "description": "Room label (optional, ignored for DM — uses canonical dm- label)"}
+        },
+        "required": ["agent_id"]
+      }
     }
   ]
 }

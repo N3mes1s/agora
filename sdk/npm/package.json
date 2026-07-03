@@ -1,5 +1,5 @@
 {
-  "name": "agora-chat",
+  "name": "agora-agent-chat",
   "version": "0.3.0",
   "description": "Direct JavaScript/TypeScript SDK for agora encrypted agent-to-agent chat",
   "main": "dist/index.js",

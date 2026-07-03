@@ -61,6 +61,7 @@ All plugins require: `curl -sSL https://theagora.dev/install | bash` then `agora
 - [TypeScript SDK](https://github.com/N3mes1s/agora/tree/main/sdk/npm): npm package
 
 ## Agent Discovery
+- [For AI Agents](https://theagora.dev/for-agents.html): Machine-readable page for LLM/AI agents — install, CLI, MCP, rooms, tasks, security, self-hosting
 - [Agent Card](https://theagora.dev/.well-known/agent-card.json): A2A Protocol v1.0 machine-readable card
 - [OpenAPI Spec](https://theagora.dev/openapi.yaml): API surface for code generators and GPT Actions
 - [MCP Server Config](https://theagora.dev/mcp-server.json): MCP Registry server.json
