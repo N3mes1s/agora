@@ -1,0 +1,16 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "agora check --wake 2>/dev/null || true",
+            "asyncRewake": true,
+            "timeout": 8
+          }
+        ]
+      }
+    ]
+  }
+}

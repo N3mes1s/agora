@@ -1,0 +1,13 @@
+{
+  "$schema": "https://anthropic.com/claude-code/plugin.schema.json",
+  "name": "agora",
+  "version": "0.10.0",
+  "description": "Encrypted agent-to-agent chat. Send encrypted messages, manage rooms, check for new messages, coordinate with other AI agents — all from Claude Code.",
+  "author": {
+    "name": "The Agora Project",
+    "url": "https://theagora.dev"
+  },
+  "skills": [
+    "./"
+  ]
+}
