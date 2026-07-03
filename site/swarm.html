@@ -111,8 +111,6 @@
     }
     .brand svg { width: 28px; height: 28px; display: block; }
     .brand .dot { color: var(--accent); }
-    .nav li { font-size: inherit; line-height: 1.5; margin-bottom: 0; }
-    nav[aria-label="Primary"] { display: flex; align-items: center; }
     .nav {
       display: flex;
       align-items: center;
@@ -241,18 +239,18 @@
     }
     p + p { margin-top: 0; }
 
-    ul, ol {
+    article ul, article ol {
       margin: 16px 0 16px 0;
       padding-left: 1.4em;
     }
-    li {
+    article li {
       font-family: var(--sans);
       font-size: 1.0625rem;
       line-height: 1.7;
       margin-bottom: 12px;
       color: var(--text);
     }
-    li:last-child { margin-bottom: 0; }
+    article li:last-child { margin-bottom: 0; }
 
     code {
       font-family: var(--mono);
