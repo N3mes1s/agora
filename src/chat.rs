@@ -2586,10 +2586,9 @@ fn extract_memo_agent_id(tx: &serde_json::Value) -> Option<String> {
             let program_id = ix["programId"].as_str().or_else(|| {
                 ix["parsed"]["programId"]
                     .as_str()
- .or_else(|| ix["program"].as_str())
+                    .or_else(|| ix["program"].as_str())
             });
-            if program_id == Some(SOLANA_MEMO_PROGRAM_ID)
-                || ix["program"].as_str() == Some("memo")
+            if program_id == Some(SOLANA_MEMO_PROGRAM_ID) || ix["program"].as_str() == Some("memo")
             {
                 // jsonParsed: parsed.source == "memo", data is under parsed (string)
                 // For jsonParsed memo, the parsed field IS the memo text string.
@@ -4996,7 +4995,8 @@ pub fn send_file(path: &str, room_label: Option<&str>) -> Result<(String, u64), 
         let b64_data = BASE64.encode(chunk);
         let env = make_file_envelope(&filename, &file_id, &b64_data, size, i as u64, total_chunks);
         let encrypted = encrypt_envelope(&env, &room_key, &room.room_id);
-        transport::publish_with_retry(&room.room_id, &encrypted).map_err(|e| format!("publish failed: {e}"))?;
+        transport::publish_with_retry(&room.room_id, &encrypted)
+            .map_err(|e| format!("publish failed: {e}"))?;
         store::save_message(&room.room_id, &env);
     }
 
@@ -5089,21 +5089,19 @@ pub fn download_file(
 mod tests {
     use super::{
         BASE64, DISCOVERY_POSITIVE_HALF_LIFE_SECS, PLAZA_RATE_LIMIT_WINDOW_SECS,
-        SIGNED_WIRE_VERSION, SOLANA_MEMO_PROGRAM_ID, SOLANA_TOKEN_PROGRAM,
-        SOLANA_TREASURY_WALLET, SOLANA_USDC_MINT,
-        SignedWirePayload, VERSION, VerifiedSolanaDeposit, allow_incoming_message,
-        annotate_soma_message, bounty_expire_check, bounty_post, bounty_submit, bounty_verify,
-        count_invite_redemptions_in_envs, decrypt_payload, discover, discovery_decay_weight,
-        dm_room_summaries, encrypt_envelope, enforce_outbound_plaza_rate_limit,
-        extract_memo_agent_id,
-        infer_soma_subject_path, ingest_auxiliary_event, list_role_leases, list_work_receipts,
-        make_envelope, make_invite_redemption, mark_displayed_messages_read,
-        payment_complete_solana_deposit, pin, pins, resolve_room, role_claim, role_heartbeat,
-        role_release, room_summaries, seed_gen, seed_plaza_rate_limit_state, seed_verify,
-        send_watch_heartbeat, should_display_message, signing_message_bytes, soma_churn_decay,
-        soma_correct, stale_claim_weight, task_add, task_add_as, task_add_with_oracle,
-        task_checkpoint, task_checkpoint_as, task_claim_as, task_done, task_done_as,
-        task_reject_as, unpin, verified_solana_deposit_from_tx,
+        SIGNED_WIRE_VERSION, SOLANA_MEMO_PROGRAM_ID, SOLANA_TOKEN_PROGRAM, SOLANA_TREASURY_WALLET,
+        SOLANA_USDC_MINT, SignedWirePayload, VERSION, VerifiedSolanaDeposit,
+        allow_incoming_message, annotate_soma_message, bounty_expire_check, bounty_post,
+        bounty_submit, bounty_verify, count_invite_redemptions_in_envs, decrypt_payload, discover,
+        discovery_decay_weight, dm_room_summaries, encrypt_envelope,
+        enforce_outbound_plaza_rate_limit, extract_memo_agent_id, infer_soma_subject_path,
+        ingest_auxiliary_event, list_role_leases, list_work_receipts, make_envelope,
+        make_invite_redemption, mark_displayed_messages_read, payment_complete_solana_deposit, pin,
+        pins, resolve_room, role_claim, role_heartbeat, role_release, room_summaries, seed_gen,
+        seed_plaza_rate_limit_state, seed_verify, send_watch_heartbeat, should_display_message,
+        signing_message_bytes, soma_churn_decay, soma_correct, stale_claim_weight, task_add,
+        task_add_as, task_add_with_oracle, task_checkpoint, task_checkpoint_as, task_claim_as,
+        task_done, task_done_as, task_reject_as, unpin, verified_solana_deposit_from_tx,
     };
     use crate::crypto;
     use crate::runtime;
@@ -7195,7 +7193,9 @@ pub fn stop_daemon(room_label: Option<&str>) -> Result<(), String> {
         std::thread::sleep(std::time::Duration::from_millis(200));
         // If still alive after 200ms, SIGKILL and clean up ourselves.
         if unsafe { libc::kill(pid, 0) } == 0 {
-            unsafe { libc::kill(pid, libc::SIGKILL); }
+            unsafe {
+                libc::kill(pid, libc::SIGKILL);
+            }
             let _ = std::fs::remove_file(pid_path);
         }
         return Ok(());

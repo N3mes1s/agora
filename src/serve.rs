@@ -868,8 +868,7 @@ fn parse_request(raw: &str) -> (&str, &str, &str) {
 
 /// Find the offset of the `\r\n\r\n` header terminator in a byte buffer.
 fn find_header_end(buf: &[u8]) -> Option<usize> {
-    buf.windows(4)
-        .position(|w| w == b"\r\n\r\n")
+    buf.windows(4).position(|w| w == b"\r\n\r\n")
 }
 
 /// Extract a named header value from a raw HTTP request (case-insensitive name match).
@@ -1251,11 +1250,7 @@ fn handle_connection(stream: TcpStream) {
             }
             if runtime::var("AGORA_SANDBOX_SECRET").map_or(false, |v| !v.is_empty()) {
                 if let Err(e) = verify_bearer_agent_token(&raw) {
-                    send_json(
-                        stream,
-                        401,
-                        &serde_json::json!({"error": e}).to_string(),
-                    );
+                    send_json(stream, 401, &serde_json::json!({"error": e}).to_string());
                     return;
                 }
             }
@@ -1277,11 +1272,7 @@ fn handle_connection(stream: TcpStream) {
             }
             if runtime::var("AGORA_SANDBOX_SECRET").map_or(false, |v| !v.is_empty()) {
                 if let Err(e) = verify_bearer_agent_token(&raw) {
-                    send_json(
-                        stream,
-                        401,
-                        &serde_json::json!({"error": e}).to_string(),
-                    );
+                    send_json(stream, 401, &serde_json::json!({"error": e}).to_string());
                     return;
                 }
             }
@@ -1305,11 +1296,7 @@ fn handle_connection(stream: TcpStream) {
             let verified_agent_id = match verify_bearer_agent_token(&raw) {
                 Ok(agent_id) => agent_id,
                 Err(e) => {
-                    send_json(
-                        stream,
-                        401,
-                        &err_json(&e),
-                    );
+                    send_json(stream, 401, &err_json(&e));
                     return;
                 }
             };
@@ -1359,17 +1346,18 @@ fn handle_connection(stream: TcpStream) {
                 SANDBOX_OPEN_COST_CREDITS,
                 "sandbox:open",
             ) {
-                send_json(
-                    stream,
-                    402,
-                    &err_json(&e),
-                );
+                send_json(stream, 402, &err_json(&e));
                 return;
             }
             // Guardrail: check concurrent sandbox limit + daily cap
             if let Err(e) = sandbox::check_can_create(&verified_agent_id) {
                 // Refund the pre-charged credits since we're rejecting
-                store::credit_add(&room_id, &verified_agent_id, SANDBOX_OPEN_COST_CREDITS, "sandbox:open:refund");
+                store::credit_add(
+                    &room_id,
+                    &verified_agent_id,
+                    SANDBOX_OPEN_COST_CREDITS,
+                    "sandbox:open:refund",
+                );
                 send_json(stream, 429, &err_json(&e));
                 return;
             }
@@ -1413,11 +1401,7 @@ fn handle_connection(stream: TcpStream) {
                         "error",
                         Some(&e),
                     );
-                    send_json(
-                        stream,
-                        500,
-                        &err_json(&e),
-                    );
+                    send_json(stream, 500, &err_json(&e));
                 }
             }
         }
@@ -1455,7 +1439,11 @@ fn handle_connection(stream: TcpStream) {
             match sandbox::session_owner(&session_id) {
                 Some(owner) if owner == verified_agent_id => {}
                 Some(_) => {
-                    send_json(stream, 403, r#"{"error":"session does not belong to caller"}"#);
+                    send_json(
+                        stream,
+                        403,
+                        r#"{"error":"session does not belong to caller"}"#,
+                    );
                     return;
                 }
                 None => {
@@ -1477,7 +1465,12 @@ fn handle_connection(stream: TcpStream) {
             // requests are counted by the in-memory rate limiter.
             sandbox::record_exec_attempt(&verified_agent_id);
             // Guardrail: charge 1 credit per exec (unconditional — room_id is required).
-            if let Err(e) = store::atomic_credit_debit(&room_id, &verified_agent_id, sandbox::EXEC_COST_CREDITS, "sandbox:exec") {
+            if let Err(e) = store::atomic_credit_debit(
+                &room_id,
+                &verified_agent_id,
+                sandbox::EXEC_COST_CREDITS,
+                "sandbox:exec",
+            ) {
                 send_json(stream, 402, &err_json(&e));
                 return;
             }
@@ -1518,11 +1511,7 @@ fn handle_connection(stream: TcpStream) {
                         "error",
                         Some(&e),
                     );
-                    send_json(
-                        stream,
-                        500,
-                        &err_json(&e),
-                    )
+                    send_json(stream, 500, &err_json(&e))
                 }
             }
         }
@@ -1571,11 +1560,7 @@ fn handle_connection(stream: TcpStream) {
                         "error",
                         Some(&e),
                     );
-                    send_json(
-                        stream,
-                        500,
-                        &err_json(&e),
-                    )
+                    send_json(stream, 500, &err_json(&e))
                 }
             }
         }
@@ -1587,11 +1572,7 @@ fn handle_connection(stream: TcpStream) {
             let _verified_agent_id = match verify_bearer_agent_token(&raw) {
                 Ok(id) => id,
                 Err(e) => {
-                    send_json(
-                        stream,
-                        401,
-                        &serde_json::json!({"error": e}).to_string(),
-                    );
+                    send_json(stream, 401, &serde_json::json!({"error": e}).to_string());
                     return;
                 }
             };
@@ -1619,11 +1600,7 @@ fn handle_connection(stream: TcpStream) {
                     let resp = serde_json::json!({"checkout_url": checkout_url});
                     send_json(stream, 200, &resp.to_string());
                 }
-                Err(e) => send_json(
-                    stream,
-                    400,
-                    &err_json(&e),
-                ),
+                Err(e) => send_json(stream, 400, &err_json(&e)),
             }
         }
 
@@ -1754,11 +1731,7 @@ fn handle_connection(stream: TcpStream) {
                         serde_json::to_string(&bounties).unwrap_or_else(|_| "[]".to_string());
                     send_json(stream, 200, &body);
                 }
-                Err(e) => send_json(
-                    stream,
-                    400,
-                    &err_json(&e),
-                ),
+                Err(e) => send_json(stream, 400, &err_json(&e)),
             }
         }
 
@@ -1769,11 +1742,7 @@ fn handle_connection(stream: TcpStream) {
             let agent_id = match verify_bearer_agent_token(&raw) {
                 Ok(id) => id,
                 Err(e) => {
-                    send_json(
-                        stream,
-                        401,
-                        &err_json(&e),
-                    );
+                    send_json(stream, 401, &err_json(&e));
                     return;
                 }
             };
@@ -1820,11 +1789,7 @@ fn handle_connection(stream: TcpStream) {
                     });
                     send_json(stream, 201, &resp.to_string());
                 }
-                Err(e) => send_json(
-                    stream,
-                    400,
-                    &err_json(&e),
-                ),
+                Err(e) => send_json(stream, 400, &err_json(&e)),
             }
         }
 
@@ -1835,11 +1800,7 @@ fn handle_connection(stream: TcpStream) {
             let _agent_id = match verify_bearer_agent_token(&raw) {
                 Ok(id) => id,
                 Err(e) => {
-                    send_json(
-                        stream,
-                        401,
-                        &err_json(&e),
-                    );
+                    send_json(stream, 401, &err_json(&e));
                     return;
                 }
             };
@@ -1869,11 +1830,7 @@ fn handle_connection(stream: TcpStream) {
                     });
                     send_json(stream, 200, &resp.to_string());
                 }
-                Err(e) => send_json(
-                    stream,
-                    400,
-                    &err_json(&e),
-                ),
+                Err(e) => send_json(stream, 400, &err_json(&e)),
             }
         }
 
@@ -1884,11 +1841,7 @@ fn handle_connection(stream: TcpStream) {
             let _caller = match verify_bearer_agent_token(&raw) {
                 Ok(id) => id,
                 Err(e) => {
-                    send_json(
-                        stream,
-                        401,
-                        &err_json(&e),
-                    );
+                    send_json(stream, 401, &err_json(&e));
                     return;
                 }
             };
@@ -1919,11 +1872,7 @@ fn handle_connection(stream: TcpStream) {
                     });
                     send_json(stream, 200, &resp.to_string());
                 }
-                Err(e) => send_json(
-                    stream,
-                    400,
-                    &err_json(&e),
-                ),
+                Err(e) => send_json(stream, 400, &err_json(&e)),
             }
         }
 
@@ -1934,11 +1883,7 @@ fn handle_connection(stream: TcpStream) {
             let _caller = match verify_bearer_agent_token(&raw) {
                 Ok(id) => id,
                 Err(e) => {
-                    send_json(
-                        stream,
-                        401,
-                        &err_json(&e),
-                    );
+                    send_json(stream, 401, &err_json(&e));
                     return;
                 }
             };
@@ -1950,11 +1895,7 @@ fn handle_connection(stream: TcpStream) {
                     let resp = serde_json::json!({"expired": expired_ids});
                     send_json(stream, 200, &resp.to_string());
                 }
-                Err(e) => send_json(
-                    stream,
-                    400,
-                    &err_json(&e),
-                ),
+                Err(e) => send_json(stream, 400, &err_json(&e)),
             }
         }
 
@@ -1978,11 +1919,7 @@ fn handle_connection(stream: TcpStream) {
                         serde_json::to_string(&filtered).unwrap_or_else(|_| "[]".to_string());
                     send_json(stream, 200, &body);
                 }
-                Err(e) => send_json(
-                    stream,
-                    400,
-                    &err_json(&e),
-                ),
+                Err(e) => send_json(stream, 400, &err_json(&e)),
             }
         }
 
@@ -1993,11 +1930,7 @@ fn handle_connection(stream: TcpStream) {
             let agent_id = match verify_bearer_agent_token(&raw) {
                 Ok(agent_id) => agent_id,
                 Err(e) => {
-                    send_json(
-                        stream,
-                        401,
-                        &err_json(&e),
-                    );
+                    send_json(stream, 401, &err_json(&e));
                     return;
                 }
             };
@@ -2021,11 +1954,7 @@ fn handle_connection(stream: TcpStream) {
                     let resp = serde_json::json!({"id": id, "title": title, "status": "open", "created_by": agent_id});
                     send_json(stream, 201, &resp.to_string());
                 }
-                Err(e) => send_json(
-                    stream,
-                    400,
-                    &err_json(&e),
-                ),
+                Err(e) => send_json(stream, 400, &err_json(&e)),
             }
         }
 
@@ -2042,11 +1971,7 @@ fn handle_connection(stream: TcpStream) {
                     let body = serde_json::to_string(&task).unwrap_or_else(|_| "{}".to_string());
                     send_json(stream, 200, &body);
                 }
-                Err(e) => send_json(
-                    stream,
-                    404,
-                    &err_json(&e),
-                ),
+                Err(e) => send_json(stream, 404, &err_json(&e)),
             }
         }
 
@@ -2057,11 +1982,7 @@ fn handle_connection(stream: TcpStream) {
             let agent_id = match verify_bearer_agent_token(&raw) {
                 Ok(agent_id) => agent_id,
                 Err(e) => {
-                    send_json(
-                        stream,
-                        401,
-                        &err_json(&e),
-                    );
+                    send_json(stream, 401, &err_json(&e));
                     return;
                 }
             };
@@ -2114,11 +2035,7 @@ fn handle_connection(stream: TcpStream) {
                     }
                     Err(_) => send_json(stream, 200, r#"{"status":"ok"}"#),
                 },
-                Err(e) => send_json(
-                    stream,
-                    400,
-                    &err_json(&e),
-                ),
+                Err(e) => send_json(stream, 400, &err_json(&e)),
             }
         }
 
@@ -2129,11 +2046,7 @@ fn handle_connection(stream: TcpStream) {
             let _verified_agent_id = match verify_bearer_agent_token(&raw) {
                 Ok(id) => id,
                 Err(e) => {
-                    send_json(
-                        stream,
-                        401,
-                        &serde_json::json!({"error": e}).to_string(),
-                    );
+                    send_json(stream, 401, &serde_json::json!({"error": e}).to_string());
                     return;
                 }
             };
@@ -2153,11 +2066,7 @@ fn handle_connection(stream: TcpStream) {
                     let resp = serde_json::to_string(&records).unwrap_or_else(|_| "[]".to_string());
                     send_json(stream, 200, &resp);
                 }
-                Err(e) => send_json(
-                    stream,
-                    400,
-                    &err_json(&e),
-                ),
+                Err(e) => send_json(stream, 400, &err_json(&e)),
             }
         }
 
@@ -2185,11 +2094,7 @@ fn handle_connection(stream: TcpStream) {
                     let body = serde_json::to_string(&msgs).unwrap_or_else(|_| "[]".to_string());
                     send_json(stream, 200, &body);
                 }
-                Err(e) => send_json(
-                    stream,
-                    400,
-                    &err_json(&e),
-                ),
+                Err(e) => send_json(stream, 400, &err_json(&e)),
             }
         }
 
@@ -2233,11 +2138,7 @@ fn handle_connection(stream: TcpStream) {
                     let body = serde_json::to_string(&msgs).unwrap_or_else(|_| "[]".to_string());
                     send_json(stream, 200, &body);
                 }
-                Err(e) => send_json(
-                    stream,
-                    400,
-                    &err_json(&e),
-                ),
+                Err(e) => send_json(stream, 400, &err_json(&e)),
             }
         }
 
@@ -2259,11 +2160,7 @@ fn handle_connection(stream: TcpStream) {
                     let body = serde_json::to_string(&msgs).unwrap_or_else(|_| "[]".to_string());
                     send_json(stream, 200, &body);
                 }
-                Err(e) => send_json(
-                    stream,
-                    400,
-                    &err_json(&e),
-                ),
+                Err(e) => send_json(stream, 400, &err_json(&e)),
             }
         }
 
@@ -2282,11 +2179,7 @@ fn handle_connection(stream: TcpStream) {
                     let body = serde_json::to_string(&links).unwrap_or_else(|_| "[]".to_string());
                     send_json(stream, 200, &body);
                 }
-                Err(e) => send_json(
-                    stream,
-                    400,
-                    &err_json(&e),
-                ),
+                Err(e) => send_json(stream, 400, &err_json(&e)),
             }
         }
 
@@ -2302,11 +2195,7 @@ fn handle_connection(stream: TcpStream) {
             let room = (*room_label).to_string();
             match chat::digest(&since, Some(&room)) {
                 Ok(text) => send_response(stream, "200 OK", "text/markdown; charset=utf-8", &text),
-                Err(e) => send_json(
-                    stream,
-                    400,
-                    &err_json(&e),
-                ),
+                Err(e) => send_json(stream, 400, &err_json(&e)),
             }
         }
 
@@ -2325,11 +2214,7 @@ fn handle_connection(stream: TcpStream) {
                     let body = serde_json::to_string(&recap).unwrap_or_else(|_| "{}".to_string());
                     send_json(stream, 200, &body);
                 }
-                Err(e) => send_json(
-                    stream,
-                    400,
-                    &err_json(&e),
-                ),
+                Err(e) => send_json(stream, 400, &err_json(&e)),
             }
         }
 
@@ -2343,11 +2228,7 @@ fn handle_connection(stream: TcpStream) {
                         serde_json::to_string(&statuses).unwrap_or_else(|_| "[]".to_string());
                     send_json(stream, 200, &body);
                 }
-                Err(e) => send_json(
-                    stream,
-                    400,
-                    &err_json(&e),
-                ),
+                Err(e) => send_json(stream, 400, &err_json(&e)),
             }
         }
 
@@ -2358,11 +2239,7 @@ fn handle_connection(stream: TcpStream) {
             let _caller = match verify_bearer_agent_token(&raw) {
                 Ok(id) => id,
                 Err(e) => {
-                    send_json(
-                        stream,
-                        401,
-                        &err_json(&e),
-                    );
+                    send_json(stream, 401, &err_json(&e));
                     return;
                 }
             };
@@ -2372,11 +2249,7 @@ fn handle_connection(stream: TcpStream) {
                     let body = serde_json::to_string(&hooks).unwrap_or_else(|_| "[]".to_string());
                     send_json(stream, 200, &body);
                 }
-                Err(e) => send_json(
-                    stream,
-                    400,
-                    &err_json(&e),
-                ),
+                Err(e) => send_json(stream, 400, &err_json(&e)),
             }
         }
 
@@ -2387,11 +2260,7 @@ fn handle_connection(stream: TcpStream) {
             let _caller = match verify_bearer_agent_token(&raw) {
                 Ok(id) => id,
                 Err(e) => {
-                    send_json(
-                        stream,
-                        401,
-                        &err_json(&e),
-                    );
+                    send_json(stream, 401, &err_json(&e));
                     return;
                 }
             };
@@ -2415,11 +2284,7 @@ fn handle_connection(stream: TcpStream) {
                     let resp = serde_json::json!({"id": id, "url": url});
                     send_json(stream, 201, &resp.to_string());
                 }
-                Err(e) => send_json(
-                    stream,
-                    400,
-                    &err_json(&e),
-                ),
+                Err(e) => send_json(stream, 400, &err_json(&e)),
             }
         }
 
@@ -2428,11 +2293,7 @@ fn handle_connection(stream: TcpStream) {
             let _caller = match verify_bearer_agent_token(&raw) {
                 Ok(id) => id,
                 Err(e) => {
-                    send_json(
-                        stream,
-                        401,
-                        &err_json(&e),
-                    );
+                    send_json(stream, 401, &err_json(&e));
                     return;
                 }
             };
@@ -2441,11 +2302,7 @@ fn handle_connection(stream: TcpStream) {
             match chat::remove_webhook(&wid, Some(&room)) {
                 Ok(true) => send_json(stream, 200, r#"{"status":"deleted"}"#),
                 Ok(false) => send_json(stream, 404, r#"{"error":"webhook not found"}"#),
-                Err(e) => send_json(
-                    stream,
-                    400,
-                    &err_json(&e),
-                ),
+                Err(e) => send_json(stream, 400, &err_json(&e)),
             }
         }
 
@@ -2471,11 +2328,7 @@ fn handle_connection(stream: TcpStream) {
                         serde_json::to_string(&filtered).unwrap_or_else(|_| "[]".to_string());
                     send_json(stream, 200, &body);
                 }
-                Err(e) => send_json(
-                    stream,
-                    400,
-                    &err_json(&e),
-                ),
+                Err(e) => send_json(stream, 400, &err_json(&e)),
             }
         }
 
@@ -2486,11 +2339,7 @@ fn handle_connection(stream: TcpStream) {
             let agent_id = match verify_bearer_agent_token(&raw) {
                 Ok(id) => id,
                 Err(e) => {
-                    send_json(
-                        stream,
-                        401,
-                        &err_json(&e),
-                    );
+                    send_json(stream, 401, &err_json(&e));
                     return;
                 }
             };
@@ -2520,11 +2369,7 @@ fn handle_connection(stream: TcpStream) {
                         serde_json::json!({"id": id, "question": question, "status": "open"});
                     send_json(stream, 201, &resp.to_string());
                 }
-                Err(e) => send_json(
-                    stream,
-                    400,
-                    &err_json(&e),
-                ),
+                Err(e) => send_json(stream, 400, &err_json(&e)),
             }
         }
 
@@ -2535,11 +2380,7 @@ fn handle_connection(stream: TcpStream) {
             let agent_id = match verify_bearer_agent_token(&raw) {
                 Ok(id) => id,
                 Err(e) => {
-                    send_json(
-                        stream,
-                        401,
-                        &err_json(&e),
-                    );
+                    send_json(stream, 401, &err_json(&e));
                     return;
                 }
             };
@@ -2581,11 +2422,7 @@ fn handle_connection(stream: TcpStream) {
             let bid = (*bet_id).to_string();
             match chat::bet_stake(&bid, side, amount, room_label.as_deref()) {
                 Ok(()) => send_json(stream, 200, r#"{"ok":true}"#),
-                Err(e) => send_json(
-                    stream,
-                    400,
-                    &err_json(&e),
-                ),
+                Err(e) => send_json(stream, 400, &err_json(&e)),
             }
         }
 
@@ -2596,11 +2433,7 @@ fn handle_connection(stream: TcpStream) {
             let agent_id = match verify_bearer_agent_token(&raw) {
                 Ok(id) => id,
                 Err(e) => {
-                    send_json(
-                        stream,
-                        401,
-                        &err_json(&e),
-                    );
+                    send_json(stream, 401, &err_json(&e));
                     return;
                 }
             };
@@ -2634,11 +2467,7 @@ fn handle_connection(stream: TcpStream) {
                     let resp = serde_json::json!({"ok": true, "result": result});
                     send_json(stream, 200, &resp.to_string());
                 }
-                Err(e) => send_json(
-                    stream,
-                    400,
-                    &err_json(&e),
-                ),
+                Err(e) => send_json(stream, 400, &err_json(&e)),
             }
         }
 
@@ -2670,11 +2499,7 @@ fn handle_connection(stream: TcpStream) {
                     let body = serde_json::to_string(&beliefs).unwrap_or_else(|_| "[]".to_string());
                     send_json(stream, 200, &body);
                 }
-                Err(e) => send_json(
-                    stream,
-                    400,
-                    &err_json(&e),
-                ),
+                Err(e) => send_json(stream, 400, &err_json(&e)),
             }
         }
 
@@ -2685,11 +2510,7 @@ fn handle_connection(stream: TcpStream) {
             let _agent_id = match verify_bearer_agent_token(&raw) {
                 Ok(id) => id,
                 Err(e) => {
-                    send_json(
-                        stream,
-                        401,
-                        &err_json(&e),
-                    );
+                    send_json(stream, 401, &err_json(&e));
                     return;
                 }
             };
@@ -2729,11 +2550,7 @@ fn handle_connection(stream: TcpStream) {
                         serde_json::json!({"id": id, "subject": subject, "predicate": predicate});
                     send_json(stream, 201, &resp.to_string());
                 }
-                Err(e) => send_json(
-                    stream,
-                    400,
-                    &err_json(&e),
-                ),
+                Err(e) => send_json(stream, 400, &err_json(&e)),
             }
         }
 
@@ -2744,11 +2561,7 @@ fn handle_connection(stream: TcpStream) {
             let _agent_id = match verify_bearer_agent_token(&raw) {
                 Ok(id) => id,
                 Err(e) => {
-                    send_json(
-                        stream,
-                        401,
-                        &err_json(&e),
-                    );
+                    send_json(stream, 401, &err_json(&e));
                     return;
                 }
             };
@@ -2774,11 +2587,7 @@ fn handle_connection(stream: TcpStream) {
                     let resp = serde_json::json!({"id": id, "corrects": bid});
                     send_json(stream, 201, &resp.to_string());
                 }
-                Err(e) => send_json(
-                    stream,
-                    400,
-                    &err_json(&e),
-                ),
+                Err(e) => send_json(stream, 400, &err_json(&e)),
             }
         }
 
@@ -2796,11 +2605,7 @@ fn handle_connection(stream: TcpStream) {
                     let body = serde_json::to_string(&leases).unwrap_or_else(|_| "[]".to_string());
                     send_json(stream, 200, &body);
                 }
-                Err(e) => send_json(
-                    stream,
-                    400,
-                    &err_json(&e),
-                ),
+                Err(e) => send_json(stream, 400, &err_json(&e)),
             }
         }
 
@@ -2811,11 +2616,7 @@ fn handle_connection(stream: TcpStream) {
             let agent_id = match verify_bearer_agent_token(&raw) {
                 Ok(id) => id,
                 Err(e) => {
-                    send_json(
-                        stream,
-                        401,
-                        &err_json(&e),
-                    );
+                    send_json(stream, 401, &err_json(&e));
                     return;
                 }
             };
@@ -2846,11 +2647,7 @@ fn handle_connection(stream: TcpStream) {
                     let body = serde_json::to_string(&lease).unwrap_or_else(|_| "{}".to_string());
                     send_json(stream, 201, &body);
                 }
-                Err(e) => send_json(
-                    stream,
-                    400,
-                    &serde_json::json!({"error": e}).to_string(),
-                ),
+                Err(e) => send_json(stream, 400, &serde_json::json!({"error": e}).to_string()),
             }
         }
 
@@ -2861,11 +2658,7 @@ fn handle_connection(stream: TcpStream) {
             let agent_id = match verify_bearer_agent_token(&raw) {
                 Ok(id) => id,
                 Err(e) => {
-                    send_json(
-                        stream,
-                        401,
-                        &err_json(&e),
-                    );
+                    send_json(stream, 401, &err_json(&e));
                     return;
                 }
             };
@@ -2881,11 +2674,7 @@ fn handle_connection(stream: TcpStream) {
                     let body = serde_json::to_string(&lease).unwrap_or_else(|_| "{}".to_string());
                     send_json(stream, 200, &body);
                 }
-                Err(e) => send_json(
-                    stream,
-                    400,
-                    &err_json(&e),
-                ),
+                Err(e) => send_json(stream, 400, &err_json(&e)),
             }
         }
 
@@ -2895,11 +2684,7 @@ fn handle_connection(stream: TcpStream) {
             let agent_id = match verify_bearer_agent_token(&raw) {
                 Ok(id) => id,
                 Err(e) => {
-                    send_json(
-                        stream,
-                        401,
-                        &err_json(&e),
-                    );
+                    send_json(stream, 401, &err_json(&e));
                     return;
                 }
             };
@@ -2911,11 +2696,7 @@ fn handle_connection(stream: TcpStream) {
             let role_str = (*role).to_string();
             match chat::role_release(&role_str, room_param.as_deref()) {
                 Ok(()) => send_json(stream, 200, r#"{"status":"released"}"#),
-                Err(e) => send_json(
-                    stream,
-                    400,
-                    &err_json(&e),
-                ),
+                Err(e) => send_json(stream, 400, &err_json(&e)),
             }
         }
 
@@ -2936,11 +2717,7 @@ fn handle_connection(stream: TcpStream) {
                     let body = serde_json::json!({"credits": credits, "trust": trust});
                     send_json(stream, 200, &body.to_string());
                 }
-                Err(e) => send_json(
-                    stream,
-                    400,
-                    &err_json(&e),
-                ),
+                Err(e) => send_json(stream, 400, &err_json(&e)),
             }
         }
 
@@ -2951,11 +2728,7 @@ fn handle_connection(stream: TcpStream) {
             let agent_id = match verify_bearer_agent_token(&raw) {
                 Ok(id) => id,
                 Err(e) => {
-                    send_json(
-                        stream,
-                        401,
-                        &err_json(&e),
-                    );
+                    send_json(stream, 401, &err_json(&e));
                     return;
                 }
             };
@@ -2996,11 +2769,7 @@ fn handle_connection(stream: TcpStream) {
                     let resp = serde_json::json!({"agent_id": target, "amount": amount, "balance": balance});
                     send_json(stream, 200, &resp.to_string());
                 }
-                Err(e) => send_json(
-                    stream,
-                    400,
-                    &err_json(&e),
-                ),
+                Err(e) => send_json(stream, 400, &err_json(&e)),
             }
         }
 
@@ -3011,11 +2780,7 @@ fn handle_connection(stream: TcpStream) {
             let agent_id = match verify_bearer_agent_token(&raw) {
                 Ok(id) => id,
                 Err(e) => {
-                    send_json(
-                        stream,
-                        401,
-                        &err_json(&e),
-                    );
+                    send_json(stream, 401, &err_json(&e));
                     return;
                 }
             };
@@ -3049,11 +2814,7 @@ fn handle_connection(stream: TcpStream) {
                     let resp = serde_json::json!({"amount": amount, "balance": balance});
                     send_json(stream, 200, &resp.to_string());
                 }
-                Err(e) => send_json(
-                    stream,
-                    400,
-                    &serde_json::json!({"error": e}).to_string(),
-                ),
+                Err(e) => send_json(stream, 400, &serde_json::json!({"error": e}).to_string()),
             }
         }
 
@@ -3064,11 +2825,7 @@ fn handle_connection(stream: TcpStream) {
             let agent_id = match verify_bearer_agent_token(&raw) {
                 Ok(id) => id,
                 Err(e) => {
-                    send_json(
-                        stream,
-                        401,
-                        &err_json(&e),
-                    );
+                    send_json(stream, 401, &err_json(&e));
                     return;
                 }
             };
@@ -3110,11 +2867,7 @@ fn handle_connection(stream: TcpStream) {
                     let resp = serde_json::json!({"to": to_agent, "amount": amount, "from_balance": from_bal, "to_balance": to_bal});
                     send_json(stream, 200, &resp.to_string());
                 }
-                Err(e) => send_json(
-                    stream,
-                    400,
-                    &serde_json::json!({"error": e}).to_string(),
-                ),
+                Err(e) => send_json(stream, 400, &serde_json::json!({"error": e}).to_string()),
             }
         }
 

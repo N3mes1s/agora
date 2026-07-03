@@ -14,8 +14,8 @@ use base64::{
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::path::{Path, PathBuf};
 use std::os::unix::io::AsRawFd;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 
@@ -446,12 +446,19 @@ impl FileLock {
         {
             Ok(f) => f,
             Err(_) => {
-                return FileLock { _file: fs::File::open("/dev/null").unwrap_or_else(|_| unsafe { std::mem::zeroed() }), acquired: false }
+                return FileLock {
+                    _file: fs::File::open("/dev/null")
+                        .unwrap_or_else(|_| unsafe { std::mem::zeroed() }),
+                    acquired: false,
+                };
             }
         };
         // Blocking LOCK_EX — waits until the lock is available.
         unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) };
-        FileLock { _file: file, acquired: true }
+        FileLock {
+            _file: file,
+            acquired: true,
+        }
     }
 }
 

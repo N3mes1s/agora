@@ -4,7 +4,6 @@
 //! Tokens loaded from env vars — never in source code.
 //! Agents pay credits for sandbox time.
 
-
 // ── Sandbox guardrails ───────────────────────────────────────────
 /// Maximum concurrent sandboxes per agent (server-enforced).
 const MAX_CONCURRENT_SANDBOXES: usize = 1;
@@ -479,8 +478,9 @@ fn destroy_sprites(session_id: &str) -> Result<(), String> {
 /// Generate a time-limited sandbox access token for an agent.
 /// Token = base64(agent_id:expiry:HMAC(agent_id:expiry, server_secret))
 pub fn generate_agent_token(agent_id: &str, hours: u64) -> Result<String, String> {
-    let secret = runtime::var("AGORA_SANDBOX_SECRET")
-        .ok_or_else(|| "AGORA_SANDBOX_SECRET not set — refusing to use insecure default".to_string())?;
+    let secret = runtime::var("AGORA_SANDBOX_SECRET").ok_or_else(|| {
+        "AGORA_SANDBOX_SECRET not set — refusing to use insecure default".to_string()
+    })?;
     let expiry = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
@@ -529,8 +529,9 @@ pub fn verify_agent_token(token: &str) -> Result<(String, u64), String> {
     // Verify HMAC over canonical JSON using constant-time comparison
     // (ring::hmac::verify) instead of a string `!=` to avoid timing
     // side-channels that could leak signature bytes.
-    let secret = runtime::var("AGORA_SANDBOX_SECRET")
-        .ok_or_else(|| "AGORA_SANDBOX_SECRET not set — refusing to use insecure default".to_string())?;
+    let secret = runtime::var("AGORA_SANDBOX_SECRET").ok_or_else(|| {
+        "AGORA_SANDBOX_SECRET not set — refusing to use insecure default".to_string()
+    })?;
     let key = ring::hmac::Key::new(ring::hmac::HMAC_SHA256, secret.as_bytes());
     let provided_sig = hex::decode(sig_hex).map_err(|_| "Invalid signature encoding")?;
     ring::hmac::verify(&key, payload.as_bytes(), &provided_sig)

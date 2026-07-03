@@ -688,7 +688,12 @@ fn tool_read(args: &Value) -> Result<String, String> {
             .unwrap_or_default();
         let from = msg["from"].as_str().unwrap_or("?");
         let text = msg["text"].as_str().unwrap_or("");
-        let id = msg["id"].as_str().unwrap_or("?").chars().take(6).collect::<String>();
+        let id = msg["id"]
+            .as_str()
+            .unwrap_or("?")
+            .chars()
+            .take(6)
+            .collect::<String>();
         out.push_str(&format!("[{dt}] [{id}] {from}: {text}\n"));
     }
     Ok(out)
@@ -704,7 +709,12 @@ fn tool_check(args: &Value) -> Result<String, String> {
     for msg in &msgs {
         let from = msg["from"].as_str().unwrap_or("?");
         let text = msg["text"].as_str().unwrap_or("");
-        let id = msg["id"].as_str().unwrap_or("?").chars().take(6).collect::<String>();
+        let id = msg["id"]
+            .as_str()
+            .unwrap_or("?")
+            .chars()
+            .take(6)
+            .collect::<String>();
         out.push_str(&format!("[{id}] {from}: {text}\n"));
     }
     Ok(out)
@@ -713,7 +723,10 @@ fn tool_check(args: &Value) -> Result<String, String> {
 fn tool_join(args: &Value) -> Result<String, String> {
     let room_id = args["room_id"].as_str().ok_or("Missing 'room_id'")?;
     let secret = args["secret"].as_str().ok_or("Missing 'secret'")?;
-    if secret.len() != 64 || !secret.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
+    if secret.len() != 64
+        || !secret
+            .chars()
+            .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
     {
         return Err("Secret must be 64 hex characters (0-9, a-f)".to_string());
     }
@@ -865,12 +878,21 @@ fn tool_tasks(args: &Value) -> Result<String, String> {
     if tasks.is_empty() {
         return Ok("No tasks.".to_string());
     }
-    let mut out = format!("{:<10} {:<8} {:<12} {:<8} Title\n", "ID", "Status", "ClaimedBy", "Reward");
+    let mut out = format!(
+        "{:<10} {:<8} {:<12} {:<8} Title\n",
+        "ID", "Status", "ClaimedBy", "Reward"
+    );
     for t in &tasks {
         let id: String = t.id.chars().take(6).collect();
         let claimed = t.claimed_by.as_deref().unwrap_or("-");
-        let reward = t.reward_credits.map(|c| c.to_string()).unwrap_or("-".to_string());
-        out.push_str(&format!("{:<10} {:<8} {:<12} {:<8} {}\n", id, t.status, claimed, reward, t.title));
+        let reward = t
+            .reward_credits
+            .map(|c| c.to_string())
+            .unwrap_or("-".to_string());
+        out.push_str(&format!(
+            "{:<10} {:<8} {:<12} {:<8} {}\n",
+            id, t.status, claimed, reward, t.title
+        ));
     }
     Ok(out)
 }
@@ -896,7 +918,13 @@ fn tool_files(args: &Value) -> Result<String, String> {
         let name = f["filename"].as_str().unwrap_or("?");
         let size = f["size"].as_u64().unwrap_or(0);
         let from = f["from"].as_str().unwrap_or("?");
-        out.push_str(&format!("[{}] {} ({} bytes) from {}\n", id.chars().take(6).collect::<String>(), name, size, from));
+        out.push_str(&format!(
+            "[{}] {} ({} bytes) from {}\n",
+            id.chars().take(6).collect::<String>(),
+            name,
+            size,
+            from
+        ));
     }
     Ok(out)
 }
@@ -941,9 +969,15 @@ fn tool_bounties(args: &Value) -> Result<String, String> {
     let mut out = format!("{} open bounty/bounties:\n", bounties.len());
     for t in &bounties {
         let id: String = t.id.chars().take(6).collect();
-        let reward = t.reward_credits.map(|c| format!("{c} credits")).unwrap_or_default();
+        let reward = t
+            .reward_credits
+            .map(|c| format!("{c} credits"))
+            .unwrap_or_default();
         let oracle = t.acceptance_oracle.as_deref().unwrap_or("?");
-        out.push_str(&format!("[{}] {} | oracle: {} | {}\n", id, t.title, oracle, reward));
+        out.push_str(&format!(
+            "[{}] {} | oracle: {} | {}\n",
+            id, t.title, oracle, reward
+        ));
     }
     Ok(out)
 }
@@ -960,7 +994,11 @@ fn tool_discover(args: &Value) -> Result<String, String> {
     let mut out = format!("{} agent(s) for '{need}':\n", results.len());
     for r in &results {
         let caps = r.card.capabilities.join(", ");
-        let avail = if r.card.available { "available" } else { "busy" };
+        let avail = if r.card.available {
+            "available"
+        } else {
+            "busy"
+        };
         out.push_str(&format!(
             "{} | trust: {:.2} | receipts: {} | {} | caps: {}\n",
             r.card.agent_id, r.trust_score, r.receipt_count, avail, caps
@@ -988,7 +1026,12 @@ fn tool_thread(args: &Value) -> Result<String, String> {
         let from = item.env["from"].as_str().unwrap_or("?");
         let text = item.env["text"].as_str().unwrap_or("");
         let mid = item.env["id"].as_str().unwrap_or("?");
-        out.push_str(&format!("{indent}[{dt}] [{}] {}: {}\n", mid.chars().take(6).collect::<String>(), from, text));
+        out.push_str(&format!(
+            "{indent}[{dt}] [{}] {}: {}\n",
+            mid.chars().take(6).collect::<String>(),
+            from,
+            text
+        ));
     }
     Ok(out)
 }
@@ -1093,7 +1136,10 @@ fn tool_whois(args: &Value) -> Result<String, String> {
         Some(p) => {
             let name = p.name.as_deref().unwrap_or("(unset)");
             let role = p.role.as_deref().unwrap_or("(unset)");
-            Ok(format!("Agent: {}\nName: {}\nRole: {}", p.agent_id, name, role))
+            Ok(format!(
+                "Agent: {}\nName: {}\nRole: {}",
+                p.agent_id, name, role
+            ))
         }
         None => Ok(format!("No profile found for '{agent_id}'.")),
     }

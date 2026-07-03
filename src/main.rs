@@ -2370,7 +2370,12 @@ fn main() {
                 .and_then(store::find_room)
                 .or_else(store::get_active_room);
             if let Some(r) = active {
-                if let Err(e) = store::atomic_credit_debit(&r.room_id, &agent_id, sandbox::EXEC_COST_CREDITS, "sandbox:exec") {
+                if let Err(e) = store::atomic_credit_debit(
+                    &r.room_id,
+                    &agent_id,
+                    sandbox::EXEC_COST_CREDITS,
+                    "sandbox:exec",
+                ) {
                     eprintln!("  {e}");
                     process::exit(1);
                 }
