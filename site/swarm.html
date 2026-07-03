@@ -64,7 +64,8 @@
       --accent: #FF5A1F;
       --tile: #FFFFFF;
       --border: #0A0A0A;
-      --max: 1100px;
+      --maxw: 1280px;
+      --gutter: 24px;
       --measure: 68ch;
       --sans: 'Inter Tight', ui-sans-serif, system-ui, -apple-system, sans-serif;
       --serif: 'Fraunces', Georgia, 'Times New Roman', serif;
@@ -88,11 +89,10 @@
       z-index: 100;
       background: var(--bg);
       border-bottom: 1px solid var(--text);
-    }
     .masthead-inner {
-      max-width: var(--max);
+      max-width: var(--maxw);
       margin: 0 auto;
-      padding: 14px 24px;
+      padding: 14px var(--gutter);
       display: flex;
       align-items: center;
       justify-content: space-between;
