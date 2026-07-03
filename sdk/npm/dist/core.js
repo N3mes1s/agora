@@ -157,66 +157,142 @@ class AgoraClient {
             type: "heartbeat",
         });
     }
-    async who() {
-        return [];
-    }
-    async tasks() {
-        return [];
-    }
-    taskAdd() {
-        return Promise.reject(new Error("taskAdd() is not part of the direct SDK core. Use AgoraCli for CLI task helpers."));
-    }
-    taskClaim() {
-        return Promise.reject(new Error("taskClaim() is not part of the direct SDK core. Use AgoraCli for CLI task helpers."));
-    }
-    taskDone() {
-        return Promise.reject(new Error("taskDone() is not part of the direct SDK core. Use AgoraCli for CLI task helpers."));
-    }
-    async stats(room) {
+    async who(room) {
+        if (!this.resolveRoom(room))
+            return [];
         const messages = await this.read({ room, since: "all", includeSystem: true });
-        return {
-            messages: messages.length,
-            agents: new Set(messages.map((message) => message.agentId)).size,
-            characters: messages.reduce((total, message) => total + message.content.length, 0),
-            files: 0,
-            reactions: 0,
-        };
+        const lastSeenByAgent = new Map();
+        for (const message of messages) {
+            if (message.type !== "heartbeat")
+                continue;
+            const ts = message.timestamp.getTime();
+            const prev = lastSeenByAgent.get(message.agentId);
+            if (prev === undefined || ts > prev)
+                lastSeenByAgent.set(message.agentId, ts);
+        }
+        const cutoff = Date.now() - 5 * 60000; // 5 min window
+        return Array.from(lastSeenByAgent.entries()).map(([agentId, lastSeen]) => ({
+            name: agentId,
+            agentId,
+            role: "Member",
+            status: lastSeen >= cutoff ? "online" : "offline",
+            lastSeen: new Date(lastSeen).toISOString(),
+        }));
     }
-    async info(room) {
+    async tasks(room) {
+        if (!this.resolveRoom(room))
+            return [];
+        const messages = await this.read({ room, since: "all", includeSystem: true });
+        const tasks = new Map();
+        for (const message of messages) {
+            const text = message.content;
+            // New task: '[task] New: <title> (id: <id>)'
+            const newMatch = /^\[task\]\s+New:\s+(.*?)\s*\(id:\s*([^)]+)\)\s*$/.exec(text);
+            if (newMatch) {
+                const id = newMatch[2].trim();
+                tasks.set(id, {
+                    id,
+                    title: newMatch[1],
+                    status: "open",
+                    createdAt: message.timestamp.toISOString(),
+                    updatedAt: message.timestamp.toISOString(),
+                });
+                continue;
+            }
+            // Claim: '[task claim] <id>'
+            const claimMatch = /^\[task\s+claim\]\s+(.+?)\s*$/.exec(text);
+            if (claimMatch) {
+                const id = claimMatch[1].trim();
+                const existing = tasks.get(id);
+                if (existing) {
+                    existing.status = "claimed";
+                    existing.claimedBy = message.agentId;
+                    existing.updatedAt = message.timestamp.toISOString();
+                }
+                continue;
+            }
+            // Done: '[task done] <id>' optionally followed by ' — <notes>'
+            const doneMatch = /^\[task\s+done\]\s+([^—]+?)(?:\s+—\s+(.*))?\s*$/.exec(text);
+            if (doneMatch) {
+                const id = doneMatch[1].trim();
+                const notes = doneMatch[2];
+                const existing = tasks.get(id);
+                if (existing) {
+                    existing.status = "done";
+                    existing.updatedAt = message.timestamp.toISOString();
+                    if (notes)
+                        existing.notes = notes;
+                }
+                continue;
+            }
+        }
+        return Array.from(tasks.values());
+    }
+    async taskAdd(title, room) {
         const session = this.openRoomSession(room);
-        const stats = await this.stats(session.label);
-        return [
-            `Room:        ${session.label}`,
-            `ID:          ${session.roomId}`,
-            "Encryption:  AES-256-GCM",
-            "KDF:         HKDF-SHA256",
-            `Messages:    ${stats.messages}`,
-            `Fingerprint: ${await session.fingerprint()}`,
-        ].join("\n");
+        const id = await session.sendEnvelope({
+            ...this.makeEnvelope(`[task] New: ${title}`),
+        });
+        return `Task added: ${title} (envelope ${id})`;
     }
-    dm(_agentId, _message) {
-        return Promise.reject(new Error("dm() is not part of the direct SDK core. Use AgoraCli for CLI DM helpers."));
+    async taskClaim(taskId, room) {
+        const session = this.openRoomSession(room);
+        const id = await session.sendEnvelope({
+            ...this.makeEnvelope(`[task claim] ${taskId}`),
+        });
+        return `Claimed task ${taskId} (envelope ${id})`;
     }
-    alias(_agentId, _name) {
-        return Promise.reject(new Error("alias() is not part of the direct SDK core. Use AgoraCli for CLI alias helpers."));
+    async taskDone(taskId, notes, room) {
+        const text = `[task done] ${taskId}${notes ? ` — ${notes}` : ""}`;
+        const session = this.openRoomSession(room);
+        const id = await session.sendEnvelope({
+            ...this.makeEnvelope(text),
+        });
+        return `Marked task ${taskId} done (envelope ${id})`;
     }
-    aliases() {
-        return Promise.reject(new Error("aliases() is not part of the direct SDK core. Use AgoraCli for CLI alias helpers."));
+    async dm(agentId, message, room) {
+        const me = this.agentIdSync();
+        const sorted = [me, agentId].sort();
+        const label = room ?? `dm-${sorted[0]}-${sorted[1]}`;
+        // Reuse an existing DM room if we've already joined one with this label.
+        const existing = this.findRoom(label);
+        const session = existing ? this.sessionFromEntry(existing) : this.mintRoomSession(label);
+        if (message) {
+            await session.sendText(message);
+        }
+        return label;
     }
-    webhookAdd(_url, _room) {
-        return Promise.reject(new Error("webhookAdd() is not part of the direct SDK core. Use AgoraCli for CLI webhook helpers."));
+    async recap(room) {
+        return this.summarize("1h", room);
     }
-    webhookList() {
-        return Promise.reject(new Error("webhookList() is not part of the direct SDK core. Use AgoraCli for CLI webhook helpers."));
+    async digest(period = "24h", room) {
+        return this.summarize(period, room);
     }
-    webhookRemove(_id, _room) {
-        return Promise.reject(new Error("webhookRemove() is not part of the direct SDK core. Use AgoraCli for CLI webhook helpers."));
-    }
-    recap() {
-        return Promise.reject(new Error("recap() is not part of the direct SDK core. Use AgoraCli for CLI recap helpers."));
-    }
-    digest(_period, _room) {
-        return Promise.reject(new Error("digest() is not part of the direct SDK core. Use AgoraCli for CLI digest helpers."));
+    async summarize(period, room) {
+        const session = this.openRoomSession(room);
+        const messages = await this.read({ room: session.label, since: period });
+        const agents = new Set();
+        let chars = 0;
+        const snippets = [];
+        for (const message of messages) {
+            agents.add(message.agentId);
+            chars += message.content.length;
+            if (snippets.length < 5 && message.content.trim().length > 0) {
+                const snippet = message.content.length > 80 ? message.content.slice(0, 77) + "..." : message.content;
+                snippets.push(`  [${message.agentId}] ${snippet}`);
+            }
+        }
+        const lines = [
+            `Recap of '${session.label}' (last ${period})`,
+            `Messages: ${messages.length}`,
+            `Agents:   ${agents.size} (${Array.from(agents).join(", ")})`,
+            `Volume:   ${chars} chars`,
+        ];
+        if (snippets.length > 0) {
+            lines.push("Recent:");
+            lines.push(...snippets);
+        }
+        return lines.join("\n");
     }
     _publish(roomId, payload) {
         return publish(this.effectiveRelayUrl(), this.relayToken, this.natsSettings, roomId, payload);
@@ -264,9 +340,12 @@ class AgoraClient {
         (0, fs_1.writeFileSync)((0, path_1.join)(this.agoraDir(), "active_room"), entry.label);
         return this.sessionFromEntry(entry);
     }
-    openRoomSession(labelOrId) {
+    resolveRoom(labelOrId) {
         const selected = labelOrId ?? this.defaultRoom ?? this.activeRoomLabel();
-        const room = selected ? this.findRoom(selected) : this.loadRooms()[0];
+        return selected ? this.findRoom(selected) : this.loadRooms()[0];
+    }
+    openRoomSession(labelOrId) {
+        const room = this.resolveRoom(labelOrId);
         if (!room)
             throw new Error("No room selected. Call joinRoom() or createRoom() first.");
         return this.sessionFromEntry(room);
@@ -641,13 +720,16 @@ function signingKeysMatch(left, right) {
     return canonicalSigningKey(left) === canonicalSigningKey(right);
 }
 function envelopeToMessage(envelope, roomId) {
-    return {
+    const message = {
         id: envelope.id,
         agentId: envelope.from,
         content: envelope.text,
         timestamp: new Date(envelope.ts * 1000),
         roomId,
     };
+    if (envelope.type)
+        message.type = envelope.type;
+    return message;
 }
 async function publish(relayUrl, token, natsSettings, topic, payload) {
     if (relayUrl.startsWith("memory://")) {

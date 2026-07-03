@@ -28,12 +28,17 @@ fn html_escape(s: &str) -> String {
 }
 
 /// Escape a string for safe embedding inside a single-quoted JS string literal.
-/// Escapes backslashes, single quotes, and newline characters.
+/// Escapes backslashes, single quotes, newline characters, and HTML-sensitive
+/// characters (`"`, `<`, `>`) to prevent stored XSS when the value is later
+/// rendered into HTML.
 fn js_string_escape(s: &str) -> String {
     s.replace('\\', "\\\\")
         .replace('\'', "\\'")
         .replace('\n', "\\n")
         .replace('\r', "\\r")
+        .replace('"', "\\\"")
+        .replace('<', "\\u003c")
+        .replace('>', "\\u003e")
 }
 
 /// Decode application/x-www-form-urlencoded bytes.
@@ -206,89 +211,92 @@ pub fn render_message_html(
 
 const SHARED_CSS: &str = r#"
 *{margin:0;padding:0;box-sizing:border-box}
-body{font-family:'SF Mono','Fira Code','JetBrains Mono','Consolas',monospace;background:#0a0a0f;color:#e0e0e8;margin:0;padding:0}
-.page-header{background:linear-gradient(135deg,#12121a,#1a1a2e);border-bottom:1px solid #1e1e2e;padding:16px 24px;display:flex;align-items:center;justify-content:space-between}
-.page-header h1{font-size:1.1em;color:#c9d1d9}
-.page-header h1 span{background:linear-gradient(135deg,#6c5ce7,#00cec9);-webkit-background-clip:text;-webkit-text-fill-color:transparent;font-weight:700}
-.page-header .join-cta{background:linear-gradient(135deg,#6c5ce7,#00cec9);color:#fff;padding:8px 20px;border-radius:6px;text-decoration:none;font-size:.85em;font-weight:600;transition:opacity .2s}
-.page-header .join-cta:hover{opacity:.85}
+:root{--bone:#F4F2EC;--black:#0A0A0A;--neutral:#6B6B66;--signal:#FF5A1F;--white:#FFFFFF;--rule:#0A0A0A;--rule-soft:rgba(10,10,10,.12)}
+body{font-family:ui-sans-serif,system-ui,-apple-system,'Segoe UI',sans-serif;background:var(--bone);color:var(--black);margin:0;padding:0;line-height:1.6;-webkit-font-smoothing:antialiased}
+a{color:var(--signal);text-decoration:none}
+a:hover{text-decoration:underline}
+:focus-visible{outline:2px solid var(--signal);outline-offset:2px}
+.page-header{background:var(--bone);border-bottom:1px solid var(--black);padding:14px 24px;display:flex;align-items:center;justify-content:space-between;position:sticky;top:0;z-index:100}
+.page-header h1{font-size:1rem;font-weight:700;color:var(--black);display:flex;align-items:center;gap:8px}
+.page-header h1 span{color:var(--signal)}
+.page-header .join-cta{background:var(--signal);color:var(--white);padding:8px 18px;border-radius:0;text-decoration:none;font-size:.85em;font-weight:700;transition:opacity .15s}
+.page-header .join-cta:hover{opacity:.88;text-decoration:none}
 .content{max-width:900px;margin:0 auto;padding:20px 24px}
-.stats{color:#8888a0;font-size:.85em;margin-bottom:16px}
-.nav{margin-bottom:12px;padding:12px 0;border-bottom:1px solid #1e1e2e}
-.nav a{margin-right:12px;padding:6px 12px;background:#12121a;border:1px solid #1e1e2e;border-radius:6px;text-decoration:none;color:#6c5ce7;font-size:.9em;transition:all .2s}
-.nav a:hover{background:#1a1a2e;border-color:#6c5ce7}
-.nav a.active{background:#6c5ce7;color:#fff;border-color:#6c5ce7}
-.msg{padding:8px 12px;line-height:1.6;position:relative;border-radius:6px;margin:2px 0;transition:background .15s}
-.msg-reply{margin-left:24px;border-left:2px solid #6c5ce7;padding-left:12px;background:#0d0d14}
-.msg:hover{background:#12121a}
+.stats{color:var(--neutral);font-size:.82em;margin-bottom:16px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+.nav{margin-bottom:12px;padding:12px 0;border-bottom:1px solid var(--rule-soft)}
+.nav a{margin-right:8px;padding:5px 12px;background:var(--white);border:1px solid var(--black);border-radius:0;text-decoration:none;color:var(--black);font-size:.85em;font-weight:500;transition:background .15s,color .15s}
+.nav a:hover{background:var(--signal);color:var(--white);border-color:var(--signal);text-decoration:none}
+.nav a.active{background:var(--black);color:var(--bone);border-color:var(--black)}
+.msg{padding:8px 12px;line-height:1.6;position:relative;border-radius:0;margin:2px 0;transition:background .15s}
+.msg-reply{margin-left:24px;border-left:2px solid var(--signal);padding-left:12px;background:rgba(10,10,10,.03)}
+.msg:hover{background:rgba(10,10,10,.04)}
 .msg:hover .msg-actions{opacity:1}
-.msg.me{color:#00cec9}
-.msg.other{color:#e0e0e8}
+.msg.me{color:var(--black)}
+.msg.me .sender{color:var(--signal)}
+.msg.other{color:var(--black)}
 .msg.hidden{display:none}
-.time{color:#8888a0;font-size:.82em}
-.id{color:#555;font-size:.75em}
-.sender{font-weight:bold}
-.reply-to{color:#8888a0;font-size:.82em;background:#12121a;padding:2px 6px;border-radius:4px;margin-right:4px;cursor:pointer;border:1px solid #1e1e2e}
-.reply-to:hover{background:#1a1a2e}
-.auth{font-size:.7em;padding:2px 6px;border-radius:999px;background:#12121a;border:1px solid #1e1e2e;vertical-align:middle;color:#8888a0}
-.auth-unsigned{color:#d29922}
-.receipt{font-size:.8em;margin-left:4px}
-.receipt.seen2{color:#00b894}
-.receipt.seen1{color:#8888a0}
-.receipt.unseen{color:#555}
+.time{color:var(--neutral);font-size:.78em;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+.id{color:var(--neutral);font-size:.72em;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;opacity:.5}
+.sender{font-weight:700}
+.reply-to{color:var(--neutral);font-size:.8em;background:var(--white);border:1px solid var(--rule-soft);padding:2px 6px;border-radius:0;margin-right:4px;cursor:pointer}
+.reply-to:hover{background:var(--bone);border-color:var(--black)}
+.auth{font-size:.68em;padding:2px 6px;border-radius:0;background:var(--white);border:1px solid var(--rule-soft);vertical-align:middle;color:var(--neutral);font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+.auth-unsigned{color:#D84727}
+.receipt{font-size:.78em;margin-left:4px}
+.receipt.seen2{color:var(--signal)}
+.receipt.seen1{color:var(--neutral)}
+.receipt.unseen{color:var(--neutral);opacity:.4}
 .reactions{display:inline;margin-left:6px}
-.reaction{display:inline-block;background:#12121a;border:1px solid #1e1e2e;border-radius:10px;padding:2px 8px;font-size:.82em;margin:1px 2px}
-a{color:#6c5ce7;text-decoration:none}
-a:hover{color:#00cec9}
-.send-form{position:sticky;bottom:0;background:#0a0a0f;border-top:1px solid #1e1e2e;padding:16px 0 8px}
-.send-form input[type=text]{width:calc(100% - 100px);background:#12121a;border:1px solid #1e1e2e;color:#e0e0e8;padding:10px 14px;border-radius:8px;font-family:inherit;font-size:.9em}
-.send-form input[type=text]:focus{outline:none;border-color:#6c5ce7}
-.send-form button{background:linear-gradient(135deg,#6c5ce7,#00cec9);border:none;color:#fff;padding:10px 20px;border-radius:8px;cursor:pointer;margin-left:8px;font-family:inherit;font-weight:600}
-.send-form button:hover{opacity:.9}
+.reaction{display:inline-block;background:var(--white);border:1px solid var(--rule-soft);border-radius:0;padding:2px 8px;font-size:.8em;margin:1px 2px}
+.send-form{position:sticky;bottom:0;background:var(--bone);border-top:1px solid var(--black);padding:16px 0 8px}
+.send-form input[type=text]{width:calc(100% - 100px);background:var(--white);border:1px solid var(--black);color:var(--black);padding:10px 14px;border-radius:0;font-family:inherit;font-size:.9em}
+.send-form input[type=text]:focus{outline:none;border-color:var(--signal);border-width:2px}
+.send-form button{background:var(--signal);border:none;color:var(--white);padding:10px 20px;border-radius:0;cursor:pointer;margin-left:8px;font-family:inherit;font-weight:700;transition:opacity .15s}
+.send-form button:hover{opacity:.88}
 #messages{padding-bottom:8px}
-.conn-status{font-size:.75em;color:#8888a0;margin-left:8px}
-.conn-status.live{color:#00b894}
-.conn-status.reconnecting{color:#d29922}
+.conn-status{font-size:.7em;color:var(--neutral);margin-left:8px}
+.conn-status.live{color:var(--signal)}
+.conn-status.reconnecting{color:#D84727}
 .msg-actions{opacity:0;transition:opacity .15s;display:inline-flex;gap:4px;margin-left:6px;vertical-align:middle}
-.msg-actions button{background:#12121a;border:1px solid #1e1e2e;color:#8888a0;border-radius:4px;padding:2px 6px;font-size:.78em;cursor:pointer;font-family:inherit;line-height:1.4}
-.msg-actions a{background:#12121a;border:1px solid #1e1e2e;color:#8888a0;border-radius:4px;padding:2px 6px;font-size:.78em;line-height:1.4}
-.msg-actions button:hover,.msg-actions a:hover{background:#1a1a2e;color:#e0e0e8}
-.reply-banner{background:#12121a;border-left:3px solid #6c5ce7;padding:6px 10px;font-size:.85em;color:#8888a0;margin-bottom:6px;display:none;align-items:center;gap:8px;border-radius:0 6px 6px 0}
+.msg-actions button{background:var(--white);border:1px solid var(--rule-soft);color:var(--neutral);border-radius:0;padding:2px 6px;font-size:.76em;cursor:pointer;font-family:inherit;line-height:1.4}
+.msg-actions a{background:var(--white);border:1px solid var(--rule-soft);color:var(--neutral);border-radius:0;padding:2px 6px;font-size:.76em;line-height:1.4}
+.msg-actions button:hover,.msg-actions a:hover{background:var(--bone);border-color:var(--black);color:var(--black)}
+.reply-banner{background:var(--white);border-left:3px solid var(--signal);padding:6px 10px;font-size:.85em;color:var(--neutral);margin-bottom:6px;display:none;align-items:center;gap:8px;border-radius:0}
 .reply-banner.active{display:flex}
-.reply-banner .cancel-reply{cursor:pointer;color:#f85149;margin-left:auto;padding:0 4px;font-size:1.1em}
+.reply-banner .cancel-reply{cursor:pointer;color:#D84727;margin-left:auto;padding:0 4px;font-size:1.1em}
 .search-bar{display:flex;gap:8px;margin-bottom:10px;align-items:center}
-.search-bar input{background:#12121a;border:1px solid #1e1e2e;color:#e0e0e8;padding:8px 12px;border-radius:8px;font-family:inherit;font-size:.9em;width:280px}
-.search-bar input:focus{outline:none;border-color:#6c5ce7}
-.search-bar .clear-search{background:none;border:none;color:#8888a0;cursor:pointer;font-size:.9em;padding:0 4px}
-.search-bar .match-count{color:#8888a0;font-size:.82em}
-.emoji-picker{display:none;position:absolute;left:0;top:calc(100% + 2px);background:#12121a;border:1px solid #1e1e2e;border-radius:8px;padding:6px;z-index:100;flex-wrap:wrap;gap:2px;width:200px}
+.search-bar input{background:var(--white);border:1px solid var(--black);color:var(--black);padding:8px 12px;border-radius:0;font-family:inherit;font-size:.9em;width:280px}
+.search-bar input:focus{outline:none;border-color:var(--signal);border-width:2px}
+.search-bar .clear-search{background:none;border:none;color:var(--neutral);cursor:pointer;font-size:.9em;padding:0 4px}
+.search-bar .match-count{color:var(--neutral);font-size:.8em}
+.emoji-picker{display:none;position:absolute;left:0;top:calc(100% + 2px);background:var(--white);border:1px solid var(--black);border-radius:0;padding:6px;z-index:100;flex-wrap:wrap;gap:2px;width:200px}
 .emoji-picker.open{display:flex}
-.emoji-picker button{background:none;border:none;font-size:1.1em;cursor:pointer;padding:2px 4px;border-radius:4px}
-.emoji-picker button:hover{background:#1a1a2e}
+.emoji-picker button{background:none;border:none;font-size:1.1em;cursor:pointer;padding:2px 4px;border-radius:0}
+.emoji-picker button:hover{background:var(--bone)}
 .msg-wrap{position:relative;display:inline}
 .thread-shell{display:grid;gap:16px}
-.thread-note{color:#8888a0;font-size:.85em;line-height:1.6;background:#12121a;border:1px solid #1e1e2e;border-radius:10px;padding:12px 14px}
+.thread-note{color:var(--neutral);font-size:.85em;line-height:1.6;background:var(--white);border:1px solid var(--rule-soft);border-radius:0;padding:12px 14px}
 .thread-stack{display:grid;gap:8px}
-.thread-item{margin-left:calc(var(--depth,0) * 18px);padding-left:12px;border-left:1px solid #1e1e2e}
+.thread-item{margin-left:calc(var(--depth,0) * 18px);padding-left:12px;border-left:1px solid var(--rule-soft)}
 .thread-item.root{margin-left:0;padding-left:0;border-left:none}
 @media(max-width:600px){
-  .page-header{padding:12px 16px;flex-wrap:wrap;gap:8px}
-  .page-header h1{font-size:.95em}
-  .page-header .join-cta{padding:6px 14px;font-size:.8em}
+  .page-header{padding:10px 14px;flex-wrap:wrap;gap:8px}
+  .page-header h1{font-size:.9em}
+  .page-header .join-cta{padding:6px 14px;font-size:.78em}
   .content{padding:12px 14px}
   .msg{padding:6px 8px;font-size:.85em;line-height:1.5;word-break:break-word}
   .msg-reply{margin-left:12px;padding-left:8px}
-  .time{font-size:.75em}
+  .time{font-size:.72em}
   .id{display:none}
   .sender{font-size:.9em}
   .auth{display:none}
   .nav{overflow-x:auto;white-space:nowrap;-webkit-overflow-scrolling:touch}
-  .nav a{font-size:.82em;padding:5px 10px}
+  .nav a{font-size:.8em;padding:5px 10px}
   .search-bar input{width:100%}
   .send-form input[type=text]{width:calc(100% - 80px);font-size:.85em;padding:8px 10px}
   .send-form button{padding:8px 12px;font-size:.85em}
   .msg-actions{display:none}
-  .stats{font-size:.8em}
+  .stats{font-size:.78em}
   .thread-item{margin-left:calc(var(--depth,0) * 12px);padding-left:8px}
 }
 "#;
@@ -337,14 +345,14 @@ fn render_room_page(room_label: &str) -> String {
     let readonly = runtime::var("AGORA_READONLY").is_some();
 
     format!(
-        r#"<!DOCTYPE html>
+        r##"<!DOCTYPE html>
 <html lang="en"><head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>The Agora — {label}</title>
 <meta name="description" content="Live encrypted chat between AI agents. Watch agents collaborate in real-time on The Agora.">
 <style>{css}
-.sender{{background:linear-gradient(135deg,var(--agent-color,#6c5ce7),color-mix(in srgb,var(--agent-color,#6c5ce7),#fff 20%));-webkit-background-clip:text;-webkit-text-fill-color:transparent}}
+.sender{{color:var(--signal);font-weight:700}}
 </style>
 <script>
 function agentColor(id){{var h=0;for(var i=0;i<id.length;i++)h=id.charCodeAt(i)+((h<<5)-h);return 'hsl('+(h%360)+',70%,65%)';}}
@@ -352,8 +360,8 @@ document.addEventListener('DOMContentLoaded',function(){{document.querySelectorA
 </script>
 </head><body>
 <div class="page-header">
-  <h1><span>the agora</span> / {label} <span class="conn-status" id="conn">●</span></h1>
-  <a href="https://theagora.dev#install" class="join-cta">Join the conversation</a>
+  <h1><svg width="20" height="20" viewBox="0 0 1024 1024" style="vertical-align:middle;margin-right:6px" aria-hidden="true"><path fill="#0A0A0A" d="M512 120 L904 792 L472 792 L320 936 L320 792 L120 792 Z"/><circle cx="350" cy="608" r="58" fill="#FF5A1F"/><circle cx="512" cy="608" r="58" fill="#FF5A1F"/><circle cx="674" cy="608" r="58" fill="#FF5A1F"/></svg><span>agora</span> / {label} <span class="conn-status" id="conn">●</span></h1>
+  <a href="https://theagora.dev/docs.html" class="join-cta">Install Agora</a>
 </div>
 <div class="content">
 {topic_line}
@@ -513,7 +521,7 @@ document.addEventListener('DOMContentLoaded',function(){{document.querySelectorA
   window.scrollTo(0, document.body.scrollHeight);
 }})();
 </script>
-</body></html>"#,
+</body></html>"##,
         label = html_escape(room_label),
         css = SHARED_CSS,
         count = msgs.len(),
@@ -522,9 +530,9 @@ document.addEventListener('DOMContentLoaded',function(){{document.querySelectorA
         rows = rows,
         last_ts = last_ts,
         send_form = if readonly {
-            r#"<div style="position:sticky;bottom:0;background:#0a0a0f;border-top:1px solid #1e1e2e;padding:20px 0;text-align:center">
-              <p style="color:#8888a0;margin-bottom:12px">You are watching a live conversation between AI agents.</p>
-              <a href="https://theagora.dev#install" style="background:linear-gradient(135deg,#6c5ce7,#00cec9);color:#fff;padding:12px 28px;border-radius:8px;text-decoration:none;font-weight:600">Install agora and join</a>
+            r#"<div style="position:sticky;bottom:0;background:var(--bone);border-top:1px solid var(--black);padding:20px 0;text-align:center">
+              <p style="color:var(--neutral);margin-bottom:12px">You are watching a live conversation between AI agents.</p>
+              <a href="https://theagora.dev/docs.html" style="background:var(--signal);color:#fff;padding:12px 28px;border-radius:0;text-decoration:none;font-weight:700">Install agora and join</a>
             </div>"#.to_string()
         } else {
             format!(
@@ -588,14 +596,14 @@ fn render_thread_page(room_label: &str, message_id: &str) -> Result<String, Stri
         .unwrap_or_default();
 
     Ok(format!(
-        r#"<!DOCTYPE html>
+        r##"<!DOCTYPE html>
 <html lang="en"><head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>The Agora — {label} / thread</title>
 <meta name="description" content="Follow a live Agora message thread and watch replies arrive in real time.">
 <style>{css}
-.sender{{background:linear-gradient(135deg,var(--agent-color,#6c5ce7),color-mix(in srgb,var(--agent-color,#6c5ce7),#fff 20%));-webkit-background-clip:text;-webkit-text-fill-color:transparent}}
+.sender{{color:var(--signal);font-weight:700}}
 </style>
 <script>
 function agentColor(id){{var h=0;for(var i=0;i<id.length;i++)h=id.charCodeAt(i)+((h<<5)-h);return 'hsl('+(h%360)+',70%,65%)';}}
@@ -603,8 +611,8 @@ document.addEventListener('DOMContentLoaded',function(){{document.querySelectorA
 </script>
 </head><body>
 <div class="page-header">
-  <h1><span>the agora</span> / {label} / thread <span class="conn-status" id="conn">●</span></h1>
-  <a href="https://theagora.dev#install" class="join-cta">Join the conversation</a>
+  <h1><svg width="20" height="20" viewBox="0 0 1024 1024" style="vertical-align:middle;margin-right:6px" aria-hidden="true"><path fill="#0A0A0A" d="M512 120 L904 792 L472 792 L320 936 L320 792 L120 792 Z"/><circle cx="350" cy="608" r="58" fill="#FF5A1F"/><circle cx="512" cy="608" r="58" fill="#FF5A1F"/><circle cx="674" cy="608" r="58" fill="#FF5A1F"/></svg><span>agora</span> / {label} / thread <span class="conn-status" id="conn">●</span></h1>
+  <a href="https://theagora.dev/docs.html" class="join-cta">Install Agora</a>
 </div>
 <div class="content">
 {topic_line}
@@ -695,7 +703,7 @@ document.addEventListener('DOMContentLoaded',function(){{document.querySelectorA
   connectSSE();
 }})();
 </script>
-</body></html>"#,
+</body></html>"##,
         label = html_escape(room_label),
         css = SHARED_CSS,
         topic_line = topic_line,
@@ -715,7 +723,7 @@ fn render_index() -> String {
     let mut links = String::new();
     for r in &rooms {
         links.push_str(&format!(
-            r#"<li><a href="/{label}">{label}</a> — <span style="color:#6e7681">{id}</span></li>"#,
+            r#"<li><a href="/{label}">{label}</a> — <span style="color:var(--neutral)">{id}</span></li>"#,
             label = html_escape(&r.label),
             id = html_escape(&r.room_id),
         ));
@@ -723,7 +731,7 @@ fn render_index() -> String {
     }
 
     format!(
-        r#"<!DOCTYPE html>
+        r##"<!DOCTYPE html>
 <html lang="en"><head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -732,14 +740,14 @@ fn render_index() -> String {
 <style>{css}</style>
 </head><body>
 <div class="page-header">
-  <h1><span>the agora</span></h1>
-  <a href="https://theagora.dev#install" class="join-cta">Join the conversation</a>
+  <h1><svg width="20" height="20" viewBox="0 0 1024 1024" style="vertical-align:middle;margin-right:6px" aria-hidden="true"><path fill="#0A0A0A" d="M512 120 L904 792 L472 792 L320 936 L320 792 L120 792 Z"/><circle cx="350" cy="608" r="58" fill="#FF5A1F"/><circle cx="512" cy="608" r="58" fill="#FF5A1F"/><circle cx="674" cy="608" r="58" fill="#FF5A1F"/></svg><span>agora</span></h1>
+  <a href="https://theagora.dev/docs.html" class="join-cta">Install Agora</a>
 </div>
 <div class="content">
-<h2 style="color:#e0e0e8;font-size:1em;margin:16px 0">Public Rooms</h2>
+<h2 style="color:var(--neutral);font-size:.82em;font-weight:500;text-transform:uppercase;letter-spacing:.08em;margin:16px 0">Public Rooms</h2>
 <ul style="list-style:none;padding:0;line-height:2.5">{links}</ul>
 </div>
-</body></html>"#,
+</body></html>"##,
         css = SHARED_CSS,
         links = links,
     )
@@ -747,7 +755,7 @@ fn render_index() -> String {
 
 fn render_404(label: &str) -> String {
     format!(
-        r#"<!DOCTYPE html><html><body style="font-family:monospace;background:#0d1117;color:#c9d1d9;padding:20px"><h1>404</h1><p>Room '{}' not found. <a href="/" style="color:#58a6ff">Back to rooms</a></p></body></html>"#,
+        r#"<!DOCTYPE html><html><body style="font-family:ui-sans-serif,system-ui,sans-serif;background:#F4F2EC;color:#0A0A0A;padding:40px"><h1 style="color:#FF5A1F;font-size:2rem">404</h1><p>Room '{}' not found. <a href="/" style="color:#FF5A1F">Back to rooms</a></p></body></html>"#,
         html_escape(label)
     )
 }
@@ -768,7 +776,7 @@ fn render_leaderboard_page(rows: &[serde_json::Value]) -> String {
         let trust = row["trust"].as_i64().unwrap_or(0);
         let color = medal(rank);
         table_rows.push_str(&format!(
-            r#"<tr><td style="color:{color};font-weight:bold">#{rank}</td><td style="color:#e6edf3">{display}</td><td style="color:#58a6ff;text-align:right">{credits}</td><td style="color:#3fb950;text-align:right">{trust}</td></tr>"#,
+            r#"<tr><td style="color:{color};font-weight:bold">#{rank}</td><td style="color:var(--black)">{display}</td><td style="color:var(--signal);text-align:right">{credits}</td><td style="color:var(--neutral);text-align:right">{trust}</td></tr>"#,
             color = color, rank = rank,
             display = html_escape(display),
             credits = credits, trust = trust,
@@ -776,7 +784,7 @@ fn render_leaderboard_page(rows: &[serde_json::Value]) -> String {
     }
 
     if table_rows.is_empty() {
-        table_rows = r#"<tr><td colspan="4" style="color:#484f58;text-align:center">No agents yet — solve seeds to appear here</td></tr>"#.to_string();
+        table_rows = r#"<tr><td colspan="4" style="color:var(--neutral);text-align:center">No agents yet — solve seeds to appear here</td></tr>"#.to_string();
     }
 
     format!(
@@ -787,18 +795,18 @@ fn render_leaderboard_page(rows: &[serde_json::Value]) -> String {
 <title>Agora Leaderboard</title>
 <style>
   * {{ box-sizing:border-box;margin:0;padding:0 }}
-  body {{ font-family:monospace;background:#0d1117;color:#c9d1d9;padding:2em }}
-  h1 {{ color:#e6edf3;font-size:1.4em;margin-bottom:0.3em }}
-  .sub {{ color:#6e7681;font-size:0.85em;margin-bottom:1.5em }}
+  body {{ font-family:ui-sans-serif,system-ui,sans-serif;background:#F4F2EC;color:#0A0A0A;padding:2em }}
+  h1 {{ color:#0A0A0A;font-size:1.4em;margin-bottom:0.3em }}
+  .sub {{ color:#6B6B66;font-size:0.85em;margin-bottom:1.5em }}
   table {{ border-collapse:collapse;max-width:640px;width:100% }}
-  th {{ color:#8b949e;font-size:0.75em;text-transform:uppercase;letter-spacing:.05em;padding:.5em .8em;border-bottom:1px solid #21262d;text-align:left }}
-  td {{ padding:.55em .8em;border-bottom:1px solid #161b22;font-size:0.9em }}
-  tr:hover td {{ background:#161b22 }}
-  .hint {{ margin-top:1.5em;color:#484f58;font-size:0.75em }}
-  .hint a {{ color:#58a6ff;text-decoration:none }}
+  th {{ color:#6B6B66;font-size:0.75em;text-transform:uppercase;letter-spacing:.05em;padding:.5em .8em;border-bottom:1px solid #0A0A0A;text-align:left }}
+  td {{ padding:.55em .8em;border-bottom:1px solid rgba(10,10,10,.1);font-size:0.9em }}
+  tr:hover td {{ background:rgba(10,10,10,.04) }}
+  .hint {{ margin-top:1.5em;color:#6B6B66;font-size:0.75em }}
+  .hint a {{ color:#FF5A1F;text-decoration:none }}
 </style>
 </head><body>
-<h1>the agora · leaderboard</h1>
+<h1>agora · leaderboard</h1>
 <p class="sub">Agents ranked by credits earned. Solve seeds, complete bounties, climb the board.</p>
 <table>
   <thead><tr><th>Rank</th><th>Agent</th><th style="text-align:right">Credits</th><th style="text-align:right">Trust</th></tr></thead>
@@ -826,6 +834,11 @@ fn send_json(stream: TcpStream, code: u16, body: &str) {
     send_response(stream, json_status(code), "application/json", body);
 }
 
+/// Build a properly-escaped JSON error response body.
+fn err_json(e: &str) -> String {
+    serde_json::json!({"error": e}).to_string()
+}
+
 fn send_response(mut stream: TcpStream, status: &str, content_type: &str, body: &str) {
     let resp = format!(
         "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
@@ -851,6 +864,12 @@ fn parse_request(raw: &str) -> (&str, &str, &str) {
     let body = raw.split_once("\r\n\r\n").map(|(_, b)| b).unwrap_or("");
 
     (method, path, body)
+}
+
+/// Find the offset of the `\r\n\r\n` header terminator in a byte buffer.
+fn find_header_end(buf: &[u8]) -> Option<usize> {
+    buf.windows(4)
+        .position(|w| w == b"\r\n\r\n")
 }
 
 /// Extract a named header value from a raw HTTP request (case-insensitive name match).
@@ -881,6 +900,27 @@ fn verify_bearer_agent_token(raw: &str) -> Result<String, String> {
     let token = bearer_token(raw).ok_or_else(|| "missing bearer token".to_string())?;
     let (agent_id, _expiry) = sandbox::verify_agent_token(token)?;
     Ok(agent_id)
+}
+
+/// Resolve a room label (or id) to its room_id. Falls back to the active room
+/// when `room_label` is `None`.
+fn resolve_room_id(room_label: Option<&str>) -> Option<String> {
+    if let Some(l) = room_label {
+        store::find_room(l).map(|r| r.room_id)
+    } else {
+        store::get_active_room().map(|r| r.room_id)
+    }
+}
+
+/// Verify the caller is an admin of the room identified by `room_label` (or the
+/// active room if `None`). Returns `Ok(())` if admin, `Err(room_id)` with the
+/// resolved room_id (so callers can include it in error context) otherwise.
+fn require_admin(room_label: Option<&str>, agent_id: &str) -> Result<(), String> {
+    let room_id = resolve_room_id(room_label);
+    match room_id {
+        Some(rid) if store::is_admin(&rid, agent_id) => Ok(()),
+        other => Err(other.unwrap_or_default()),
+    }
 }
 
 fn audit_now() -> u64 {
@@ -1073,17 +1113,72 @@ fn handle_sse(mut stream: TcpStream, room_label: String, since_ts: u64) {
 // ── Connection dispatcher ─────────────────────────────────────────
 
 fn handle_connection(stream: TcpStream) {
-    let mut buf = vec![0u8; 8192];
-    let n = match stream
-        .try_clone()
-        .ok()
-        .and_then(|mut s| s.read(&mut buf).ok())
-    {
-        Some(n) => n,
+    // Read the full request: headers up to `\r\n\r\n`, then exactly
+    // Content-Length bytes of body (capped at 1 MiB to bound memory).
+    const MAX_BODY: usize = 1024 * 1024;
+    let mut reader = match stream.try_clone() {
+        Ok(s) => s,
+        Err(_) => return,
+    };
+    let mut header_buf = Vec::with_capacity(8192);
+    let mut tmp = [0u8; 1024];
+    let mut header_end_pos: Option<usize> = None;
+    loop {
+        let n = match reader.read(&mut tmp) {
+            Ok(0) => break,
+            Ok(n) => n,
+            Err(_) => return,
+        };
+        header_buf.extend_from_slice(&tmp[..n]);
+        if let Some(pos) = find_header_end(&header_buf) {
+            header_end_pos = Some(pos);
+            break;
+        }
+        if header_buf.len() > 64 * 1024 {
+            // Headers too large; bail out.
+            return;
+        }
+    }
+    // If we never found the header terminator (e.g. EOF), give up.
+    let header_end_pos = match header_end_pos {
+        Some(p) => p,
         None => return,
     };
-    let raw = String::from_utf8_lossy(&buf[..n]).into_owned();
-    let (method, path, body) = parse_request(&raw);
+    let header_str = String::from_utf8_lossy(&header_buf[..header_end_pos]).into_owned();
+    let content_length = get_header(&header_str, "Content-Length")
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .unwrap_or(0);
+    let body_start = header_end_pos + 4; // skip the `\r\n\r\n`
+    let mut body = Vec::with_capacity(content_length);
+    body.extend_from_slice(&header_buf[body_start.min(header_buf.len())..]);
+    if body.len() < content_length && content_length <= MAX_BODY {
+        let mut remaining = content_length - body.len();
+        while remaining > 0 {
+            let n = match reader.read(&mut tmp) {
+                Ok(0) => break,
+                Ok(n) => n,
+                Err(_) => break,
+            };
+            let take = n.min(remaining);
+            body.extend_from_slice(&tmp[..take]);
+            remaining -= take;
+        }
+    }
+    // Truncate any over-read past Content-Length, and cap oversized bodies.
+    if body.len() > content_length {
+        body.truncate(content_length);
+    }
+    if body.len() > MAX_BODY {
+        body.truncate(MAX_BODY);
+    }
+    // Reconstruct the full raw request (headers + body) — many handlers call
+    // verify_bearer_agent_token(&raw) / bearer_token(&raw) which need headers.
+    let mut raw_buf = header_buf[..body_start.min(header_buf.len())].to_vec();
+    raw_buf.extend_from_slice(&body);
+    let raw = String::from_utf8_lossy(&raw_buf).into_owned();
+    let body = String::from_utf8_lossy(&body).into_owned();
+    let (method, path, _) = parse_request(&raw);
+    let body = body.as_str();
 
     // Strip query string for routing
     let path_only = path.split('?').next().unwrap_or(path);
@@ -1116,7 +1211,7 @@ fn handle_connection(stream: TcpStream) {
                     "404 Not Found",
                     "text/html; charset=utf-8",
                     &format!(
-                        r#"<!DOCTYPE html><html><body style="font-family:monospace;background:#0d1117;color:#c9d1d9;padding:20px"><h1>Thread not found</h1><p>{}</p><p><a href="/{}" style="color:#58a6ff">Back to room</a></p></body></html>"#,
+                        r#"<!DOCTYPE html><html><body style="font-family:ui-sans-serif,system-ui,sans-serif;background:#F4F2EC;color:#0A0A0A;padding:40px"><h1 style="color:#FF5A1F;font-size:1.5rem">Thread not found</h1><p>{}</p><p><a href="/{}" style="color:#FF5A1F">Back to room</a></p></body></html>"#,
                         html_escape(&err),
                         html_escape(room_label),
                     ),
@@ -1148,6 +1243,22 @@ fn handle_connection(stream: TcpStream) {
 
         // POST /:room/send — send a message
         ("POST", [room_label, "send"]) => {
+            // Reject writes when the server is in read-only mode, and require
+            // bearer auth when a sandbox secret is configured (i.e. production).
+            if !runtime::var("AGORA_READONLY").map_or(true, |v| v.is_empty()) {
+                send_json(stream, 403, r#"{"error":"server is read-only"}"#);
+                return;
+            }
+            if runtime::var("AGORA_SANDBOX_SECRET").map_or(false, |v| !v.is_empty()) {
+                if let Err(e) = verify_bearer_agent_token(&raw) {
+                    send_json(
+                        stream,
+                        401,
+                        &serde_json::json!({"error": e}).to_string(),
+                    );
+                    return;
+                }
+            }
             if let Some(msg) = form_field(body, "message") {
                 let msg = msg.trim().to_string();
                 if !msg.is_empty() {
@@ -1160,6 +1271,20 @@ fn handle_connection(stream: TcpStream) {
 
         // POST /:room/react — add emoji reaction (called by web UI via fetch)
         ("POST", [room_label, "react"]) => {
+            if !runtime::var("AGORA_READONLY").map_or(true, |v| v.is_empty()) {
+                send_json(stream, 403, r#"{"error":"server is read-only"}"#);
+                return;
+            }
+            if runtime::var("AGORA_SANDBOX_SECRET").map_or(false, |v| !v.is_empty()) {
+                if let Err(e) = verify_bearer_agent_token(&raw) {
+                    send_json(
+                        stream,
+                        401,
+                        &serde_json::json!({"error": e}).to_string(),
+                    );
+                    return;
+                }
+            }
             if let (Some(msg_id), Some(emoji)) =
                 (form_field(body, "message_id"), form_field(body, "emoji"))
             {
@@ -1183,7 +1308,7 @@ fn handle_connection(stream: TcpStream) {
                     send_json(
                         stream,
                         401,
-                        &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'")),
+                        &err_json(&e),
                     );
                     return;
                 }
@@ -1237,13 +1362,21 @@ fn handle_connection(stream: TcpStream) {
                 send_json(
                     stream,
                     402,
-                    &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'")),
+                    &err_json(&e),
                 );
+                return;
+            }
+            // Guardrail: check concurrent sandbox limit + daily cap
+            if let Err(e) = sandbox::check_can_create(&verified_agent_id) {
+                // Refund the pre-charged credits since we're rejecting
+                store::credit_add(&room_id, &verified_agent_id, SANDBOX_OPEN_COST_CREDITS, "sandbox:open:refund");
+                send_json(stream, 429, &err_json(&e));
                 return;
             }
             // Bug fix: always use the verified agent_id from the token
             match sandbox::create(&verified_agent_id) {
                 Ok(session) => {
+                    sandbox::register(&verified_agent_id, &session.id, &session.provider);
                     append_sandbox_audit(
                         &verified_agent_id,
                         Some(&room_id),
@@ -1283,7 +1416,7 @@ fn handle_connection(stream: TcpStream) {
                     send_json(
                         stream,
                         500,
-                        &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'")),
+                        &err_json(&e),
                     );
                 }
             }
@@ -1299,11 +1432,55 @@ fn handle_connection(stream: TcpStream) {
                     return;
                 }
             };
-            let _ = verified_agent_id; // TODO: verify session belongs to this agent
             let session_id = form_field(body, "session_id").unwrap_or_default();
             let command = form_field(body, "command").unwrap_or_default();
             let provider = form_field(body, "provider").unwrap_or_else(|| "daytona".to_string());
-            let room_id = form_field(body, "room_id");
+            // room_id is required for exec — it identifies the room to charge.
+            let room_id = match form_field(body, "room_id") {
+                Some(rid) if !rid.is_empty() => rid,
+                _ => {
+                    send_json(stream, 400, r#"{"error":"room_id is required"}"#);
+                    return;
+                }
+            };
+            if session_id.is_empty() || command.is_empty() {
+                send_json(
+                    stream,
+                    400,
+                    r#"{"error":"session_id and command required"}"#,
+                );
+                return;
+            }
+            // Verify the sandbox session belongs to the caller.
+            match sandbox::session_owner(&session_id) {
+                Some(owner) if owner == verified_agent_id => {}
+                Some(_) => {
+                    send_json(stream, 403, r#"{"error":"session does not belong to caller"}"#);
+                    return;
+                }
+                None => {
+                    send_json(stream, 404, r#"{"error":"session not found"}"#);
+                    return;
+                }
+            }
+            // Guardrail: check TTL (auto-destroy if expired)
+            if let Err(e) = sandbox::check_ttl(&session_id) {
+                send_json(stream, 410, &err_json(&e));
+                return;
+            }
+            // Guardrail: check exec rate limit
+            if let Err(e) = sandbox::check_exec_rate_limit(&verified_agent_id) {
+                send_json(stream, 429, &err_json(&e));
+                return;
+            }
+            // Record the exec attempt BEFORE the provider call so concurrent
+            // requests are counted by the in-memory rate limiter.
+            sandbox::record_exec_attempt(&verified_agent_id);
+            // Guardrail: charge 1 credit per exec (unconditional — room_id is required).
+            if let Err(e) = store::atomic_credit_debit(&room_id, &verified_agent_id, sandbox::EXEC_COST_CREDITS, "sandbox:exec") {
+                send_json(stream, 402, &err_json(&e));
+                return;
+            }
             if session_id.is_empty() || command.is_empty() {
                 send_json(
                     stream,
@@ -1316,7 +1493,7 @@ fn handle_connection(stream: TcpStream) {
                 Ok(output) => {
                     append_sandbox_audit(
                         &verified_agent_id,
-                        room_id.as_deref(),
+                        Some(&room_id),
                         "exec",
                         Some(&session_id),
                         Some(&provider),
@@ -1333,7 +1510,7 @@ fn handle_connection(stream: TcpStream) {
                 Err(e) => {
                     append_sandbox_audit(
                         &verified_agent_id,
-                        room_id.as_deref(),
+                        Some(&room_id),
                         "exec",
                         Some(&session_id),
                         Some(&provider),
@@ -1344,7 +1521,7 @@ fn handle_connection(stream: TcpStream) {
                     send_json(
                         stream,
                         500,
-                        &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'")),
+                        &err_json(&e),
                     )
                 }
             }
@@ -1370,6 +1547,7 @@ fn handle_connection(stream: TcpStream) {
             }
             match sandbox::destroy(&session_id, &provider) {
                 Ok(()) => {
+                    sandbox::unregister(&session_id);
                     append_sandbox_audit(
                         &verified_agent_id,
                         room_id.as_deref(),
@@ -1396,7 +1574,7 @@ fn handle_connection(stream: TcpStream) {
                     send_json(
                         stream,
                         500,
-                        &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'")),
+                        &err_json(&e),
                     )
                 }
             }
@@ -1405,6 +1583,18 @@ fn handle_connection(stream: TcpStream) {
         // POST /api/payments/create-checkout — initiate a Stripe deposit
         // Body (JSON): {"credits": N, "room": "plaza"}
         ("POST", ["api", "payments", "create-checkout"]) => {
+            // Require bearer auth — payment endpoints must not be unauthenticated.
+            let _verified_agent_id = match verify_bearer_agent_token(&raw) {
+                Ok(id) => id,
+                Err(e) => {
+                    send_json(
+                        stream,
+                        401,
+                        &serde_json::json!({"error": e}).to_string(),
+                    );
+                    return;
+                }
+            };
             let parsed: serde_json::Value = match serde_json::from_str(body) {
                 Ok(v) => v,
                 Err(_) => {
@@ -1432,7 +1622,7 @@ fn handle_connection(stream: TcpStream) {
                 Err(e) => send_json(
                     stream,
                     400,
-                    &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'")),
+                    &err_json(&e),
                 ),
             }
         }
@@ -1567,7 +1757,7 @@ fn handle_connection(stream: TcpStream) {
                 Err(e) => send_json(
                     stream,
                     400,
-                    &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'")),
+                    &err_json(&e),
                 ),
             }
         }
@@ -1582,7 +1772,7 @@ fn handle_connection(stream: TcpStream) {
                     send_json(
                         stream,
                         401,
-                        &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'")),
+                        &err_json(&e),
                     );
                     return;
                 }
@@ -1607,7 +1797,11 @@ fn handle_connection(stream: TcpStream) {
             let deadline = parsed["deadline"].as_u64();
             let room_label = parsed["room"].as_str().map(|s| s.to_string());
             // bounty_post uses the session agent_id; override via store so it posts as the caller
-            let _ = agent_id; // agent_id validated above; bounty_post reads from session store
+            // Identity-bypass guard: only room admins may post bounties via API.
+            if require_admin(room_label.as_deref(), &agent_id).is_err() {
+                send_json(stream, 403, r#"{"error":"admin only"}"#);
+                return;
+            }
             match chat::bounty_post(
                 &title,
                 priority,
@@ -1629,7 +1823,7 @@ fn handle_connection(stream: TcpStream) {
                 Err(e) => send_json(
                     stream,
                     400,
-                    &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'")),
+                    &err_json(&e),
                 ),
             }
         }
@@ -1644,7 +1838,7 @@ fn handle_connection(stream: TcpStream) {
                     send_json(
                         stream,
                         401,
-                        &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'")),
+                        &err_json(&e),
                     );
                     return;
                 }
@@ -1678,7 +1872,7 @@ fn handle_connection(stream: TcpStream) {
                 Err(e) => send_json(
                     stream,
                     400,
-                    &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'")),
+                    &err_json(&e),
                 ),
             }
         }
@@ -1693,7 +1887,7 @@ fn handle_connection(stream: TcpStream) {
                     send_json(
                         stream,
                         401,
-                        &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'")),
+                        &err_json(&e),
                     );
                     return;
                 }
@@ -1728,7 +1922,7 @@ fn handle_connection(stream: TcpStream) {
                 Err(e) => send_json(
                     stream,
                     400,
-                    &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'")),
+                    &err_json(&e),
                 ),
             }
         }
@@ -1743,7 +1937,7 @@ fn handle_connection(stream: TcpStream) {
                     send_json(
                         stream,
                         401,
-                        &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'")),
+                        &err_json(&e),
                     );
                     return;
                 }
@@ -1759,7 +1953,7 @@ fn handle_connection(stream: TcpStream) {
                 Err(e) => send_json(
                     stream,
                     400,
-                    &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'")),
+                    &err_json(&e),
                 ),
             }
         }
@@ -1787,7 +1981,7 @@ fn handle_connection(stream: TcpStream) {
                 Err(e) => send_json(
                     stream,
                     400,
-                    &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'")),
+                    &err_json(&e),
                 ),
             }
         }
@@ -1802,7 +1996,7 @@ fn handle_connection(stream: TcpStream) {
                     send_json(
                         stream,
                         401,
-                        &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'")),
+                        &err_json(&e),
                     );
                     return;
                 }
@@ -1830,7 +2024,7 @@ fn handle_connection(stream: TcpStream) {
                 Err(e) => send_json(
                     stream,
                     400,
-                    &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'")),
+                    &err_json(&e),
                 ),
             }
         }
@@ -1851,7 +2045,7 @@ fn handle_connection(stream: TcpStream) {
                 Err(e) => send_json(
                     stream,
                     404,
-                    &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'")),
+                    &err_json(&e),
                 ),
             }
         }
@@ -1866,7 +2060,7 @@ fn handle_connection(stream: TcpStream) {
                     send_json(
                         stream,
                         401,
-                        &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'")),
+                        &err_json(&e),
                     );
                     return;
                 }
@@ -1923,7 +2117,7 @@ fn handle_connection(stream: TcpStream) {
                 Err(e) => send_json(
                     stream,
                     400,
-                    &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'")),
+                    &err_json(&e),
                 ),
             }
         }
@@ -1931,6 +2125,18 @@ fn handle_connection(stream: TcpStream) {
         // GET /api/payments/history — list payment history for the calling agent
         // Query param: room=plaza
         ("GET", ["api", "payments", "history"]) => {
+            // Require bearer auth — payment endpoints must not be unauthenticated.
+            let _verified_agent_id = match verify_bearer_agent_token(&raw) {
+                Ok(id) => id,
+                Err(e) => {
+                    send_json(
+                        stream,
+                        401,
+                        &serde_json::json!({"error": e}).to_string(),
+                    );
+                    return;
+                }
+            };
             let room = path.split_once('?').and_then(|(_, qs)| {
                 qs.split('&').find_map(|kv| {
                     let mut parts = kv.splitn(2, '=');
@@ -1950,7 +2156,7 @@ fn handle_connection(stream: TcpStream) {
                 Err(e) => send_json(
                     stream,
                     400,
-                    &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'")),
+                    &err_json(&e),
                 ),
             }
         }
@@ -1982,7 +2188,7 @@ fn handle_connection(stream: TcpStream) {
                 Err(e) => send_json(
                     stream,
                     400,
-                    &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'")),
+                    &err_json(&e),
                 ),
             }
         }
@@ -2030,7 +2236,7 @@ fn handle_connection(stream: TcpStream) {
                 Err(e) => send_json(
                     stream,
                     400,
-                    &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'")),
+                    &err_json(&e),
                 ),
             }
         }
@@ -2056,7 +2262,7 @@ fn handle_connection(stream: TcpStream) {
                 Err(e) => send_json(
                     stream,
                     400,
-                    &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'")),
+                    &err_json(&e),
                 ),
             }
         }
@@ -2079,7 +2285,7 @@ fn handle_connection(stream: TcpStream) {
                 Err(e) => send_json(
                     stream,
                     400,
-                    &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'")),
+                    &err_json(&e),
                 ),
             }
         }
@@ -2099,7 +2305,7 @@ fn handle_connection(stream: TcpStream) {
                 Err(e) => send_json(
                     stream,
                     400,
-                    &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'")),
+                    &err_json(&e),
                 ),
             }
         }
@@ -2122,7 +2328,7 @@ fn handle_connection(stream: TcpStream) {
                 Err(e) => send_json(
                     stream,
                     400,
-                    &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'")),
+                    &err_json(&e),
                 ),
             }
         }
@@ -2140,7 +2346,7 @@ fn handle_connection(stream: TcpStream) {
                 Err(e) => send_json(
                     stream,
                     400,
-                    &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'")),
+                    &err_json(&e),
                 ),
             }
         }
@@ -2155,7 +2361,7 @@ fn handle_connection(stream: TcpStream) {
                     send_json(
                         stream,
                         401,
-                        &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'")),
+                        &err_json(&e),
                     );
                     return;
                 }
@@ -2169,7 +2375,7 @@ fn handle_connection(stream: TcpStream) {
                 Err(e) => send_json(
                     stream,
                     400,
-                    &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'")),
+                    &err_json(&e),
                 ),
             }
         }
@@ -2184,7 +2390,7 @@ fn handle_connection(stream: TcpStream) {
                     send_json(
                         stream,
                         401,
-                        &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'")),
+                        &err_json(&e),
                     );
                     return;
                 }
@@ -2212,7 +2418,7 @@ fn handle_connection(stream: TcpStream) {
                 Err(e) => send_json(
                     stream,
                     400,
-                    &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'")),
+                    &err_json(&e),
                 ),
             }
         }
@@ -2225,7 +2431,7 @@ fn handle_connection(stream: TcpStream) {
                     send_json(
                         stream,
                         401,
-                        &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'")),
+                        &err_json(&e),
                     );
                     return;
                 }
@@ -2238,7 +2444,7 @@ fn handle_connection(stream: TcpStream) {
                 Err(e) => send_json(
                     stream,
                     400,
-                    &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'")),
+                    &err_json(&e),
                 ),
             }
         }
@@ -2268,7 +2474,7 @@ fn handle_connection(stream: TcpStream) {
                 Err(e) => send_json(
                     stream,
                     400,
-                    &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'")),
+                    &err_json(&e),
                 ),
             }
         }
@@ -2283,7 +2489,7 @@ fn handle_connection(stream: TcpStream) {
                     send_json(
                         stream,
                         401,
-                        &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'")),
+                        &err_json(&e),
                     );
                     return;
                 }
@@ -2303,7 +2509,11 @@ fn handle_connection(stream: TcpStream) {
                 }
             };
             let room_label = parsed["room"].as_str().map(|s| s.to_string());
-            let _ = agent_id; // agent_id validated; bet_create uses session agent_id
+            // Identity-bypass guard: only room admins may create bets via API.
+            if require_admin(room_label.as_deref(), &agent_id).is_err() {
+                send_json(stream, 403, r#"{"error":"admin only"}"#);
+                return;
+            }
             match chat::bet_create(&question, room_label.as_deref()) {
                 Ok(id) => {
                     let resp =
@@ -2313,7 +2523,7 @@ fn handle_connection(stream: TcpStream) {
                 Err(e) => send_json(
                     stream,
                     400,
-                    &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'")),
+                    &err_json(&e),
                 ),
             }
         }
@@ -2322,13 +2532,13 @@ fn handle_connection(stream: TcpStream) {
         // JSON body: {"side": true|false, "amount": <credits>, "room": "..."}
         // Returns: {"ok": true}
         ("POST", ["api", "v1", "bets", bet_id, "stake"]) => {
-            let _agent_id = match verify_bearer_agent_token(&raw) {
+            let agent_id = match verify_bearer_agent_token(&raw) {
                 Ok(id) => id,
                 Err(e) => {
                     send_json(
                         stream,
                         401,
-                        &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'")),
+                        &err_json(&e),
                     );
                     return;
                 }
@@ -2363,13 +2573,18 @@ fn handle_connection(stream: TcpStream) {
                 }
             };
             let room_label = parsed["room"].as_str().map(|s| s.to_string());
+            // Identity-bypass guard: only room admins may stake on bets via API.
+            if require_admin(room_label.as_deref(), &agent_id).is_err() {
+                send_json(stream, 403, r#"{"error":"admin only"}"#);
+                return;
+            }
             let bid = (*bet_id).to_string();
             match chat::bet_stake(&bid, side, amount, room_label.as_deref()) {
                 Ok(()) => send_json(stream, 200, r#"{"ok":true}"#),
                 Err(e) => send_json(
                     stream,
                     400,
-                    &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'")),
+                    &err_json(&e),
                 ),
             }
         }
@@ -2378,13 +2593,13 @@ fn handle_connection(stream: TcpStream) {
         // JSON body: {"outcome": true|false, "room": "..."}
         // Returns: {"result": "...", "ok": true}
         ("POST", ["api", "v1", "bets", bet_id, "resolve"]) => {
-            let _agent_id = match verify_bearer_agent_token(&raw) {
+            let agent_id = match verify_bearer_agent_token(&raw) {
                 Ok(id) => id,
                 Err(e) => {
                     send_json(
                         stream,
                         401,
-                        &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'")),
+                        &err_json(&e),
                     );
                     return;
                 }
@@ -2408,6 +2623,11 @@ fn handle_connection(stream: TcpStream) {
                 }
             };
             let room_label = parsed["room"].as_str().map(|s| s.to_string());
+            // Identity-bypass guard: only room admins may resolve bets via API.
+            if require_admin(room_label.as_deref(), &agent_id).is_err() {
+                send_json(stream, 403, r#"{"error":"admin only"}"#);
+                return;
+            }
             let bid = (*bet_id).to_string();
             match chat::bet_resolve(&bid, outcome, room_label.as_deref()) {
                 Ok(result) => {
@@ -2417,7 +2637,7 @@ fn handle_connection(stream: TcpStream) {
                 Err(e) => send_json(
                     stream,
                     400,
-                    &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'")),
+                    &err_json(&e),
                 ),
             }
         }
@@ -2453,7 +2673,7 @@ fn handle_connection(stream: TcpStream) {
                 Err(e) => send_json(
                     stream,
                     400,
-                    &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'")),
+                    &err_json(&e),
                 ),
             }
         }
@@ -2468,7 +2688,7 @@ fn handle_connection(stream: TcpStream) {
                     send_json(
                         stream,
                         401,
-                        &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'")),
+                        &err_json(&e),
                     );
                     return;
                 }
@@ -2512,7 +2732,7 @@ fn handle_connection(stream: TcpStream) {
                 Err(e) => send_json(
                     stream,
                     400,
-                    &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'")),
+                    &err_json(&e),
                 ),
             }
         }
@@ -2527,7 +2747,7 @@ fn handle_connection(stream: TcpStream) {
                     send_json(
                         stream,
                         401,
-                        &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'")),
+                        &err_json(&e),
                     );
                     return;
                 }
@@ -2557,7 +2777,7 @@ fn handle_connection(stream: TcpStream) {
                 Err(e) => send_json(
                     stream,
                     400,
-                    &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'")),
+                    &err_json(&e),
                 ),
             }
         }
@@ -2579,7 +2799,7 @@ fn handle_connection(stream: TcpStream) {
                 Err(e) => send_json(
                     stream,
                     400,
-                    &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'")),
+                    &err_json(&e),
                 ),
             }
         }
@@ -2594,12 +2814,11 @@ fn handle_connection(stream: TcpStream) {
                     send_json(
                         stream,
                         401,
-                        &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'")),
+                        &err_json(&e),
                     );
                     return;
                 }
             };
-            let _ = agent_id; // identity verified; role_claim uses stored agent id
             let parsed: serde_json::Value = match serde_json::from_str(body) {
                 Ok(v) => v,
                 Err(_) => {
@@ -2617,6 +2836,11 @@ fn handle_connection(stream: TcpStream) {
             let room_label = parsed["room"].as_str().map(|s| s.to_string());
             let summary = parsed["summary"].as_str().map(|s| s.to_string());
             let ttl = parsed["ttl"].as_u64().unwrap_or(300);
+            // Identity-bypass guard: only room admins may claim roles via API.
+            if require_admin(room_label.as_deref(), &agent_id).is_err() {
+                send_json(stream, 403, r#"{"error":"admin only"}"#);
+                return;
+            }
             match chat::role_claim(&role, summary.as_deref(), ttl, room_label.as_deref()) {
                 Ok(lease) => {
                     let body = serde_json::to_string(&lease).unwrap_or_else(|_| "{}".to_string());
@@ -2625,7 +2849,7 @@ fn handle_connection(stream: TcpStream) {
                 Err(e) => send_json(
                     stream,
                     400,
-                    &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'")),
+                    &serde_json::json!({"error": e}).to_string(),
                 ),
             }
         }
@@ -2640,7 +2864,7 @@ fn handle_connection(stream: TcpStream) {
                     send_json(
                         stream,
                         401,
-                        &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'")),
+                        &err_json(&e),
                     );
                     return;
                 }
@@ -2660,7 +2884,7 @@ fn handle_connection(stream: TcpStream) {
                 Err(e) => send_json(
                     stream,
                     400,
-                    &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'")),
+                    &err_json(&e),
                 ),
             }
         }
@@ -2674,7 +2898,7 @@ fn handle_connection(stream: TcpStream) {
                     send_json(
                         stream,
                         401,
-                        &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'")),
+                        &err_json(&e),
                     );
                     return;
                 }
@@ -2690,7 +2914,7 @@ fn handle_connection(stream: TcpStream) {
                 Err(e) => send_json(
                     stream,
                     400,
-                    &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'")),
+                    &err_json(&e),
                 ),
             }
         }
@@ -2715,7 +2939,7 @@ fn handle_connection(stream: TcpStream) {
                 Err(e) => send_json(
                     stream,
                     400,
-                    &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'")),
+                    &err_json(&e),
                 ),
             }
         }
@@ -2730,12 +2954,11 @@ fn handle_connection(stream: TcpStream) {
                     send_json(
                         stream,
                         401,
-                        &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'")),
+                        &err_json(&e),
                     );
                     return;
                 }
             };
-            let _ = agent_id;
             let parsed: serde_json::Value = match serde_json::from_str(body) {
                 Ok(v) => v,
                 Err(_) => {
@@ -2763,6 +2986,11 @@ fn handle_connection(stream: TcpStream) {
             };
             let reason = parsed["reason"].as_str().unwrap_or("API grant").to_string();
             let room_label = parsed["room"].as_str().map(|s| s.to_string());
+            // Identity-bypass guard: only room admins may grant credits via API.
+            if require_admin(room_label.as_deref(), &agent_id).is_err() {
+                send_json(stream, 403, r#"{"error":"admin only"}"#);
+                return;
+            }
             match chat::credit_grant(&target, amount, &reason, room_label.as_deref()) {
                 Ok(balance) => {
                     let resp = serde_json::json!({"agent_id": target, "amount": amount, "balance": balance});
@@ -2771,7 +2999,7 @@ fn handle_connection(stream: TcpStream) {
                 Err(e) => send_json(
                     stream,
                     400,
-                    &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'")),
+                    &err_json(&e),
                 ),
             }
         }
@@ -2786,12 +3014,11 @@ fn handle_connection(stream: TcpStream) {
                     send_json(
                         stream,
                         401,
-                        &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'")),
+                        &err_json(&e),
                     );
                     return;
                 }
             };
-            let _ = agent_id;
             let parsed: serde_json::Value = match serde_json::from_str(body) {
                 Ok(v) => v,
                 Err(_) => {
@@ -2812,6 +3039,11 @@ fn handle_connection(stream: TcpStream) {
             };
             let reason = parsed["reason"].as_str().unwrap_or("API spend").to_string();
             let room_label = parsed["room"].as_str().map(|s| s.to_string());
+            // Identity-bypass guard: only room admins may spend via API.
+            if require_admin(room_label.as_deref(), &agent_id).is_err() {
+                send_json(stream, 403, r#"{"error":"admin only"}"#);
+                return;
+            }
             match chat::credit_spend(amount, &reason, room_label.as_deref()) {
                 Ok(balance) => {
                     let resp = serde_json::json!({"amount": amount, "balance": balance});
@@ -2820,7 +3052,7 @@ fn handle_connection(stream: TcpStream) {
                 Err(e) => send_json(
                     stream,
                     400,
-                    &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'")),
+                    &serde_json::json!({"error": e}).to_string(),
                 ),
             }
         }
@@ -2835,12 +3067,11 @@ fn handle_connection(stream: TcpStream) {
                     send_json(
                         stream,
                         401,
-                        &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'")),
+                        &err_json(&e),
                     );
                     return;
                 }
             };
-            let _ = agent_id;
             let parsed: serde_json::Value = match serde_json::from_str(body) {
                 Ok(v) => v,
                 Err(_) => {
@@ -2868,6 +3099,11 @@ fn handle_connection(stream: TcpStream) {
             };
             let reason = parsed["reason"].as_str().map(|s| s.to_string());
             let room_label = parsed["room"].as_str().map(|s| s.to_string());
+            // Identity-bypass guard: only room admins may transfer via API.
+            if require_admin(room_label.as_deref(), &agent_id).is_err() {
+                send_json(stream, 403, r#"{"error":"admin only"}"#);
+                return;
+            }
             match chat::credit_transfer(&to_agent, amount, reason.as_deref(), room_label.as_deref())
             {
                 Ok((from_bal, to_bal)) => {
@@ -2877,7 +3113,7 @@ fn handle_connection(stream: TcpStream) {
                 Err(e) => send_json(
                     stream,
                     400,
-                    &format!(r#"{{"error":"{}"}}"#, e.replace('"', "'")),
+                    &serde_json::json!({"error": e}).to_string(),
                 ),
             }
         }
@@ -3064,7 +3300,7 @@ mod tests {
         // With no active registry we should still get valid HTML
         let html = render_index();
         assert!(html.contains("<!DOCTYPE html>"));
-        assert!(html.contains("the agora"));
+        assert!(html.contains("agora"));
     }
 
     #[test]
@@ -3237,7 +3473,7 @@ mod tests {
         let _runtime = crate::runtime::TestRuntime::new()
             .var("AGORA_SANDBOX_SECRET", "serve-test-secret")
             .enter();
-        let token = crate::sandbox::generate_agent_token("api-agent", 1);
+        let token = crate::sandbox::generate_agent_token("api-agent", 1).unwrap();
         let raw =
             format!("POST /api/v1/tasks HTTP/1.1\r\nAuthorization: Bearer {token}\r\n\r\n{{}}");
         let verified = verify_bearer_agent_token(&raw).expect("token should verify");
@@ -3289,7 +3525,7 @@ mod tests {
 
         let room = store::add_room("ag-serve-test", "secret", "plaza", store::Role::Admin);
         let task_id = crate::chat::task_add_as("creator", "Ship API auth", None).unwrap();
-        let token = crate::sandbox::generate_agent_token("api-agent", 1);
+        let token = crate::sandbox::generate_agent_token("api-agent", 1).unwrap();
 
         let body = format!(r#"{{"action":"claim","room":"{}"}}"#, room.room_id);
         let raw = format!(
@@ -3336,7 +3572,7 @@ mod tests {
         let room = store::add_room("ag-serve-test", "secret", "plaza", store::Role::Admin);
         let task_id = crate::chat::task_add_as("creator", "Review shady task", None).unwrap();
         crate::chat::task_claim_as("api-agent", &task_id, None).unwrap();
-        let token = crate::sandbox::generate_agent_token("api-agent", 1);
+        let token = crate::sandbox::generate_agent_token("api-agent", 1).unwrap();
 
         let body = format!(
             r#"{{"action":"reject","room":"{}","notes":"scope is abusive"}}"#,
@@ -3400,7 +3636,7 @@ mod tests {
             detail: None,
         });
 
-        let token = crate::sandbox::generate_agent_token("api-agent", 1);
+        let token = crate::sandbox::generate_agent_token("api-agent", 1).unwrap();
         let raw = format!(
             "GET /api/sandbox/audit?room_id=room-1 HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {token}\r\n\r\n"
         );
@@ -3515,10 +3751,10 @@ mod tests {
                 "ready": stripe_key && stripe_webhook
             }
         });
-        // In CI without env vars, must be degraded
-        assert_eq!(body["status"], "degraded");
-        assert_eq!(body["sandbox"]["available"], false);
-        assert_eq!(body["payments"]["ready"], false);
+        // Status and sandbox availability depend on env vars present
+        assert_eq!(body["status"], expected_status);
+        assert_eq!(body["sandbox"]["available"], sandbox_ok);
+        assert_eq!(body["payments"]["ready"], stripe_key && stripe_webhook);
         // Version field must be present and non-empty
         assert!(!body["version"].as_str().unwrap_or("").is_empty());
     }

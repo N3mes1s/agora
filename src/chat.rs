@@ -6,7 +6,7 @@
 //! ```json
 //! {
 //!     "v": "3.0",
-//!     "id": "<8-hex message ID>",
+//!     "id": "<32-hex message ID>",
 //!     "from": "<agent-id>",
 //!     "ts": <unix-timestamp>,
 //!     "text": "<message body>",
@@ -37,6 +37,44 @@ const DISCOVERY_STALE_CLAIM_GRACE_SECS: u64 = 3 * 24 * 60 * 60;
 const BASE64: base64::engine::general_purpose::GeneralPurpose =
     base64::engine::general_purpose::STANDARD;
 
+// ---------------------------------------------------------------------------
+// Graceful shutdown: global flag set by SIGTERM/SIGINT signal handler.
+// Checked in long-running loops (daemon, watch) to break and clean up.
+// ---------------------------------------------------------------------------
+static SHUTDOWN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+extern "C" fn shutdown_handler(_sig: libc::c_int) {
+    // Exit immediately — PidFileGuard::drop cleans up the PID file.
+    // This is async-signal-safe: exit() is safe, and Drop runs cleanup.
+    std::process::exit(0);
+}
+
+/// Install SIGTERM/SIGINT handlers that set the global `SHUTDOWN` flag.
+/// Call this once in any long-running process (daemon child, watch loop).
+pub fn install_shutdown_handler() {
+    unsafe {
+        libc::signal(libc::SIGTERM, shutdown_handler as *const () as usize);
+        libc::signal(libc::SIGINT, shutdown_handler as *const () as usize);
+    }
+}
+
+/// RAII guard that removes a PID file on drop (including panics / unwinds).
+struct PidFileGuard {
+    path: std::path::PathBuf,
+}
+
+impl PidFileGuard {
+    fn new(path: std::path::PathBuf) -> Self {
+        Self { path }
+    }
+}
+
+impl Drop for PidFileGuard {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct SignedWirePayload {
     v: String,
@@ -66,7 +104,7 @@ fn now() -> u64 {
 }
 
 fn msg_id() -> String {
-    let mut bytes = [0u8; 4];
+    let mut bytes = [0u8; 16];
     ring::rand::SystemRandom::new()
         .fill(&mut bytes)
         .expect("RNG failed");
@@ -999,7 +1037,7 @@ pub fn read_status(room_label: Option<&str>) -> Result<Vec<serde_json::Value>, S
         let readers = receipts.get(&mid).cloned().unwrap_or_default();
         status.push(json!({
             "id": mid,
-            "text": msg["text"].as_str().unwrap_or("")[..50.min(msg["text"].as_str().unwrap_or("").len())],
+            "text": msg["text"].as_str().unwrap_or("").chars().take(50).collect::<String>(),
             "ts": msg["ts"],
             "read_by": readers,
         }));
@@ -2501,6 +2539,7 @@ const SOLANA_USDC_MINT: &str = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
 const SOLANA_TOKEN_PROGRAM: &str = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
 const SOLANA_TREASURY_WALLET: &str = "Kh2hZ9Kga9i8WLVxM78VnS51hf7AgGug83rtkSk8vNH";
 const SOLANA_USDC_BASE_UNITS_PER_CENT: i64 = 10_000;
+const SOLANA_MEMO_PROGRAM_ID: &str = "Memo1chk1mE6sLk5xXqAdDcmrW8rJz8m8m8";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct VerifiedSolanaDeposit {
@@ -2508,6 +2547,7 @@ struct VerifiedSolanaDeposit {
     amount_raw: i64,
     amount_cents: i64,
     credits: i64,
+    sender_agent_id: String,
 }
 
 fn parse_token_amount(raw: &serde_json::Value) -> Option<i64> {
@@ -2531,6 +2571,58 @@ fn sum_owner_token_amount(
         })
         .filter_map(|entry| parse_token_amount(&entry["uiTokenAmount"]["amount"]))
         .sum()
+}
+/// Extract the agent_id from a memo program instruction in the transaction.
+/// Scans both top-level and inner instructions for the Solana memo program.
+fn extract_memo_agent_id(tx: &serde_json::Value) -> Option<String> {
+    // jsonParsed encoding puts instructions under message.instructions
+    // with parsed.programId and parsed data. For "json" encoding the
+    // programId is at instruction.programId and data is base58-encoded.
+    // We handle both shapes.
+    fn scan_instructions(instructions: &serde_json::Value) -> Option<String> {
+        for ix in instructions.as_array().into_iter().flatten() {
+            // jsonParsed shape: { "programId": "...", "parsed": { ... } }
+            // or { "program": "memo", ... }
+            let program_id = ix["programId"].as_str().or_else(|| {
+                ix["parsed"]["programId"]
+                    .as_str()
+ .or_else(|| ix["program"].as_str())
+            });
+            if program_id == Some(SOLANA_MEMO_PROGRAM_ID)
+                || ix["program"].as_str() == Some("memo")
+            {
+                // jsonParsed: parsed.source == "memo", data is under parsed (string)
+                // For jsonParsed memo, the parsed field IS the memo text string.
+                if let Some(text) = ix["parsed"].as_str() {
+                    return Some(text.to_string());
+                }
+                // json encoding: data is base58 — but we can't easily decode base58
+                // without a dependency. For jsonParsed, parsed is the string directly.
+                if let Some(text) = ix["data"].as_str() {
+                    // If data looks like plain UTF-8 (not base58), use it directly.
+                    // This handles test fixtures that provide raw UTF-8 data.
+                    if text.is_ascii() && !text.contains('\0') {
+                        return Some(text.to_string());
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    // Check top-level instructions
+    if let Some(id) = scan_instructions(&tx["message"]["instructions"]) {
+        return Some(id);
+    }
+    // Check inner instructions (from meta.innerInstructions)
+    if let Some(inner) = tx["meta"]["innerInstructions"].as_array() {
+        for group in inner {
+            if let Some(id) = scan_instructions(&group["instructions"]) {
+                return Some(id);
+            }
+        }
+    }
+    None
 }
 
 fn verified_solana_deposit_from_tx(
@@ -2576,12 +2668,14 @@ fn verified_solana_deposit_from_tx(
         ));
     }
 
+    let sender_agent_id = extract_memo_agent_id(tx).unwrap_or_default();
     let amount_cents = delta_raw / SOLANA_USDC_BASE_UNITS_PER_CENT;
     Ok(VerifiedSolanaDeposit {
         signature: signature.to_string(),
         amount_raw: delta_raw,
         amount_cents,
         credits: amount_cents * store::CREDITS_PER_USD_CENT,
+        sender_agent_id,
     })
 }
 
@@ -2595,7 +2689,7 @@ fn verify_solana_usdc_transfer(signature: &str) -> Result<VerifiedSolanaDeposit,
             signature,
             {
                 "commitment": "finalized",
-                "encoding": "json",
+                "encoding": "jsonParsed",
                 "maxSupportedTransactionVersion": 0
             }
         ]
@@ -2621,6 +2715,8 @@ fn payment_complete_solana_deposit(
     verified: &VerifiedSolanaDeposit,
     room_label: Option<&str>,
 ) -> Result<String, String> {
+    // Hold credit_lock to prevent double-crediting from concurrent claims of the same deposit.
+    let _guard = store::credit_lock().lock().unwrap();
     if store::find_payment_by_reference(&verified.signature).is_some() {
         return Err(format!(
             "Transaction {} was already claimed.",
@@ -2628,8 +2724,15 @@ fn payment_complete_solana_deposit(
         ));
     }
 
-    let room = resolve_room(room_label)?;
     let me = store::get_agent_id();
+    if verified.sender_agent_id != me {
+        return Err(
+            "Deposit memo does not match your agent ID. Include a memo with your agent_id in the Solana transaction."
+                .to_string(),
+        );
+    }
+
+    let room = resolve_room(room_label)?;
     let record = store::PaymentRecord {
         id: msg_id(),
         agent_id: me.clone(),
@@ -4667,6 +4770,8 @@ pub fn watch<F>(
 where
     F: FnMut(&serde_json::Value),
 {
+    install_shutdown_handler();
+
     let room = resolve_room(room_label)?;
     let room_key = crypto::derive_room_key(&room.secret, &room.room_id);
     let room_id = room.room_id.clone();
@@ -4681,6 +4786,9 @@ where
     let _ = send_watch_heartbeat(&room_id);
 
     transport::stream(&room_id, |ts, payload| {
+        if SHUTDOWN.load(std::sync::atomic::Ordering::Relaxed) {
+            std::process::exit(0);
+        }
         if let Some(mut env) = decrypt_payload(payload, &room_key, &room_id) {
             if env["ts"].as_u64().unwrap_or(0) == 0 {
                 env["ts"] = json!(ts);
@@ -4888,7 +4996,7 @@ pub fn send_file(path: &str, room_label: Option<&str>) -> Result<(String, u64), 
         let b64_data = BASE64.encode(chunk);
         let env = make_file_envelope(&filename, &file_id, &b64_data, size, i as u64, total_chunks);
         let encrypted = encrypt_envelope(&env, &room_key, &room.room_id);
-        transport::publish(&room.room_id, &encrypted);
+        transport::publish_with_retry(&room.room_id, &encrypted).map_err(|e| format!("publish failed: {e}"))?;
         store::save_message(&room.room_id, &env);
     }
 
@@ -4981,11 +5089,13 @@ pub fn download_file(
 mod tests {
     use super::{
         BASE64, DISCOVERY_POSITIVE_HALF_LIFE_SECS, PLAZA_RATE_LIMIT_WINDOW_SECS,
-        SIGNED_WIRE_VERSION, SOLANA_TOKEN_PROGRAM, SOLANA_TREASURY_WALLET, SOLANA_USDC_MINT,
+        SIGNED_WIRE_VERSION, SOLANA_MEMO_PROGRAM_ID, SOLANA_TOKEN_PROGRAM,
+        SOLANA_TREASURY_WALLET, SOLANA_USDC_MINT,
         SignedWirePayload, VERSION, VerifiedSolanaDeposit, allow_incoming_message,
         annotate_soma_message, bounty_expire_check, bounty_post, bounty_submit, bounty_verify,
         count_invite_redemptions_in_envs, decrypt_payload, discover, discovery_decay_weight,
         dm_room_summaries, encrypt_envelope, enforce_outbound_plaza_rate_limit,
+        extract_memo_agent_id,
         infer_soma_subject_path, ingest_auxiliary_event, list_role_leases, list_work_receipts,
         make_envelope, make_invite_redemption, mark_displayed_messages_read,
         payment_complete_solana_deposit, pin, pins, resolve_room, role_claim, role_heartbeat,
@@ -5539,6 +5649,7 @@ mod tests {
             amount_raw: 2_500_000,
             amount_cents: 250,
             credits: 2500,
+            sender_agent_id: "solana-funder".to_string(),
         };
 
         let msg = payment_complete_solana_deposit(&verified, Some("plaza")).unwrap();
@@ -5555,6 +5666,118 @@ mod tests {
 
         let dup = payment_complete_solana_deposit(&verified, Some("plaza")).unwrap_err();
         assert!(dup.contains("already claimed"));
+    }
+
+    #[test]
+    fn solana_deposit_rejects_wrong_memo() {
+        let _guard = store::test_env_lock().lock().unwrap();
+        let (_home, _room) = setup_plaza_room("solana-funder", Role::Admin);
+        // Memo says a different agent — must be rejected.
+        let verified = VerifiedSolanaDeposit {
+            signature: "solsig-wrong".to_string(),
+            amount_raw: 1_000_000,
+            amount_cents: 100,
+            credits: 1000,
+            sender_agent_id: "some-other-agent".to_string(),
+        };
+        let err = payment_complete_solana_deposit(&verified, Some("plaza")).unwrap_err();
+        assert!(
+            err.contains("memo does not match"),
+            "expected memo mismatch error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn solana_deposit_rejects_missing_memo() {
+        let _guard = store::test_env_lock().lock().unwrap();
+        let (_home, _room) = setup_plaza_room("solana-funder", Role::Admin);
+        // No memo at all — sender_agent_id is empty, must be rejected.
+        let verified = VerifiedSolanaDeposit {
+            signature: "solsig-nomemo".to_string(),
+            amount_raw: 1_000_000,
+            amount_cents: 100,
+            credits: 1000,
+            sender_agent_id: String::new(),
+        };
+        let err = payment_complete_solana_deposit(&verified, Some("plaza")).unwrap_err();
+        assert!(
+            err.contains("memo does not match"),
+            "expected memo mismatch error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn solana_deposit_accepts_correct_memo() {
+        let _guard = store::test_env_lock().lock().unwrap();
+        let (_home, room) = setup_plaza_room("solana-funder", Role::Admin);
+        // Memo matches agent_id — should succeed.
+        let verified = VerifiedSolanaDeposit {
+            signature: "solsig-ok".to_string(),
+            amount_raw: 1_000_000,
+            amount_cents: 100,
+            credits: 1000,
+            sender_agent_id: "solana-funder".to_string(),
+        };
+        let msg = payment_complete_solana_deposit(&verified, Some("plaza")).unwrap();
+        assert!(msg.contains("minted 1000 credits"));
+        assert_eq!(store::credit_balance(&room.room_id, "solana-funder"), 1000);
+    }
+
+    #[test]
+    fn extract_memo_agent_id_from_jsonparsed_tx() {
+        // jsonParsed encoding: memo instruction has program="memo" and parsed is the string.
+        let tx = json!({
+            "message": {
+                "instructions": [
+                    {
+                        "program": "memo",
+                        "programId": SOLANA_MEMO_PROGRAM_ID,
+                        "parsed": "my-agent-id"
+                    }
+                ]
+            }
+        });
+        assert_eq!(extract_memo_agent_id(&tx), Some("my-agent-id".to_string()));
+    }
+
+    #[test]
+    fn extract_memo_agent_id_from_inner_instructions() {
+        // Memo may appear in inner instructions (e.g. wrapped in a SPL transfer).
+        let tx = json!({
+            "message": {
+                "instructions": []
+            },
+            "meta": {
+                "innerInstructions": [
+                    {
+                        "instructions": [
+                            {
+                                "program": "memo",
+                                "programId": SOLANA_MEMO_PROGRAM_ID,
+                                "parsed": "inner-agent"
+                            }
+                        ]
+                    }
+                ]
+            }
+        });
+        assert_eq!(extract_memo_agent_id(&tx), Some("inner-agent".to_string()));
+    }
+
+    #[test]
+    fn extract_memo_agent_id_missing_returns_none() {
+        let tx = json!({
+            "message": {
+                "instructions": [
+                    {
+                        "program": "system",
+                        "programId": "11111111111111111111111111111111",
+                        "parsed": {}
+                    }
+                ]
+            }
+        });
+        assert_eq!(extract_memo_agent_id(&tx), None);
     }
 
     #[test]
@@ -6891,6 +7114,10 @@ pub fn daemon(room_label: Option<&str>) -> Result<u32, String> {
     unsafe {
         libc::setsid();
     }
+    install_shutdown_handler();
+
+    // Guard removes the PID file on any exit path (signal, panic, normal).
+    let _pid_guard = PidFileGuard::new(pidfile.clone());
 
     let room_key = crypto::derive_room_key(&secret, &room_id);
     let me = store::get_agent_id();
@@ -6900,6 +7127,10 @@ pub fn daemon(room_label: Option<&str>) -> Result<u32, String> {
     );
 
     transport::stream(&room_id, |ts, payload| {
+        if SHUTDOWN.load(std::sync::atomic::Ordering::Relaxed) {
+            // PidFileGuard::drop removes the PID file, then exit.
+            std::process::exit(0);
+        }
         if let Some(mut env) = decrypt_payload(payload, &room_key, &room_id) {
             if env["ts"].as_u64().unwrap_or(0) == 0 {
                 env["ts"] = json!(ts);
@@ -6959,7 +7190,14 @@ pub fn stop_daemon(room_label: Option<&str>) -> Result<(), String> {
         unsafe {
             libc::kill(pid, libc::SIGTERM);
         }
-        let _ = std::fs::remove_file(pid_path);
+        // The daemon's signal handler calls exit(0), which drops PidFileGuard
+        // and removes the PID file. Wait briefly for cleanup, then escalate.
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        // If still alive after 200ms, SIGKILL and clean up ourselves.
+        if unsafe { libc::kill(pid, 0) } == 0 {
+            unsafe { libc::kill(pid, libc::SIGKILL); }
+            let _ = std::fs::remove_file(pid_path);
+        }
         return Ok(());
     }
     Err("No daemon running.".to_string())

@@ -4,6 +4,8 @@ export interface AgoraMessage {
     content: string;
     timestamp: Date;
     roomId?: string;
+    /** Envelope type for system messages (e.g. "heartbeat"). Undefined for normal chat messages. */
+    type?: string;
 }
 export interface AgoraJsonMessage<T = unknown> extends AgoraMessage {
     value: T;
@@ -26,6 +28,9 @@ export interface AgoraTask {
     title: string;
     status: "open" | "claimed" | "done";
     claimedBy?: string;
+    notes?: string;
+    createdAt?: string;
+    updatedAt?: string;
 }
 export interface AgoraStats {
     messages: number;

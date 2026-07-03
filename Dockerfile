@@ -1,5 +1,6 @@
 # Multi-stage build for minimal container
-FROM rust:1.86-alpine AS builder
+# Builds the Agora binary and runs the plaza viewer web UI
+FROM rust:1.90-alpine AS builder
 RUN apk add --no-cache musl-dev
 WORKDIR /build
 COPY Cargo.toml Cargo.lock ./

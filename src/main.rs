@@ -430,10 +430,14 @@ enum Commands {
     /// Purchase credits via hosted checkout or verify a Solana USDC deposit.
     /// `agora fund <credits>` creates a Stripe Checkout session.
     /// `agora fund --tx <signature>` verifies a finalized USDC transfer on Solana.
+    /// The Solana transaction MUST include a memo instruction containing your agent_id
+    /// (e.g. via `spl-token transfer --memo <agent_id>`). Deposits without a matching
+    /// memo are rejected to prevent unauthorized claims.
     Fund {
         /// Number of credits to purchase through Stripe Checkout
         credits: Option<i64>,
-        /// Solana transaction signature for a USDC transfer to the Agora treasury wallet
+        /// Solana transaction signature for a USDC transfer to the Agora treasury wallet.
+        /// The transaction must include a memo with your agent_id.
         #[arg(long)]
         tx: Option<String>,
     },
@@ -2277,7 +2281,13 @@ fn main() {
                     &format!("sandbox key: {hours}h access"),
                 );
             }
-            let token = sandbox::generate_agent_token(&agent_id, hours);
+            let token = match sandbox::generate_agent_token(&agent_id, hours) {
+                Ok(t) => t,
+                Err(e) => {
+                    eprintln!("  {e}");
+                    process::exit(1);
+                }
+            };
             println!("  Sandbox access token ({hours}h):");
             println!("  {token}");
             println!("  Cost: {cost} credits");
@@ -2304,20 +2314,20 @@ fn main() {
                     eprintln!("  Earn credits by completing bounties or funding your balance.");
                     process::exit(1);
                 }
-                // Check for existing open lease
-                let session_file = store::agora_dir().join("sandbox_session.json");
-                if session_file.exists() {
-                    eprintln!(
-                        "  You already have an active sandbox. Destroy it first: agora sandbox-destroy <id>"
-                    );
-                    process::exit(1);
-                }
+            }
+            // Guardrail: check concurrent sandbox limit + daily cap
+            if let Err(e) = sandbox::check_can_create(&agent_id) {
+                eprintln!("  {e}");
+                process::exit(1);
             }
             match sandbox::create(&agent_id) {
                 Ok(session) => {
+                    // Register in the sandbox registry (server-side enforcement)
+                    sandbox::register(&agent_id, &session.id, &session.provider);
                     println!("  Sandbox created!");
                     println!("  Provider: {}", session.provider);
                     println!("  Session:  {}", session.id);
+                    println!("  TTL: 1 hour (auto-destroyed after {}s)", 3600);
                     println!("  Run: agora sandbox-exec <command>");
                     // Save session for later use
                     let session_file = store::agora_dir().join("sandbox_session.json");
@@ -2334,12 +2344,37 @@ fn main() {
         }
 
         Commands::SandboxExec { command } => {
+            let agent_id = store::get_agent_id();
             let cmd = command.join(" ");
             let session_file = store::agora_dir().join("sandbox_session.json");
             let session: sandbox::SandboxSession =
                 serde_json::from_str(&std::fs::read_to_string(&session_file).unwrap_or_default())
                     .map_err(|_| "No active sandbox. Run: agora sandbox-create")
                     .unwrap();
+            // Guardrail: check TTL (auto-destroy if expired)
+            if let Err(e) = sandbox::check_ttl(&session.id) {
+                eprintln!("  {e}");
+                let _ = std::fs::remove_file(&session_file);
+                process::exit(1);
+            }
+            // Guardrail: check exec rate limit
+            if let Err(e) = sandbox::check_exec_rate_limit(&agent_id) {
+                eprintln!("  {e}");
+                process::exit(1);
+            }
+            // Record the exec attempt BEFORE the provider call so concurrent
+            // requests are counted by the in-memory rate limiter.
+            sandbox::record_exec_attempt(&agent_id);
+            // Guardrail: charge 1 credit per exec
+            let active = room
+                .and_then(store::find_room)
+                .or_else(store::get_active_room);
+            if let Some(r) = active {
+                if let Err(e) = store::atomic_credit_debit(&r.room_id, &agent_id, sandbox::EXEC_COST_CREDITS, "sandbox:exec") {
+                    eprintln!("  {e}");
+                    process::exit(1);
+                }
+            }
             match sandbox::exec(&session.id, &cmd, &session.provider) {
                 Ok(output) => println!("{output}"),
                 Err(e) => {
@@ -2362,6 +2397,7 @@ fn main() {
                     });
             match sandbox::destroy(&session.id, &session.provider) {
                 Ok(()) => {
+                    sandbox::unregister(&session.id);
                     let _ = std::fs::remove_file(&session_file);
                     println!("  Sandbox destroyed.");
                 }

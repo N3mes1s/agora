@@ -268,6 +268,30 @@ pub fn publish_detailed(topic: &str, payload: &str) -> Result<(), PublishError> 
     with_transport(|transport, config| transport.publish(config, topic, payload))
 }
 
+/// Publish with retry + exponential backoff on `PublishError::Network`.
+/// Max 3 retries with 100ms / 200ms / 400ms backoff.
+pub fn publish_with_retry(topic: &str, payload: &str) -> Result<(), PublishError> {
+    let backoffs = [
+        Duration::from_millis(100),
+        Duration::from_millis(200),
+        Duration::from_millis(400),
+    ];
+    let mut last_err = None;
+    for attempt in 0..=backoffs.len() {
+        match publish_detailed(topic, payload) {
+            Ok(()) => return Ok(()),
+            Err(e @ PublishError::Network(_)) => {
+                last_err = Some(e);
+                if attempt < backoffs.len() {
+                    std::thread::sleep(backoffs[attempt]);
+                }
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    Err(last_err.unwrap_or_else(|| PublishError::Network("retry exhausted".to_string())))
+}
+
 /// Fetch recent messages from the configured relay topic.
 pub fn fetch(topic: &str, since: &str) -> Vec<(u64, String)> {
     with_transport(|transport, config| transport.fetch(config, topic, since))

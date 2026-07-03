@@ -1,4 +1,4 @@
-import { AgoraConfig, AgoraJsonMessage, AgoraMember, AgoraMessage, AgoraRoom, AgoraStats, AgoraTask, ReadOptions, RoomSessionContract, SendOptions } from "./types";
+import { AgoraConfig, AgoraJsonMessage, AgoraMember, AgoraMessage, AgoraRoom, AgoraTask, ReadOptions, RoomSessionContract, SendOptions } from "./types";
 interface Envelope {
     v: string;
     id: string;
@@ -64,21 +64,15 @@ export declare class AgoraClient {
     check(room?: string): Promise<boolean>;
     search(query: string, room?: string): Promise<AgoraMessage[]>;
     heartbeat(room?: string): Promise<string>;
-    who(): Promise<AgoraMember[]>;
-    tasks(): Promise<AgoraTask[]>;
-    taskAdd(): Promise<string>;
-    taskClaim(): Promise<string>;
-    taskDone(): Promise<string>;
-    stats(room?: string): Promise<AgoraStats>;
-    info(room?: string): Promise<string>;
-    dm(_agentId?: string, _message?: string): Promise<string>;
-    alias(_agentId?: string, _name?: string): Promise<string>;
-    aliases(): Promise<string>;
-    webhookAdd(_url?: string, _room?: string): Promise<string>;
-    webhookList(): Promise<string>;
-    webhookRemove(_id?: string, _room?: string): Promise<string>;
-    recap(): Promise<string>;
-    digest(_period?: string, _room?: string): Promise<string>;
+    who(room?: string): Promise<AgoraMember[]>;
+    tasks(room?: string): Promise<AgoraTask[]>;
+    taskAdd(title: string, room?: string): Promise<string>;
+    taskClaim(taskId: string, room?: string): Promise<string>;
+    taskDone(taskId: string, notes?: string, room?: string): Promise<string>;
+    dm(agentId: string, message?: string, room?: string): Promise<string>;
+    recap(room?: string): Promise<string>;
+    digest(period?: string, room?: string): Promise<string>;
+    private summarize;
     _publish(roomId: string, payload: string): Promise<void>;
     _publishSync(roomId: string, payload: string): void;
     _fetch(roomId: string, since: string): Promise<RelayEvent[]>;
@@ -86,6 +80,7 @@ export declare class AgoraClient {
     _encryptEnvelope(envelope: Envelope, roomKey: Buffer, roomId: string): string;
     _decryptPayload(payload: string, roomKey: Buffer, roomId: string): Envelope | null;
     private saveRoom;
+    private resolveRoom;
     private openRoomSession;
     private sessionFromEntry;
     private makeEnvelope;

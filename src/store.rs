@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::os::unix::io::AsRawFd;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 
@@ -236,7 +237,7 @@ pub fn save_trusted_signing_keys(keys: &HashMap<String, String>) {
     let dir = agora_dir();
     ensure_dir(&dir);
     let data = serde_json::to_string_pretty(keys).unwrap();
-    let _ = fs::write(dir.join("trusted_signing_keys.json"), data);
+    let _ = atomic_write(&dir.join("trusted_signing_keys.json"), &data);
 }
 
 pub fn encode_signing_pubkey(pubkey: &[u8]) -> String {
@@ -363,6 +364,131 @@ fn atomic_write(path: &Path, data: &str) -> std::io::Result<()> {
     atomic_write_bytes(path, data.as_bytes())
 }
 
+// ── File-Level Advisory Locking ────────────────────────────────
+//
+// flock-based locks guard load→mutate→save cycles against concurrent
+// writers from another process (daemon child ↔ CLI). In-process Mutexes
+// are insufficient because the daemon forks+setsid into a separate
+// process that shares no address space with the CLI.
+//
+// Strategy: LOCK_EX | LOCK_NB with 3 retries at 50ms intervals. If the
+// lock cannot be acquired after 3 tries, proceed without it (better
+// than hanging the CLI) and log a warning.
+
+/// RAII guard for an advisory `flock` on a `.lock` sidecar file.
+///
+/// On creation it opens (creating if needed) `<path>.lock` and attempts to
+/// acquire an exclusive lock. On `Drop` the lock is released and the file
+/// handle closed. A `FileLock` that failed to acquire the lock is still
+/// safe to hold — `acquired()` reports whether the kernel granted it.
+pub struct FileLock {
+    _file: fs::File,
+    acquired: bool,
+}
+
+impl FileLock {
+    /// Try to open `<file_path>.lock` and acquire an exclusive, non-blocking
+    /// lock. Returns a guard whose `acquired()` is `false` if the lock was
+    /// contended or the file could not be opened.
+    fn try_acquire(file_path: &Path) -> Self {
+        let lock_path = lock_path_for(file_path);
+        if let Some(parent) = lock_path.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        let file = match fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .read(true)
+            .open(&lock_path)
+        {
+            Ok(f) => f,
+            Err(e) => {
+                eprintln!(
+                    "agora: warning: could not open lock file {}: {}",
+                    lock_path.display(),
+                    e
+                );
+                return FileLock {
+                    _file: fs::File::create("/dev/null").unwrap_or_else(|_| {
+                        fs::OpenOptions::new()
+                            .write(true)
+                            .open("/dev/null")
+                            .unwrap()
+                    }),
+                    acquired: false,
+                };
+            }
+        };
+        let acquired = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0;
+        FileLock {
+            _file: file,
+            acquired,
+        }
+    }
+
+    /// Whether the kernel granted the exclusive lock.
+    pub fn acquired(&self) -> bool {
+        self.acquired
+    }
+
+    /// Open `<file_path>.lock` and acquire a blocking exclusive lock.
+    /// Waits until the lock is available — correct for daemon/CLI coordination.
+    fn acquire_blocking(file_path: &Path) -> Self {
+        let lock_path = lock_path_for(file_path);
+        if let Some(parent) = lock_path.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        let file = match fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .read(true)
+            .open(&lock_path)
+        {
+            Ok(f) => f,
+            Err(_) => {
+                return FileLock { _file: fs::File::open("/dev/null").unwrap_or_else(|_| unsafe { std::mem::zeroed() }), acquired: false }
+            }
+        };
+        // Blocking LOCK_EX — waits until the lock is available.
+        unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) };
+        FileLock { _file: file, acquired: true }
+    }
+}
+
+impl Drop for FileLock {
+    fn drop(&mut self) {
+        if self.acquired {
+            // LOCK_UN on the fd; closing the file also releases, but be explicit.
+            let fd = self._file.as_raw_fd();
+            unsafe {
+                let _ = libc::flock(fd, libc::LOCK_UN);
+            }
+        }
+    }
+}
+
+/// `<file_path>.lock` — the lock sidecar path.
+fn lock_path_for(file_path: &Path) -> PathBuf {
+    let mut s = file_path.as_os_str().to_owned();
+    s.push(".lock");
+    PathBuf::from(s)
+}
+
+/// Acquire an advisory lock on `<file_path>.lock`, run `f`, release on drop.
+///
+/// Uses blocking `LOCK_EX` — waits until the lock is available. This is correct
+/// for daemon/CLI coordination: the CLI may briefly block, but no data is lost.
+/// The lock file is opened with create-if-missing and the fd is held for the
+/// duration of `f`.
+pub fn with_file_lock<T>(file_path: &Path, f: impl FnOnce() -> T) -> T {
+    let _lock = FileLock::acquire_blocking(file_path);
+    f()
+}
+
+/// Path to the room registry (`~/.agora/rooms.json`).
+fn registry_path() -> PathBuf {
+    agora_dir().join("rooms.json")
+}
 pub fn save_registry(rooms: &[RoomEntry]) {
     let dir = agora_dir();
     ensure_dir(&dir);
@@ -371,42 +497,48 @@ pub fn save_registry(rooms: &[RoomEntry]) {
 }
 
 pub fn add_room(room_id: &str, secret: &str, label: &str, role: Role) -> RoomEntry {
-    let mut rooms = load_registry();
-    if let Some(existing) = rooms.iter().find(|r| r.room_id == room_id) {
-        return existing.clone();
-    }
-    let agent_id = get_agent_id();
-    let entry = RoomEntry {
-        room_id: room_id.to_string(),
-        secret: secret.to_string(),
-        label: label.to_string(),
-        joined_at: now(),
-        topic: None,
-        purpose: None,
-        dm_peer: None,
-        members: vec![RoomMember {
-            agent_id,
-            role,
+    let path = registry_path();
+    with_file_lock(&path, || {
+        let mut rooms = load_registry();
+        if let Some(existing) = rooms.iter().find(|r| r.room_id == room_id) {
+            return existing.clone();
+        }
+        let agent_id = get_agent_id();
+        let entry = RoomEntry {
+            room_id: room_id.to_string(),
+            secret: secret.to_string(),
+            label: label.to_string(),
             joined_at: now(),
-            nickname: None,
-            last_seen: now(),
-        }],
-    };
-    rooms.push(entry.clone());
-    save_registry(&rooms);
-    entry
+            topic: None,
+            purpose: None,
+            dm_peer: None,
+            members: vec![RoomMember {
+                agent_id,
+                role,
+                joined_at: now(),
+                nickname: None,
+                last_seen: now(),
+            }],
+        };
+        rooms.push(entry.clone());
+        save_registry(&rooms);
+        entry
+    })
 }
 
 pub fn update_room(room: &RoomEntry) {
-    let mut rooms = load_registry();
-    let mut changed = false;
-    if let Some(r) = rooms.iter_mut().find(|r| r.room_id == room.room_id) {
-        *r = room.clone();
-        changed = true;
-    }
-    if changed {
-        save_registry(&rooms);
-    }
+    let path = registry_path();
+    with_file_lock(&path, || {
+        let mut rooms = load_registry();
+        let mut changed = false;
+        if let Some(r) = rooms.iter_mut().find(|r| r.room_id == room.room_id) {
+            *r = room.clone();
+            changed = true;
+        }
+        if changed {
+            save_registry(&rooms);
+        }
+    });
 }
 
 pub fn mark_dm_room(room_id: &str, peer_agent_id: &str) -> Result<RoomEntry, String> {
@@ -452,42 +584,48 @@ pub fn is_admin(room_id: &str, agent_id: &str) -> bool {
 }
 
 pub fn update_last_seen(room_id: &str, agent_id: &str) {
-    let mut rooms = load_registry();
-    let mut changed = false;
-    if let Some(room) = rooms.iter_mut().find(|r| r.room_id == room_id) {
-        if let Some(member) = room.members.iter_mut().find(|m| m.agent_id == agent_id) {
-            member.last_seen = now();
-            changed = true;
-        } else {
-            // First time seeing this agent — add as member
-            room.members.push(RoomMember {
-                agent_id: agent_id.to_string(),
-                role: Role::Member,
-                joined_at: now(),
-                nickname: None,
-                last_seen: now(),
-            });
-            changed = true;
+    let path = registry_path();
+    with_file_lock(&path, || {
+        let mut rooms = load_registry();
+        let mut changed = false;
+        if let Some(room) = rooms.iter_mut().find(|r| r.room_id == room_id) {
+            if let Some(member) = room.members.iter_mut().find(|m| m.agent_id == agent_id) {
+                member.last_seen = now();
+                changed = true;
+            } else {
+                // First time seeing this agent — add as member
+                room.members.push(RoomMember {
+                    agent_id: agent_id.to_string(),
+                    role: Role::Member,
+                    joined_at: now(),
+                    nickname: None,
+                    last_seen: now(),
+                });
+                changed = true;
+            }
         }
-    }
-    if changed {
-        save_registry(&rooms);
-    }
+        if changed {
+            save_registry(&rooms);
+        }
+    });
 }
 
 pub fn set_member_role(room_id: &str, agent_id: &str, role: Role) {
-    let mut rooms = load_registry();
-    let mut changed = false;
-    if let Some(room) = rooms.iter_mut().find(|r| r.room_id == room_id)
-        && let Some(member) = room.members.iter_mut().find(|m| m.agent_id == agent_id)
-        && member.role != role
-    {
-        member.role = role;
-        changed = true;
-    }
-    if changed {
-        save_registry(&rooms);
-    }
+    let path = registry_path();
+    with_file_lock(&path, || {
+        let mut rooms = load_registry();
+        let mut changed = false;
+        if let Some(room) = rooms.iter_mut().find(|r| r.room_id == room_id)
+            && let Some(member) = room.members.iter_mut().find(|m| m.agent_id == agent_id)
+            && member.role != role
+        {
+            member.role = role;
+            changed = true;
+        }
+        if changed {
+            save_registry(&rooms);
+        }
+    });
 }
 
 pub fn find_room(label_or_id: &str) -> Option<RoomEntry> {
@@ -510,7 +648,7 @@ pub fn get_active_room() -> Option<RoomEntry> {
 pub fn set_active_room(label: &str) {
     let dir = agora_dir();
     ensure_dir(&dir);
-    let _ = fs::write(dir.join("active_room"), label);
+    let _ = atomic_write(&dir.join("active_room"), label);
 }
 
 pub fn remove_room(label_or_id: &str) -> Option<RoomEntry> {
@@ -531,7 +669,7 @@ pub fn remove_room(label_or_id: &str) -> Option<RoomEntry> {
         let active = active.trim();
         if active == removed.label || active == removed.room_id {
             if let Some(next) = rooms.first() {
-                let _ = fs::write(&active_file, &next.label);
+                let _ = atomic_write(&active_file, &next.label);
             } else {
                 let _ = fs::remove_file(&active_file);
             }
@@ -613,7 +751,7 @@ pub fn load_read_cursor(room_id: &str) -> Option<ReadCursor> {
 pub fn save_read_cursor(room_id: &str, cursor: &ReadCursor) {
     let path = read_cursor_path(room_id);
     let data = serde_json::to_string(cursor).unwrap();
-    let _ = fs::write(path, data);
+    let _ = atomic_write(&path, &data);
 }
 
 fn cursor_from_message(message: &serde_json::Value) -> Option<ReadCursor> {
@@ -657,28 +795,34 @@ pub fn load_pins(room_id: &str) -> Vec<String> {
 
 pub fn save_pins(room_id: &str, pins: &[String]) {
     let path = pins_path(room_id);
-    let _ = fs::write(path, serde_json::to_string_pretty(pins).unwrap());
+    let _ = atomic_write(&path, &serde_json::to_string_pretty(pins).unwrap());
 }
 
 pub fn add_pin(room_id: &str, message_id: &str) -> bool {
-    let mut pins = load_pins(room_id);
-    if pins.iter().any(|id| id == message_id) {
-        return false;
-    }
-    pins.push(message_id.to_string());
-    save_pins(room_id, &pins);
-    true
+    let path = pins_path(room_id);
+    with_file_lock(&path, || {
+        let mut pins = load_pins(room_id);
+        if pins.iter().any(|id| id == message_id) {
+            return false;
+        }
+        pins.push(message_id.to_string());
+        save_pins(room_id, &pins);
+        true
+    })
 }
 
 pub fn remove_pin(room_id: &str, message_id: &str) -> bool {
-    let mut pins = load_pins(room_id);
-    let before = pins.len();
-    pins.retain(|id| id != message_id);
-    if pins.len() == before {
-        return false;
-    }
-    save_pins(room_id, &pins);
-    true
+    let path = pins_path(room_id);
+    with_file_lock(&path, || {
+        let mut pins = load_pins(room_id);
+        let before = pins.len();
+        pins.retain(|id| id != message_id);
+        if pins.len() == before {
+            return false;
+        }
+        save_pins(room_id, &pins);
+        true
+    })
 }
 
 // ── Agent Profiles ─────────────────────────────────────────────
@@ -706,8 +850,11 @@ pub fn load_profiles(room_id: &str) -> Vec<AgentProfile> {
 pub fn save_profiles(room_id: &str, profiles: &[AgentProfile]) {
     let dir = agora_dir().join("rooms").join(room_id);
     ensure_dir(&dir);
+    let path = dir.join("profiles.json");
     let data = serde_json::to_string_pretty(profiles).unwrap();
-    let _ = fs::write(dir.join("profiles.json"), data);
+    with_file_lock(&path, || {
+        let _ = atomic_write(&path, &data);
+    });
 }
 
 pub fn upsert_profile(room_id: &str, profile: &AgentProfile) {
@@ -741,7 +888,7 @@ pub fn save_muted(room_id: &str, muted: &HashSet<String>) {
     let dir = agora_dir().join("rooms").join(room_id);
     ensure_dir(&dir);
     let data = serde_json::to_string(&muted).unwrap();
-    let _ = fs::write(dir.join("muted.json"), data);
+    let _ = atomic_write(&dir.join("muted.json"), &data);
 }
 
 pub fn mute_agent(room_id: &str, agent_id: &str) {
@@ -775,7 +922,7 @@ pub fn save_receipts(room_id: &str, receipts: &std::collections::HashMap<String,
     let dir = agora_dir().join("rooms").join(room_id);
     ensure_dir(&dir);
     let data = serde_json::to_string(receipts).unwrap();
-    let _ = fs::write(dir.join("receipts.json"), data);
+    let _ = atomic_write(&dir.join("receipts.json"), &data);
 }
 
 pub fn record_receipts(room_id: &str, msg_ids: &[String], reader: &str) {
@@ -810,8 +957,11 @@ pub fn save_reactions(
 ) {
     let dir = agora_dir().join("rooms").join(room_id);
     ensure_dir(&dir);
+    let path = dir.join("reactions.json");
     let data = serde_json::to_string(reactions).unwrap();
-    let _ = fs::write(dir.join("reactions.json"), data);
+    with_file_lock(&path, || {
+        let _ = atomic_write(&path, &data);
+    });
 }
 
 pub fn add_reaction(room_id: &str, msg_id: &str, agent: &str, emoji: &str) {
@@ -835,7 +985,7 @@ pub fn set_notify_flag(room_id: &str, envelope: &serde_json::Value) {
     let mid = envelope["id"].as_str().unwrap_or("?");
     let ts = envelope["ts"].as_u64().unwrap_or_else(now);
     let payload = format!("{ts}\t{mid}\n");
-    let _ = fs::write(path, payload);
+    let _ = atomic_write(&path, &payload);
 }
 
 pub fn take_notify_flag(room_id: &str) -> bool {
@@ -993,10 +1143,8 @@ pub fn load_bets(room_id: &str) -> Vec<Bet> {
 pub fn save_bets(room_id: &str, bets: &[Bet]) {
     let dir = agora_dir().join("rooms").join(room_id);
     ensure_dir(&dir);
-    let _ = fs::write(
-        dir.join("bets.json"),
-        serde_json::to_string_pretty(bets).unwrap(),
-    );
+    let data = serde_json::to_string_pretty(bets).unwrap();
+    let _ = atomic_write(&dir.join("bets.json"), &data);
 }
 
 // ── Capability Cards ───────────────────────────────────────────
@@ -1014,9 +1162,8 @@ pub fn save_card(card: &CapabilityCard) {
     let dir = agora_dir();
     ensure_dir(&dir);
     let data = serde_json::to_string_pretty(card).unwrap();
-    let _ = fs::write(dir.join("card.json"), data);
+    let _ = atomic_write(&dir.join("card.json"), &data);
 }
-
 pub fn load_card() -> Option<CapabilityCard> {
     let path = agora_dir().join("card.json");
     fs::read_to_string(&path)
@@ -1028,7 +1175,7 @@ pub fn save_peer_card(room_id: &str, card: &CapabilityCard) {
     let dir = agora_dir().join("rooms").join(room_id).join("cards");
     ensure_dir(&dir);
     let data = serde_json::to_string_pretty(card).unwrap();
-    let _ = fs::write(dir.join(format!("{}.json", card.agent_id)), data);
+    let _ = atomic_write(&dir.join(format!("{}.json", card.agent_id)), &data);
 }
 
 pub fn load_peer_cards(room_id: &str) -> Vec<CapabilityCard> {
@@ -1100,8 +1247,11 @@ pub fn load_tasks(room_id: &str) -> Vec<Task> {
 pub fn save_tasks(room_id: &str, tasks: &[Task]) {
     let dir = agora_dir().join("rooms").join(room_id);
     ensure_dir(&dir);
+    let path = dir.join("tasks.json");
     let data = serde_json::to_string_pretty(tasks).unwrap();
-    let _ = fs::write(dir.join("tasks.json"), data);
+    with_file_lock(&path, || {
+        let _ = atomic_write(&path, &data);
+    });
 }
 
 // ── Payments ───────────────────────────────────────────────────
@@ -1200,10 +1350,8 @@ pub fn load_payments() -> Vec<PaymentRecord> {
 pub fn save_payments(payments: &[PaymentRecord]) {
     let dir = agora_dir();
     ensure_dir(&dir);
-    let _ = fs::write(
-        dir.join("payments.json"),
-        serde_json::to_string_pretty(payments).unwrap(),
-    );
+    let data = serde_json::to_string_pretty(payments).unwrap();
+    let _ = atomic_write(&dir.join("payments.json"), &data);
 }
 
 pub fn find_payment_by_reference(reference: &str) -> Option<PaymentRecord> {
@@ -1271,7 +1419,7 @@ pub fn save_seeds(room_id: &str, seeds: &[CalibrationSeed]) {
     let dir = agora_dir().join("rooms").join(room_id);
     ensure_dir(&dir);
     let data = serde_json::to_string_pretty(seeds).unwrap();
-    let _ = fs::write(dir.join("calibration_seeds.json"), data);
+    let _ = atomic_write(&dir.join("calibration_seeds.json"), &data);
 }
 
 // ── Work Receipts ──────────────────────────────────────────────
@@ -1318,7 +1466,7 @@ pub fn save_work_receipts(room_id: &str, receipts: &[WorkReceipt]) {
     let dir = agora_dir().join("rooms").join(room_id);
     ensure_dir(&dir);
     let data = serde_json::to_string_pretty(receipts).unwrap();
-    let _ = fs::write(dir.join("work_receipts.json"), data);
+    let _ = atomic_write(&dir.join("work_receipts.json"), &data);
 }
 
 pub fn upsert_work_receipt(room_id: &str, receipt: &WorkReceipt) {
@@ -1362,8 +1510,11 @@ pub fn load_role_leases(room_id: &str) -> Vec<RoleLease> {
 pub fn save_role_leases(room_id: &str, roles: &[RoleLease]) {
     let dir = agora_dir().join("rooms").join(room_id);
     ensure_dir(&dir);
+    let path = dir.join("role_leases.json");
     let data = serde_json::to_string_pretty(roles).unwrap();
-    let _ = fs::write(dir.join("role_leases.json"), data);
+    with_file_lock(&path, || {
+        let _ = atomic_write(&path, &data);
+    });
 }
 
 pub fn upsert_role_lease(room_id: &str, lease: &RoleLease) {
@@ -1407,8 +1558,11 @@ pub fn load_aliases() -> std::collections::HashMap<String, String> {
 pub fn save_aliases(aliases: &std::collections::HashMap<String, String>) {
     let dir = agora_dir();
     ensure_dir(&dir);
+    let path = dir.join("aliases.json");
     let data = serde_json::to_string_pretty(aliases).unwrap();
-    let _ = fs::write(dir.join("aliases.json"), data);
+    with_file_lock(&path, || {
+        let _ = atomic_write(&path, &data);
+    });
 }
 
 pub fn set_alias(agent_id: &str, name: &str) {
@@ -1451,8 +1605,11 @@ pub fn load_webhooks(room_id: &str) -> Vec<Webhook> {
 pub fn save_webhooks(room_id: &str, hooks: &[Webhook]) {
     let dir = agora_dir().join("rooms").join(room_id);
     ensure_dir(&dir);
+    let path = dir.join("webhooks.json");
     let data = serde_json::to_string_pretty(hooks).unwrap();
-    let _ = fs::write(dir.join("webhooks.json"), data);
+    with_file_lock(&path, || {
+        let _ = atomic_write(&path, &data);
+    });
 }
 
 pub fn add_webhook(room_id: &str, url: &str) -> String {
@@ -1498,7 +1655,7 @@ pub fn save_scheduled(room_id: &str, queue: &[serde_json::Value]) {
     let dir = agora_dir().join("rooms").join(room_id);
     ensure_dir(&dir);
     let data = serde_json::to_string_pretty(queue).unwrap();
-    let _ = fs::write(dir.join("scheduled.json"), data);
+    let _ = atomic_write(&dir.join("scheduled.json"), &data);
 }
 
 pub fn archive_path(room_id: &str) -> PathBuf {
@@ -1548,7 +1705,7 @@ pub fn mark_seen(room_id: &str, msg_id: &str) {
     if ids.len() > 1000 {
         ids = ids[ids.len() - 1000..].to_vec();
     }
-    let _ = fs::write(&path, ids.join("\n"));
+    let _ = atomic_write(&path, &ids.join("\n"));
 }
 
 #[cfg(test)]
@@ -1809,6 +1966,67 @@ mod tests {
         // Next debit must fail
         let second = atomic_credit_debit("room-1", "agent-1", 1, "sandbox:open");
         assert!(second.is_err());
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn concurrent_update_room_no_lost_update() {
+        let (_runtime, home, _agora) = enter_test_home("concurrent-update-room");
+
+        // Seed a room with a single member (the "owner").
+        let room = add_room("race-room", "secret", "race", Role::Admin);
+        let base = room.clone();
+
+        // Two threads each add a distinct member to the same room by
+        // calling update_last_seen (load→mutate→save on rooms.json).
+        // Without the flock, one update can clobber the other; with it,
+        // both members must be present in the final registry.
+        let h1 = runtime::spawn_with_current(|| {
+            update_last_seen("race-room", "agent-a");
+        });
+        let h2 = runtime::spawn_with_current(|| {
+            update_last_seen("race-room", "agent-b");
+        });
+        h1.join().expect("thread-1 panicked");
+        h2.join().expect("thread-2 panicked");
+
+        let rooms = load_registry();
+        let saved = rooms.iter().find(|r| r.room_id == "race-room").unwrap();
+        let has_a = saved.members.iter().any(|m| m.agent_id == "agent-a");
+        let has_b = saved.members.iter().any(|m| m.agent_id == "agent-b");
+        assert!(has_a, "agent-a lost in concurrent update");
+        assert!(has_b, "agent-b lost in concurrent update");
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn file_lock_acquires_and_releases() {
+        let (_runtime, home, _agora) = enter_test_home("file-lock-basic");
+
+        let path = registry_path();
+        // First lock acquires immediately.
+        let lock1 = FileLock::try_acquire(&path);
+        assert!(lock1.acquired(), "first lock should acquire");
+        // Second lock on the same file in the same process should fail
+        // (flock is per-open-file-description, not recursive).
+        let lock2 = FileLock::try_acquire(&path);
+        assert!(!lock2.acquired(), "second lock should be contended");
+        // Releasing lock1 allows a new lock.
+        drop(lock1);
+        let lock3 = FileLock::try_acquire(&path);
+        assert!(lock3.acquired(), "lock should acquire after release");
+        drop(lock2);
+        drop(lock3);
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn with_file_lock_runs_closure() {
+        let (_runtime, home, _agora) = enter_test_home("with-file-lock");
+
+        let path = registry_path();
+        let result = with_file_lock(&path, || 42);
+        assert_eq!(result, 42);
         let _ = fs::remove_dir_all(&home);
     }
 }

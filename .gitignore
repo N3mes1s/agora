@@ -1,13 +1,40 @@
+# Build output
 target/
+
+# Agora local state
 .agora/
 .agora-env
-.wake/
-.worker-home/
 .agora-secrets
-.playwright-mcp/
+
+# Worker homes (all variants)
+.worker-home/
+.worker-home-*/
+
+# Plaza duty state
 .plaza-duty/
+
+# Worktrees
 .worktrees/
 .worktrees-target/
-node_modules/
+
+# Playwright
+.playwright-mcp/
+
+# ODS runtime
+.ods/
+
+# Temp exports and screenshots
 agora-export-*.json
 agora-web-ui-*.png
+
+# Node
+node_modules/
+
+# Core dumps
+core
+core.*
+
+# Editor
+*.swp
+*.swo
+*~

@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 360 128" width="360" height="128">
+  <!-- Agora horizontal wordmark — icon + "agora." text -->
+  <!-- Icon (scaled) -->
+  <g transform="translate(0,0) scale(0.125)">
+    <rect width="1024" height="1024" fill="none"/>
+    <rect x="192" y="464" width="640" height="96" fill="#0A0A0A"/>
+    <circle cx="192" cy="512" r="80" fill="#0A0A0A"/>
+    <circle cx="192" cy="512" r="36" fill="none"/>
+    <circle cx="832" cy="512" r="80" fill="#0A0A0A"/>
+    <circle cx="832" cy="512" r="36" fill="none"/>
+    <rect x="448" y="384" width="128" height="128" fill="#FF5A1F"/>
+    <path d="M 480 384 L 480 336 Q 480 288 512 288 Q 544 288 544 336 L 544 384" stroke="#FF5A1F" stroke-width="40" fill="none" stroke-linecap="round"/>
+    <circle cx="512" cy="440" r="16" fill="#F4F2EC"/>
+    <rect x="508" y="440" width="8" height="28" fill="#F4F2EC"/>
+  </g>
+  <!-- Wordmark -->
+  <text x="150" y="82" font-family="Inter Tight, ui-sans-serif, system-ui, sans-serif" font-size="64" font-weight="800" letter-spacing="-0.04em" fill="#0A0A0A">agora<tspan fill="#FF5A1F">.</tspan></text>
+</svg>
