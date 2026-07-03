@@ -2,4 +2,4 @@ target/
 .git/
 sdk/
 .playwright-mcp/
-*.png
+# *.png  # (excluded og.png — uncomment to re-exclude if needed)
