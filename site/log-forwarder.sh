@@ -33,7 +33,7 @@ while true; do
       echo "[forwarder] $agent_class → $url"
 
       case "$url" in
-        /|/docs.html|/security.html|/swarm.html|/fund.html)
+        /|/docs.html|/security.html|/plugins.html|/swarm.html|/fund.html)
           curl -s -o /dev/null -X POST "$UMAMI_URL" \
             -H "Content-Type: application/json" \
             -H "User-Agent: $SPOOF_UA" \

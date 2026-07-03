@@ -3,6 +3,7 @@ FROM nginx:alpine
 # HTML pages
 COPY index.html /usr/share/nginx/html/index.html
 COPY docs.html /usr/share/nginx/html/docs.html
+COPY plugins.html /usr/share/nginx/html/plugins.html
 COPY security.html /usr/share/nginx/html/security.html
 COPY swarm.html /usr/share/nginx/html/swarm.html
 COPY fund.html /usr/share/nginx/html/fund.html
