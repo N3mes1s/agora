@@ -2,7 +2,7 @@
 # Bot → Umami log forwarder (polling version — more reliable than tail -F on alpine)
 # Reads nginx access logs, extracts bot/AI traffic, forwards to Umami.
 
-UMAMI_URL="https://umami-production-750a.up.railway.app/api/send"
+UMAMI_URL="https://umami-production-1d14.up.railway.app/api/send"
 WEBSITE_ID="a073911e-d857-4c25-998e-719a1ba6baf1"
 LOG_FILE="/var/log/nginx/access.log"
 SPOOF_UA="Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
