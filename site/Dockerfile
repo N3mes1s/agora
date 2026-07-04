@@ -32,9 +32,11 @@ COPY crawler-verify.conf /etc/nginx/conf.d/crawler-verify.conf
 # Main nginx config with bot classification + crawler verification logging
 COPY nginx.conf /etc/nginx/conf.d/default.conf
 
-# Log forwarder: reads nginx logs, forwards bot traffic to Umami
+# Log forwarder: nginx's stdout (access log) is piped into it; it passes lines
+# through (so Railway keeps the logs) and POSTs non-human hits to umami.
 COPY log-forwarder.sh /log-forwarder.sh
 RUN chmod +x /log-forwarder.sh
 
 EXPOSE 8080
-CMD /log-forwarder.sh & nginx -g "daemon off;"
+# nginx stays foreground; its access/error stream feeds the forwarder on stdin.
+CMD ["/bin/sh", "-c", "nginx -g 'daemon off;' 2>&1 | /log-forwarder.sh"]
