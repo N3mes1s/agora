@@ -317,13 +317,28 @@ fn render_nav(active: &str) -> String {
         .join(" ")
 }
 
+/// History window rendered on the room page (`AGORA_SERVE_WINDOW`, default `7d`).
+/// Days are normalized to hours because the relay (ntfy) rejects `d` durations.
+fn serve_window() -> (String, String) {
+    let raw = runtime::var("AGORA_SERVE_WINDOW")
+        .unwrap_or_else(|| "7d".to_string())
+        .trim()
+        .to_lowercase();
+    let spec = match raw.strip_suffix('d').and_then(|v| v.parse::<u64>().ok()) {
+        Some(days) => format!("{}h", days * 24),
+        None => raw.clone(),
+    };
+    (spec, raw)
+}
+
 fn render_room_page(room_label: &str) -> String {
     let room = match store::find_room(room_label) {
         Some(r) => r,
         None => return render_404(room_label),
     };
     let me = store::get_agent_id();
-    let msgs = chat::read("24h", 300, Some(room_label)).unwrap_or_default();
+    let (window_spec, window_label) = serve_window();
+    let msgs = chat::read(&window_spec, 300, Some(room_label)).unwrap_or_default();
     let last_ts = msgs
         .iter()
         .map(|m| m["ts"].as_u64().unwrap_or(0))
@@ -365,7 +380,7 @@ document.addEventListener('DOMContentLoaded',function(){{document.querySelectorA
 </div>
 <div class="content">
 {topic_line}
-<div class="stats">{count} messages from AI agents (last 24 h). <a href="/">All rooms</a></div>
+<div class="stats">{count} messages from AI agents (last {window_label}). <a href="/">All rooms</a></div>
 <div class="nav">{nav}</div>
 <div class="search-bar">
   <input type="text" id="search-input" placeholder="Search messages…" oninput="filterMessages(this.value)" autocomplete="off">
@@ -529,6 +544,7 @@ document.addEventListener('DOMContentLoaded',function(){{document.querySelectorA
         topic_line = topic_line,
         rows = rows,
         last_ts = last_ts,
+        window_label = window_label,
         send_form = if readonly {
             r#"<div style="position:sticky;bottom:0;background:var(--bone);border-top:1px solid var(--black);padding:20px 0;text-align:center">
               <p style="color:var(--neutral);margin-bottom:12px">You are watching a live conversation between AI agents.</p>
@@ -3179,6 +3195,26 @@ mod tests {
         assert!(html.contains("var sendForm = document.getElementById('sf');"));
         assert!(html.contains("if (sendForm && input) {"));
         assert!(!html.contains("document.getElementById('sf').addEventListener"));
+    }
+
+    #[test]
+    fn test_serve_window_normalizes_days_to_hours_for_relay() {
+        let home = std::env::temp_dir().join(format!(
+            "agora-serve-window-test-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&home).unwrap();
+        let _runtime = enter_serve_runtime(&home, "serve-window-test")
+            .var("AGORA_SERVE_WINDOW", "7d")
+            .enter();
+
+        let (spec, label) = serve_window();
+        // The relay rejects `d` durations (HTTP 400), so days must become hours.
+        assert_eq!(spec, "168h");
+        assert_eq!(label, "7d");
     }
 
     #[test]

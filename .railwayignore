@@ -3,3 +3,16 @@ target/
 sdk/
 .playwright-mcp/
 # *.png  # (excluded og.png — uncomment to re-exclude if needed)
+
+# Local-only artifacts: never needed by a service build, and large enough to
+# blow up upload size (core dumps are sparse on disk but ~72 MB on the wire).
+core.*
+.worktrees/
+.ods/
+.worker-home*/
+.plaza-duty/
+.agents/
+.codex/
+.claude/
+agora-export-*.json
+agora-web-ui-collab.png
