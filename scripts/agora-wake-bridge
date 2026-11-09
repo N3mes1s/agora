@@ -1,0 +1,159 @@
+#!/usr/bin/env python3
+"""agora-wake-bridge: wake codex agents (and omp agents started before the agora-wake extension) when an
+agora message addressed to them arrives, by typing it into their tmux pane once the pane is idle.
+
+Claude Code agents are woken natively by the `agora wait` Stop hook, new omp sessions by the omp extension
+~/.omp/agent/extensions/agora-wake.ts (which writes ~/.cache/agora-wait/<id>.ext; such panes are skipped).
+
+Per pane: identity = AGORA_AGENT_ID found in the pane process environment, else the tmux-derived agora id
+<host>-<session>-w<index>; extra names from ~/.config/agora-wake/aliases.json {"main:5": ["worker-7f3a91c2"]}.
+A waiter `agora wait --for <id> --alias ... --parent <pane pid>` runs per pane; when it exits 2 the framed
+message is typed into the pane as one line + Enter, as soon as the pane is idle and its input box is empty
+(at most MAX_HOLD later it is typed anyway: codex and omp queue input during a turn), then the waiter re-arms.
+Runs as a systemd user service (agora-wake-bridge.service). Log: ~/.cache/agora-wait/bridge.log.
+"""
+import json
+import os
+import re
+import socket
+import subprocess
+import sys
+import time
+
+HOME = os.path.expanduser("~")
+WAIT = "agora"
+STATE = os.path.join(HOME, ".cache/agora-wait")
+ALIASES = os.path.join(HOME, ".config/agora-wake/aliases.json")
+LOG = os.path.join(STATE, "bridge.log")
+HARNESSES = set(os.environ.get("AGORA_BRIDGE_HARNESSES", "codex,omp").split(","))
+SCAN_S = 20
+MAX_HOLD = 15 * 60
+BUSY = re.compile(r"esc to interrupt|Working \(|^\s*[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]\s|ⓘ waiting on", re.M)
+CODEX_EMPTY = "Ask Codex to do anything"
+
+
+def log(msg):
+    os.makedirs(STATE, exist_ok=True)
+    with open(LOG, "a") as f:
+        f.write(time.strftime("%Y-%m-%dT%H:%M:%SZ ", time.gmtime()) + msg + "\n")
+
+
+def tmux(*args):
+    r = subprocess.run(["tmux", *args], capture_output=True, text=True, timeout=15)
+    return r.stdout if r.returncode == 0 else ""
+
+
+def env_id(pid):
+    for p in [pid] + children(pid):
+        try:
+            for kv in open(f"/proc/{p}/environ", "rb").read().split(b"\0"):
+                if kv.startswith(b"AGORA_AGENT_ID="):
+                    return kv.split(b"=", 1)[1].decode()
+        except OSError:
+            pass
+    return ""
+
+
+def children(pid):
+    try:
+        return [int(x) for x in open(f"/proc/{pid}/task/{pid}/children").read().split()]
+    except OSError:
+        return []
+
+
+def alive(pid):
+    return os.path.exists(f"/proc/{pid}")
+
+
+def load_aliases():
+    try:
+        return json.load(open(ALIASES))
+    except (OSError, ValueError):
+        return {}
+
+
+def pane_idle(target, harness):
+    screen = tmux("capture-pane", "-p", "-t", target)
+    tail = "\n".join([ln for ln in screen.splitlines() if ln.strip()][-8:])
+    if BUSY.search(tail):
+        return False
+    if harness == "codex" and CODEX_EMPTY not in tail:
+        return False  # the operator (or someone) is typing in the input box
+    return True
+
+
+def deliver(target, text):
+    line = " | ".join(x.strip() for x in text.strip().splitlines() if x.strip())
+    line = "[agora wake] " + line
+    tmux("send-keys", "-t", target, "-l", line[:4000])
+    time.sleep(0.3)
+    tmux("send-keys", "-t", target, "Enter")
+
+
+def main():
+    host = socket.gethostname().split(".")[0]
+    waiters = {}   # pane_id -> dict(proc, target, id, harness, started)
+    pending = {}   # pane_id -> dict(text, since, target, harness)
+    log("bridge started")
+    while True:
+        aliases = load_aliases()
+        seen_panes = set()
+        out = tmux("list-panes", "-a", "-F",
+                   "#{session_name}\t#{window_index}\t#{pane_id}\t#{pane_current_command}\t#{pane_pid}")
+        for ln in out.splitlines():
+            try:
+                sess, win, pane, cmd, ppid = ln.split("\t")
+            except ValueError:
+                continue
+            if cmd not in HARNESSES:
+                continue
+            ppid = int(ppid)
+            target = f"{sess}:{win}"
+            aid = env_id(ppid) or f"{host}-{sess}-w{win}"
+            safe = re.sub(r"[^A-Za-z0-9@._-]", "_", aid)
+            ext = os.path.join(STATE, f"{safe}.ext")
+            try:
+                if cmd == "omp" and alive(int(open(ext).read().strip())):
+                    continue  # the omp extension handles this agent natively
+            except (OSError, ValueError):
+                pass
+            seen_panes.add(pane)
+            w = waiters.get(pane)
+            if w and w["proc"].poll() is None:
+                continue
+            if w:  # waiter finished
+                rc = w["proc"].returncode
+                err = w["proc"].stderr.read() if w["proc"].stderr else ""
+                if rc == 2 and err.strip():
+                    pending[pane] = {"text": err, "since": time.time(), "target": target, "harness": cmd}
+                    log(f"{target} {aid}: message pending ({len(err)} chars)")
+                waiters.pop(pane, None)
+            if pane in pending:
+                continue  # re-arm after delivery
+            args = [WAIT, "wait", "--for", aid, "--parent", str(ppid)]
+            for a in aliases.get(target, []) + aliases.get(aid, []):
+                args += ["--alias", a]
+            proc = subprocess.Popen(args, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                    stderr=subprocess.PIPE, text=True)
+            waiters[pane] = {"proc": proc, "target": target, "id": aid, "harness": cmd, "started": time.time()}
+            log(f"{target} {aid}: waiter {proc.pid} ({cmd})")
+        for pane, p in list(pending.items()):
+            if pane not in seen_panes:
+                pending.pop(pane)
+                continue
+            if pane_idle(p["target"], p["harness"]) or time.time() - p["since"] > MAX_HOLD:
+                deliver(p["target"], p["text"])
+                log(f"{p['target']}: delivered")
+                pending.pop(pane)
+        for pane in list(waiters):
+            if pane not in seen_panes and waiters[pane]["proc"].poll() is None:
+                waiters[pane]["proc"].terminate()
+                waiters.pop(pane)
+        time.sleep(SCAN_S if not pending else 5)
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except KeyboardInterrupt:
+        sys.exit(0)

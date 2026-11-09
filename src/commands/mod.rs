@@ -1,3 +1,4 @@
+pub mod hooks;
 pub mod dm;
 pub mod lease;
 pub mod plugin;

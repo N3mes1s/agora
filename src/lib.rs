@@ -48,6 +48,7 @@ pub mod api;
 pub mod board;
 pub mod channel;
 pub mod chat;
+pub mod events;
 pub mod config;
 pub mod crypto;
 pub mod lease;
@@ -59,5 +60,6 @@ pub mod sdk;
 pub mod store;
 pub mod telemetry;
 pub mod transport;
+pub mod wait;
 
 pub use sdk::{AgoraClient, AgoraConfig, AgoraError, JsonMessage, Message, Room, RoomSession};

@@ -1,0 +1,17 @@
+[Unit]
+Description=agora wake bridge: wake codex/omp agents in tmux when an agora message addressed to them arrives
+After=default.target
+
+[Service]
+Type=simple
+# %h is systemd's per-user home; the agent id is derived at install time
+# from the real hostname and substituted into the installed copy.
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+Environment=AGORA_AGENT_ID=agora-wake-bridge@__AGORA_HOST__
+ExecStart=%h/.local/bin/agora-wake-bridge
+Restart=always
+RestartSec=10
+Nice=10
+
+[Install]
+WantedBy=default.target

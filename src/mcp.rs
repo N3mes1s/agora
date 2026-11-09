@@ -20,7 +20,7 @@ use std::io::{self, BufRead, Write};
 use std::sync::Arc;
 
 use crate::{chat, store};
-use agora::{channel, lease, plugin, proposal, runtime};
+use agora::{channel, events, lease, plugin, proposal, runtime};
 
 const SERVER_NAME: &str = "agora";
 const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -50,6 +50,10 @@ struct Session {
     pushing: bool,
     /// Relay time from which messages are pushed (server start).
     started_at: u64,
+    /// Poll rate limiting (MCP Events).
+    poll_limiter: events::PollLimiter,
+    /// Live `events/stream` subscriptions: request id → stream.
+    streams: Vec<(Value, Arc<events::StreamHandle>)>,
 }
 
 impl Session {
@@ -59,6 +63,8 @@ impl Session {
             client_declares_channel: false,
             pushing: false,
             started_at: runtime::unix_now(),
+            poll_limiter: events::PollLimiter::default(),
+            streams: Vec::new(),
         }
     }
 
@@ -152,6 +158,39 @@ fn handle_request(req: &Value, session: &mut Session) -> Option<Value> {
         }
         "tools/list" => handle_tools_list().map_err(|msg| (-32603, msg)),
         "tools/call" => handle_tools_call(req).map_err(|msg| (-32602, msg)),
+        "events/list" => Ok(events::list()),
+        "events/poll" => events::poll(&req["params"], &session.poll_limiter)
+            .map_err(|(code, msg, _)| (code, msg)),
+        "events/stream" => {
+            match events::stream_start(&req["params"]) {
+                Ok((since, peek)) => {
+                    let handle = events::start_stream(
+                        id.clone().unwrap_or(Value::Null),
+                        since,
+                        peek,
+                        Arc::new(write_message),
+                    );
+                    session
+                        .streams
+                        .push((id.clone().unwrap_or(Value::Null), handle.clone()));
+                    // The stream result frame arrives when it ends
+                    // (stdio: the client cancels with notifications/cancelled).
+                    return None;
+                }
+                Err((code, msg, _)) => Err((code, msg)),
+            }
+        }
+        "notifications/cancelled" => {
+            let cancelled_id = &req["params"]["requestId"];
+            session.streams.retain(|(rid, handle)| {
+                if rid == cancelled_id {
+                    handle.cancel();
+                    return false;
+                }
+                true
+            });
+            return None;
+        }
         "ping" => Ok(json!({})),
         _ => Err((-32601, format!("Method not found: {method}"))),
     };
@@ -195,7 +234,8 @@ fn handle_initialize(req: &Value, session: &mut Session) -> Result<Value, String
     let mut result = json!({
         "protocolVersion": version,
         "capabilities": {
-            "tools": {}
+            "tools": {},
+            "events": {},
         },
         "serverInfo": {
             "name": SERVER_NAME,
@@ -1579,11 +1619,13 @@ mod tests {
     }
 
     #[test]
-    fn plain_server_declares_no_channel() {
+    fn plain_server_declares_no_channel_but_events() {
         let mut session = Session::new(channel::Mode::Off);
         let result = initialize(&mut session, "2025-11-25", json!({}));
         assert_eq!(result["protocolVersion"], "2025-11-25");
-        assert_eq!(result["capabilities"], json!({"tools": {}}));
+        // M4: the events capability is always advertised (poll+push for
+        // agora.addressed); no channel, no instructions, in plain mode.
+        assert_eq!(result["capabilities"], json!({"tools": {}, "events": {}}));
         assert!(result.get("instructions").is_none());
     }
 

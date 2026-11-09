@@ -42,7 +42,7 @@ fn ensure_dir(path: &PathBuf) {
 
 /// A file name for an agent id, one per id: `[A-Za-z0-9@._-]` kept, every other byte (and a leading dot)
 /// percent-encoded, so `a/b`, `a_b` and `.a` never share state.
-fn agent_key(agent_id: &str) -> String {
+pub(crate) fn agent_key(agent_id: &str) -> String {
     if agent_id.is_empty() {
         return "%".to_string();
     }

@@ -110,6 +110,13 @@ pub enum Kind {
     Proposal(Vec<String>),
     /// A HOLD on a proposal this agent made.
     Hold,
+    /// M4: a task claim/announcement whose task is assigned to this agent.
+    TaskAssigned,
+    /// M4: another agent took over the lease backing one of my task claims.
+    LeaseConflict,
+    /// M4: an ordinary room message at notification level `all` (not
+    /// addressed; the agent opted into every message in this room).
+    RoomMessage,
 }
 
 impl Kind {
@@ -119,7 +126,22 @@ impl Kind {
             Kind::Mention => "mention",
             Kind::Proposal(_) => "proposal",
             Kind::Hold => "hold",
+            Kind::TaskAssigned => "task_assigned",
+            Kind::LeaseConflict => "lease_conflict",
+            Kind::RoomMessage => "room_message",
         }
+    }
+}
+
+/// The channel-push view of a wait classification.
+pub fn addressed_kind(addressed: &crate::wait::Addressed) -> Kind {
+    match addressed {
+        crate::wait::Addressed::Channel(kind) => kind.clone(),
+        crate::wait::Addressed::Extra(extra) => match extra {
+            crate::wait::ExtraKind::TaskAssigned => Kind::TaskAssigned,
+            crate::wait::ExtraKind::LeaseConflict => Kind::LeaseConflict,
+            crate::wait::ExtraKind::RoomMessage => Kind::RoomMessage,
+        },
     }
 }
 
@@ -370,6 +392,11 @@ pub fn render(room: &store::RoomEntry, env: &Value, kind: &Kind) -> Value {
                 .join(", ")
         ),
         Kind::Hold => format!("HOLD on your proposal in room {label}"),
+        Kind::TaskAssigned => format!("Task assigned to you (announced in {label})"),
+        Kind::LeaseConflict => format!(
+            "Another agent took over the lease of a task you claimed (room {label})"
+        ),
+        Kind::RoomMessage => format!("Message in room {label} (you opted into all messages)"),
     };
     let text = env["text"].as_str().unwrap_or("");
     let total = text.chars().count();
@@ -525,10 +552,21 @@ impl Pusher {
         env: &Value,
         emit: &dyn Fn(&Value),
     ) -> (Option<Kind>, Outcome) {
-        let kind = match classify(room, env, &self.me) {
-            Ok(kind) => kind,
+        // One pipeline with `agora wait` (lead ruling 02bc3e): the
+        // notification level and the M4 kinds (task_assigned,
+        // lease_conflict, room_message) apply here too. The seam returns
+        // `mentions` today, so pre-M2 behavior is unchanged except for
+        // DM/task/lease-conflict pushes the old classify could not see.
+        let addressed = match crate::wait::classify_for_wait(
+            room,
+            env,
+            &self.me,
+            &[],
+        ) {
+            Ok(addressed) => addressed,
             Err(outcome) => return (None, outcome),
         };
+        let kind = addressed_kind(&addressed);
         let id = env["id"].as_str().unwrap_or("");
         if id.is_empty() || id == "?" {
             return (Some(kind), Outcome::NoId);

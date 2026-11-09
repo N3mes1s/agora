@@ -133,6 +133,32 @@ enum Commands {
         tail: Option<usize>,
     },
 
+    /// Block until a message addressed to this agent arrives (hook-friendly;
+    /// asyncRewake hands stderr to the model on exit 2). Without --for it
+    /// runs the Claude Code Stop-hook guards and drains the hook JSON on
+    /// stdin.
+    Wait {
+        /// Wait on behalf of this agent id (skips the hook guards)
+        #[arg(long = "for", value_name = "ID")]
+        for_id: Option<String>,
+        /// Extra name that counts as an @mention (repeatable)
+        #[arg(long = "alias")]
+        aliases: Vec<String>,
+        /// Exit when this process is gone
+        #[arg(long)]
+        parent: Option<u32>,
+        /// Bound the wait, e.g. 30m (default: 20h max life)
+        #[arg(long)]
+        timeout: Option<String>,
+    },
+
+    /// Install or remove the agora wake adapters for a harness (claude, omp,
+    /// codex); `status` shows what is installed.
+    Hooks {
+        #[command(subcommand)]
+        action: HooksAction,
+    },
+
     /// Check for new messages (hook-friendly)
     Check {
         /// Exit code 2 on new messages (for asyncRewake)
@@ -903,6 +929,39 @@ enum DmAction {
     List,
 }
 
+#[derive(Subcommand, Debug, Clone, PartialEq)]
+enum HooksAction {
+    /// Install the wake adapter for a harness
+    Install {
+        /// claude (Stop hook), omp (extension), codex (tmux wake bridge)
+        #[arg(value_enum)]
+        harness: Harness,
+        /// Manage the systemd user unit too (lead ruling a95539: never by
+        /// default; requires HOME = the passwd home and an XDG_RUNTIME_DIR
+        /// of the same uid, else the exact commands are printed instead)
+        #[arg(long)]
+        systemd: bool,
+    },
+    /// Remove the agora wake adapter for a harness
+    Remove {
+        #[arg(value_enum)]
+        harness: Harness,
+        /// Stop/disable the systemd user unit too (same guards as install)
+        #[arg(long)]
+        systemd: bool,
+    },
+    /// Show what is installed per harness, and any stopgap left to migrate
+    Status,
+}
+
+#[derive(clap::ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
+enum Harness {
+    Claude,
+    Omp,
+    Codex,
+}
+
+
 /// Parse a time argument: "HH:MM" (today), "1h" (relative), or unix timestamp.
 fn parse_time_arg(s: &str) -> Option<u64> {
     let now = std::time::SystemTime::now()
@@ -928,6 +987,19 @@ fn parse_time_arg(s: &str) -> Option<u64> {
     }
     // Raw unix timestamp
     s.parse::<u64>().ok()
+}
+
+/// Parse a duration argument: "90s", "30m", "2h", "1d".
+fn parse_duration_arg(s: &str) -> Option<std::time::Duration> {
+    let (num, unit) = s.split_at(s.len().checked_sub(1)?);
+    let n: u64 = num.parse().ok()?;
+    match unit {
+        "s" => Some(std::time::Duration::from_secs(n)),
+        "m" => Some(std::time::Duration::from_secs(n * 60)),
+        "h" => Some(std::time::Duration::from_secs(n * 3600)),
+        "d" => Some(std::time::Duration::from_secs(n * 86400)),
+        _ => None,
+    }
 }
 
 fn ts(epoch: u64) -> String {
@@ -1694,6 +1766,29 @@ fn run(cli: Cli) {
 
         Commands::Read { tail } => {
             if let Err(e) = commands::read::print(room, tail) {
+                eprintln!("  Error: {e}");
+                process::exit(1);
+            }
+        }
+
+        Commands::Wait {
+            for_id,
+            aliases,
+            parent,
+            timeout,
+        } => {
+            let timeout = timeout.as_deref().and_then(parse_duration_arg);
+            let code = agora::wait::run(agora::wait::WaitArgs {
+                for_id,
+                aliases,
+                parent,
+                timeout,
+            });
+            process::exit(code);
+        }
+
+        Commands::Hooks { action } => {
+            if let Err(e) = commands::hooks::run(action) {
                 eprintln!("  Error: {e}");
                 process::exit(1);
             }
@@ -3410,7 +3505,10 @@ fn run(cli: Cli) {
             println!("    agora accept <agr_...>         — join a room from an invite");
             println!("    agora send \"hello\"             — post to the active room");
             println!(
-                "    agora check --wake             — hook-friendly new-message check (exit 2)"
+                "    agora wait                     — block until something addressed to you arrives (exit 2)"
+            );
+            println!(
+                "    agora hooks install --harness <claude|omp|codex> — wake your idle session on it"
             );
         }
 
