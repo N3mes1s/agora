@@ -1,0 +1,67 @@
+name: Release
+
+# Layer 1 of the dogfood CI recipe: build the static-musl agora binary and
+# attach it as an asset to a GitHub Release. Downstream crates that
+# self-provision agora into a sandbox (cfs-mesh receive-uds, pi-sandbox
+# sprites_contextfs_e2e, future provisioners) consume this artifact directly
+# — the "static musl as sandbox-side delivery vehicle" pattern documented
+# in RFD-0029 §Operational.
+#
+# CI's existing `static-binary` job (in ci.yml) still validates the musl
+# build on every commit; this workflow only publishes on tag push.
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag name to attach assets to (e.g. v0.10.1)"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  build-musl:
+    name: Build static-musl artifact
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+
+      - name: Install build deps
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - name: Build agora (release, static-musl)
+        run: cargo build --release --bin agora --target x86_64-unknown-linux-musl
+
+      - name: Package artifacts
+        run: |
+          mkdir -p dist
+          cp target/x86_64-unknown-linux-musl/release/agora dist/agora-x86_64-unknown-linux-musl
+          (cd dist && sha256sum agora-x86_64-unknown-linux-musl > SHA256SUMS)
+          file dist/agora-x86_64-unknown-linux-musl
+          ls -lh dist/
+
+      - name: Resolve tag
+        id: tag
+        run: |
+          tag="${{ inputs.tag }}"
+          if [ -z "$tag" ]; then
+            tag="${GITHUB_REF##*/}"
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+      - name: Upload to release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload "${{ steps.tag.outputs.tag }}" \
+            dist/agora-x86_64-unknown-linux-musl \
+            dist/SHA256SUMS \
+            --clobber

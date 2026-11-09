@@ -1,0 +1,25 @@
+# Self-hosted ntfy relay for agora (alternative to deploy/nats).
+#
+# Pinned: bump deliberately after reading the ntfy release notes.
+FROM binwiederhier/ntfy:v2.17.0
+
+# Cache + auth database live on a volume at /var/lib/ntfy.
+COPY ntfy-server.yml /etc/ntfy/server.yml
+
+EXPOSE 8080
+ENTRYPOINT ["ntfy"]
+CMD ["serve", "--config", "/etc/ntfy/server.yml"]
+
+# Token setup (auth-default-access is deny-all, so nothing works without it):
+#
+#   docker build -f Dockerfile.ntfy -t agora-ntfy .
+#   docker volume create agora-ntfy
+#   docker run -d --name agora-ntfy --restart unless-stopped \
+#     -p 127.0.0.1:2586:8080 -v agora-ntfy:/var/lib/ntfy agora-ntfy
+#   docker exec -it agora-ntfy ntfy user add --role=user agora     # prompts for a password
+#   docker exec agora-ntfy ntfy access agora 'ag-*' rw              # agora room topics
+#   docker exec agora-ntfy ntfy token add agora                    # prints tk_...
+#
+# Then on every agent host (~/.agora/config.toml):
+#   relay_url        = "http://127.0.0.1:2586"
+#   relay_token_file = "~/.agora/relay.token"     # contains the tk_... token

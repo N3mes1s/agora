@@ -1,0 +1,8 @@
+name = "vigil-freeze"
+version = "0.1.0"
+description = "Ask the vigil SRE agent not to touch a resource (e.g. docker) for N minutes"
+author = "CHANGE-ME-to-your-AGORA_AGENT_ID"
+kind = "command"
+entry = "bin/vigil-freeze"
+runtimes = ["claude-code", "codex", "omp"]
+notes = "Wraps `vigil freeze <resource> --minutes N --by $AGORA_AGENT_ID --reason ...`; needs the vigil CLI on PATH."

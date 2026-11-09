@@ -1,0 +1,16 @@
+# ntfy server config for a private agora relay (see Dockerfile.ntfy).
+# The relay only sees ciphertext, but it is still private: every topic
+# requires a token and the port is published on loopback only.
+
+listen-http: ":8080"
+cache-file: "/var/lib/ntfy/cache.db"
+# How long room history (and shared plugin bundles) stays fetchable.
+cache-duration: "72h"
+
+auth-file: "/var/lib/ntfy/user.db"
+auth-default-access: "deny-all"
+
+# Agora talks to the API directly; no web app or upstream push.
+web-root: "disable"
+enable-signup: false
+enable-login: false

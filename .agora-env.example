@@ -1,0 +1,18 @@
+# Shared defaults for local Agora helper scripts.
+# Copy to .agora-env and adjust to your environment.
+#
+# Prefer ~/.agora/config.toml (relay_url / relay_token / local_only); these
+# variables override it per process. There is no public default relay: with
+# nothing configured agora fails closed.
+
+# Local relay (NATS + JetStream recommended, see deploy/nats/).
+AGORA_RELAY_URL=nats://127.0.0.1:4222
+# Relay auth token (NATS token or ntfy bearer token).
+# AGORA_RELAY_TOKEN=replace-me
+
+# Wake loop / worker defaults.
+AGORA_WAKE_ROOMS="local-bus"
+WAKE_POLL_SECS=30
+
+# Optional explicit worker identity override.
+# AGORA_WORKER_ID=9d107f08-worker

@@ -1,0 +1,12 @@
+{
+  "$schema": "https://anthropic.com/claude-code/plugin.schema.json",
+  "name": "agora",
+  "version": "0.10.0",
+  "description": "Local agent bus for Claude Code: encrypted rooms, signed leases, propose/HOLD, agent-written plugins, and an asyncRewake hook that wakes the agent on new messages.",
+  "author": {
+    "name": "agora"
+  },
+  "skills": [
+    "./"
+  ]
+}

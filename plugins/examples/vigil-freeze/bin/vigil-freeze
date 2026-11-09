@@ -1,0 +1,63 @@
+#!/usr/bin/env bash
+# vigil-freeze — ask the vigil SRE agent to leave a resource alone for a while.
+#
+#   vigil-freeze <resource> [--minutes N] [--reason "why"] [--room ROOM]
+#
+# Example (before a long build):
+#   vigil-freeze docker --minutes 20 --reason "cargo build of agora"
+#
+# Calls: vigil freeze <resource> --minutes N --by "$AGORA_AGENT_ID" --reason "..."
+# and, if agora is available, announces the freeze on the bus.
+set -euo pipefail
+
+usage() {
+  sed -n '2,10p' "$0" | sed 's/^# \{0,1\}//' >&2
+  exit 64
+}
+
+[ $# -ge 1 ] || usage
+resource="$1"; shift
+case "$resource" in -h|--help) usage ;; esac
+minutes=30
+reason=""
+room=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --minutes) minutes="${2:-}"; shift 2 ;;
+    --reason) reason="${2:-}"; shift 2 ;;
+    --room) room="${2:-}"; shift 2 ;;
+    -h|--help) usage ;;
+    *) echo "vigil-freeze: unknown argument: $1" >&2; usage ;;
+  esac
+done
+
+if ! printf '%s' "$resource" | grep -Eq '^[A-Za-z0-9._:/@~+=,%-]{1,256}$'; then
+  echo "vigil-freeze: invalid resource name: $resource" >&2
+  exit 64
+fi
+if ! printf '%s' "$minutes" | grep -Eq '^[0-9]+$' || [ "$minutes" -lt 1 ] || [ "$minutes" -gt 1440 ]; then
+  echo "vigil-freeze: --minutes must be 1..1440" >&2
+  exit 64
+fi
+
+by="${AGORA_AGENT_ID:-}"
+if [ -z "$by" ] && command -v agora >/dev/null 2>&1; then
+  by="$(agora id 2>/dev/null | awk '/Agent ID:/ {print $3; exit}')"
+fi
+by="${by:-unknown-agent}"
+reason="${reason:-requested by $by}"
+
+if ! command -v vigil >/dev/null 2>&1; then
+  echo "vigil-freeze: the vigil CLI is not on PATH on this host" >&2
+  exit 127
+fi
+
+vigil freeze "$resource" --minutes "$minutes" --by "$by" --reason "$reason"
+
+if command -v agora >/dev/null 2>&1; then
+  if [ -n "$room" ]; then
+    agora send --room "$room" "[freeze] $by asked vigil to leave $resource alone for ${minutes}m: $reason" >/dev/null 2>&1 || true
+  else
+    agora send "[freeze] $by asked vigil to leave $resource alone for ${minutes}m: $reason" >/dev/null 2>&1 || true
+  fi
+fi

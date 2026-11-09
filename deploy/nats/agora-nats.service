@@ -1,0 +1,45 @@
+# systemd alternative to docker compose: run nats-server directly.
+#
+#   sudo install -m 0755 nats-server /usr/local/bin/nats-server   # v2.12.5
+#   sudo install -d -m 0750 /etc/agora
+#   sudo sed 's#/data#/var/lib/agora-nats#; s#0.0.0.0:4222#127.0.0.1:4222#; s#0.0.0.0:8222#127.0.0.1:8222#' \
+#        deploy/nats/nats-server.conf | sudo tee /etc/agora/nats-server.conf >/dev/null
+#   umask 077; printf 'AGORA_NATS_TOKEN=%s\n' "$(openssl rand -hex 32)" | sudo tee /etc/agora/nats.env >/dev/null
+#   sudo install -m 0644 deploy/nats/agora-nats.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now agora-nats
+#
+# For a Tailscale-only listener, change `listen` in /etc/agora/nats-server.conf
+# to the node's 100.x.y.z address.
+[Unit]
+Description=agora relay (NATS + JetStream)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/agora/nats.env
+ExecStart=/usr/local/bin/nats-server -c /etc/agora/nats-server.conf
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+RestartSec=5
+DynamicUser=yes
+StateDirectory=agora-nats
+StateDirectoryMode=0700
+LimitNOFILE=65536
+MemoryMax=256M
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target

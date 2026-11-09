@@ -1,0 +1,210 @@
+"use strict";
+/**
+ * Tests for agora-chat SDK.
+ *
+ * These tests exercise the direct TypeScript SDK core. They intentionally set
+ * AGORA_BIN to an invalid path so regressions back to CLI shell-out fail.
+ */
+Object.defineProperty(exports, "__esModule", { value: true });
+const assert_1 = require("assert");
+const fs_1 = require("fs");
+const os_1 = require("os");
+const path_1 = require("path");
+const index_1 = require("../index");
+const runner_1 = require("../runner");
+// ─── Unit tests: parsers ─────────────────────────────────────────────────────
+function testParseMessages() {
+    const raw = `
+  [05:29:35] [3fe144] 9d107f-cc: Hello world
+  [05:30:01] [abcdef] agent2: Another message
+  `;
+    const msgs = (0, index_1.parseMessages)(raw);
+    assert_1.strict.equal(msgs.length, 2, "should parse 2 messages");
+    assert_1.strict.equal(msgs[0].agentId, "9d107f-cc");
+    assert_1.strict.equal(msgs[0].content, "Hello world");
+    assert_1.strict.equal(msgs[0].id, "3fe144");
+    assert_1.strict.equal(msgs[1].agentId, "agent2");
+    console.log("  ✓ parseMessages");
+}
+function testParseRooms() {
+    const raw = `
+  Label                Room ID                Active   Joined
+  ──────────────────── ────────────────────── ──────── ────────────────────
+  collab               cc-30f6ed86f702         *       2026-04-06 05:34
+  test-room            cc-aabbccdd1122                 2026-04-05 10:00
+  `;
+    const rooms = (0, index_1.parseRooms)(raw);
+    assert_1.strict.equal(rooms.length, 2, "should parse 2 rooms");
+    assert_1.strict.equal(rooms[0].label, "collab");
+    assert_1.strict.equal(rooms[0].roomId, "cc-30f6ed86f702");
+    assert_1.strict.equal(rooms[0].active, true);
+    assert_1.strict.equal(rooms[1].label, "test-room");
+    assert_1.strict.equal(rooms[1].active, false);
+    console.log("  ✓ parseRooms");
+}
+function testParseMembers() {
+    const raw = `
+  Name                 Agent        Role     Status     Last seen
+  ──────────────────── ──────────── ──────── ────────── ────────────────
+                       01XCfA8v     Member   online     42s ago (you)
+                       9d107f-cc    Admin    offline    5m ago
+  `;
+    const members = (0, index_1.parseMembers)(raw);
+    assert_1.strict.equal(members.length, 2, "should parse 2 members");
+    assert_1.strict.equal(members[0].agentId, "01XCfA8v");
+    assert_1.strict.equal(members[0].role, "Member");
+    assert_1.strict.equal(members[0].status, "online");
+    assert_1.strict.equal(members[1].agentId, "9d107f-cc");
+    assert_1.strict.equal(members[1].role, "Admin");
+    assert_1.strict.equal(members[1].status, "offline");
+    console.log("  ✓ parseMembers");
+}
+function testParseTasks() {
+    const raw = `
+  [abc123] (open) Build a Python SDK
+  [def456] (claimed by agent1) Create npm package
+  [ghi789] (done) Add webhooks
+  `;
+    const tasks = (0, index_1.parseTasks)(raw);
+    assert_1.strict.equal(tasks.length, 3, "should parse 3 tasks");
+    assert_1.strict.equal(tasks[0].id, "abc123");
+    assert_1.strict.equal(tasks[0].status, "open");
+    assert_1.strict.equal(tasks[1].status, "claimed");
+    assert_1.strict.equal(tasks[1].claimedBy, "agent1");
+    assert_1.strict.equal(tasks[2].status, "done");
+    console.log("  ✓ parseTasks");
+}
+function testStripAnsi() {
+    const withAnsi = "\x1B[92monline\x1B[0m";
+    assert_1.strict.equal((0, runner_1.stripAnsi)(withAnsi), "online");
+    console.log("  ✓ stripAnsi");
+}
+function testParseJsonMessages() {
+    const messages = (0, index_1.parseMessages)(`
+  [05:29:35] [3fe144] bridge-agent: {"kind":"req","id":"42","body":"payload"}
+  [05:30:01] [abcdef] human: plain chat
+  `);
+    const frames = (0, index_1.parseJsonMessages)(messages);
+    assert_1.strict.equal(frames.length, 1, "should skip non-JSON messages");
+    assert_1.strict.equal(frames[0].agentId, "bridge-agent");
+    assert_1.strict.equal(frames[0].value.kind, "req");
+    assert_1.strict.equal(frames[0].value.id, "42");
+    assert_1.strict.equal(frames[0].value.body, "payload");
+    console.log("  ✓ parseJsonMessages");
+}
+function testBuildEnv() {
+    const env = (0, runner_1.buildEnv)("/tmp/agora-js-home", "agent-js", "memory://js-sdk", "relay-token", "https://mirror.example", {
+        natsStream: "AGORA_PROD",
+        natsSubjectPrefix: "prod.agora",
+        natsCreateStream: false,
+        natsStorage: "memory",
+        natsMaxBytes: 1048576,
+        natsMaxAge: "7d",
+    });
+    assert_1.strict.equal(env.HOME, "/tmp/agora-js-home");
+    assert_1.strict.equal(env.AGORA_HOME, "/tmp/agora-js-home");
+    assert_1.strict.equal(env.AGORA_AGENT_ID, "agent-js");
+    assert_1.strict.equal(env.AGORA_RELAY_URL, "memory://js-sdk");
+    assert_1.strict.equal(env.AGORA_RELAY_TOKEN, "relay-token");
+    assert_1.strict.equal(env.AGORA_RELAY_MIRROR, "https://mirror.example");
+    assert_1.strict.equal(env.AGORA_NATS_STREAM, "AGORA_PROD");
+    assert_1.strict.equal(env.AGORA_NATS_SUBJECT_PREFIX, "prod.agora");
+    assert_1.strict.equal(env.AGORA_NATS_CREATE_STREAM, "false");
+    assert_1.strict.equal(env.AGORA_NATS_STORAGE, "memory");
+    assert_1.strict.equal(env.AGORA_NATS_MAX_BYTES, "1048576");
+    assert_1.strict.equal(env.AGORA_NATS_MAX_AGE, "7d");
+    console.log("  ✓ buildEnv");
+}
+// ─── Integration tests: direct SDK core ──────────────────────────────────────
+async function testAgoraId(agora) {
+    const id = await agora.id();
+    const alias = await agora.agentId();
+    assert_1.strict.ok(id.length > 0, "id should be non-empty");
+    assert_1.strict.match(id, /^[0-9A-Za-z-]+$/, "id should be alphanumeric");
+    assert_1.strict.equal(alias, id, "agentId should alias id");
+    console.log(`  ✓ agora.id() = ${id}`);
+}
+async function testAgoraRooms(agora) {
+    const rooms = await agora.rooms();
+    // After joining, there should be at least one room
+    assert_1.strict.ok(Array.isArray(rooms), "rooms should be an array");
+    console.log(`  ✓ agora.rooms() = ${rooms.length} room(s)`);
+}
+async function testAgoraTasks(agora) {
+    // Tasks should return an array (may be empty)
+    const tasks = await agora.tasks();
+    assert_1.strict.ok(Array.isArray(tasks), "tasks should be an array");
+    console.log(`  ✓ agora.tasks() = ${tasks.length} task(s)`);
+}
+async function testJoinRoomSessionContract(agora) {
+    const room = await agora.joinRoom("ag-js-sdk-contract", "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc", "contract-room");
+    assert_1.strict.equal(room.roomId, "ag-js-sdk-contract");
+    assert_1.strict.equal(room.label, "contract-room");
+    assert_1.strict.ok(room.agentId.length > 0, "room session should expose agentId");
+    assert_1.strict.match(await room.fingerprint(), /^([0-9a-f]{4}\s+){7}[0-9a-f]{4}$/);
+    assert_1.strict.equal((await agora.openRoom("contract-room")).roomId, room.roomId);
+    await room.sendJson({ kind: "job", id: "contract-1" });
+    await room.sendText("plain chat");
+    const frames = await room.fetchJson({ limit: 10 });
+    assert_1.strict.ok(frames.some((frame) => frame.value.id === "contract-1"));
+    const messages = await room.fetchMessages({ limit: 10 });
+    assert_1.strict.ok(messages.some((message) => message.content === "plain chat"));
+    console.log("  ✓ joinRoom() RoomSession contract");
+}
+async function testCreateRoomSilent(agora) {
+    const loud = await agora.createRoom("loud-room");
+    const loudMessages = await loud.fetchMessages({ includeSystem: true });
+    assert_1.strict.ok(loudMessages.length >= 1, "createRoom must publish the presence envelope");
+    const silent = await agora.createRoomSilent("silent-room");
+    assert_1.strict.equal(silent.label, "silent-room");
+    assert_1.strict.ok(silent.roomId.startsWith("ag-"));
+    assert_1.strict.ok(silent.agentId.length > 0);
+    const silentMessages = await silent.fetchMessages({ includeSystem: true });
+    assert_1.strict.equal(silentMessages.length, 0, "createRoomSilent must not publish the presence envelope");
+    console.log("  ✓ createRoomSilent() skips presence envelope");
+}
+async function testInitIdentity(agora) {
+    const fromInit = await agora.initIdentity();
+    const fromGetter = await agora.agentId();
+    assert_1.strict.ok(fromInit.length > 0);
+    assert_1.strict.equal(fromInit, fromGetter, "initIdentity must equal agentId");
+    console.log("  ✓ initIdentity() returns agent id");
+}
+// ─── Main ────────────────────────────────────────────────────────────────────
+async function main() {
+    console.log("\nagora-chat SDK tests\n");
+    // Unit tests (no binary needed)
+    console.log("Unit tests:");
+    testParseMessages();
+    testParseRooms();
+    testParseMembers();
+    testParseTasks();
+    testStripAnsi();
+    testParseJsonMessages();
+    testBuildEnv();
+    // Integration tests (no binary allowed)
+    process.env.AGORA_BIN = "/definitely/not/the/agora/binary";
+    const home = (0, fs_1.mkdtempSync)((0, path_1.join)((0, os_1.tmpdir)(), "agora-sdk-test-"));
+    try {
+        console.log("\nIntegration tests:");
+        const agora = new index_1.AgoraClient({
+            home,
+            relayUrl: "memory://js-sdk-test",
+        });
+        await testAgoraId(agora);
+        await testAgoraRooms(agora);
+        await testAgoraTasks(agora);
+        await testJoinRoomSessionContract(agora);
+        await testCreateRoomSilent(agora);
+        await testInitIdentity(agora);
+        console.log("\nAll tests passed.\n");
+    }
+    finally {
+        (0, fs_1.rmSync)(home, { recursive: true, force: true });
+    }
+}
+main().catch((err) => {
+    console.error("Test failed:", err.message);
+    process.exit(1);
+});
+//# sourceMappingURL=index.test.js.map

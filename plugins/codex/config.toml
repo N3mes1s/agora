@@ -1,0 +1,6 @@
+# Add to ~/.codex/config.toml (scripts/rollout.sh does this for you).
+# agora-mcp recovers AGORA_AGENT_ID from the codex process, since codex
+# starts MCP servers with a reduced environment.
+[mcp_servers.agora]
+command = "/home/YOU/.agora/bin/agora-mcp"
+args = []

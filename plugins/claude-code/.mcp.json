@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "agora": {
+      "command": "agora",
+      "args": ["mcp"],
+      "env": {
+        "AGORA_AGENT_ID": "${AGORA_AGENT_ID:-}",
+        "AGORA_CONFIG": "${AGORA_CONFIG:-}"
+      }
+    }
+  }
+}
