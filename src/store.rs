@@ -122,6 +122,24 @@ fn now() -> u64 {
 
 static ATOMIC_WRITE_SEQ: AtomicU64 = AtomicU64::new(0);
 
+/// Set once this process has cleaned up leftover registry temp files.
+static SWEPT_REGISTRY_TMP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Registry writes made by this process (observability for tests and the tracing policy: a count, never content).
+static REGISTRY_WRITES: AtomicU64 = AtomicU64::new(0);
+
+/// A member's `last_seen` is rewritten at most this often. `rooms.json` is the whole registry (tens of KB):
+/// rewriting it for every message and heartbeat from every sender, in every watcher process, was ~800 KiB/s of
+/// small writes on a busy host. Online status uses a 300 s window, so a minute of precision is plenty.
+const PRESENCE_WRITE_INTERVAL_SECS: u64 = 60;
+
+/// Leftover `.<name>.<pid>.<n>.tmp` files from an interrupted write older than this are removed.
+const STALE_TMP_AGE_SECS: u64 = 600;
+
+/// When this process last wrote (or saw written) each member's presence, keyed by registry path, room and agent.
+type PresenceKey = (String, String, String);
+static PRESENCE_WRITTEN: std::sync::Mutex<Option<HashMap<PresenceKey, u64>>> = std::sync::Mutex::new(None);
+
 // ── Identity ────────────────────────────────────────────────────
 // Two-tier identity (SSH agent / Signal pattern):
 // - Identity key: permanent Ed25519 keypair at ~/.agora/identity.json
@@ -530,9 +548,38 @@ fn atomic_write_bytes(path: &Path, data: &[u8]) -> std::io::Result<()> {
         .unwrap_or("tmp");
     let seq = ATOMIC_WRITE_SEQ.fetch_add(1, Ordering::Relaxed);
     let tmp = parent.join(format!(".{file_name}.{}.{}.tmp", std::process::id(), seq));
-    fs::write(&tmp, data)?;
-    fs::rename(&tmp, path)?;
+    if file_name == "rooms.json" && !SWEPT_REGISTRY_TMP.swap(true, Ordering::Relaxed) {
+        sweep_stale_tmp(parent, file_name);
+    }
+    if let Err(e) = fs::write(&tmp, data).and_then(|()| fs::rename(&tmp, path)) {
+        let _ = fs::remove_file(&tmp);
+        return Err(e);
+    }
     Ok(())
+}
+
+/// Removes leftover temp files of interrupted atomic writes to `<file_name>` in `dir`: exactly the
+/// `.<file_name>.<pid>.<n>.tmp` pattern, older than [`STALE_TMP_AGE_SECS`], never this process's own.
+fn sweep_stale_tmp(dir: &Path, file_name: &str) {
+    let prefix = format!(".{file_name}.");
+    let own = format!(".{file_name}.{}.", std::process::id());
+    let Ok(entries) = fs::read_dir(dir) else { return };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        if !name.starts_with(&prefix) || !name.ends_with(".tmp") || name.starts_with(&own) {
+            continue;
+        }
+        let old_enough = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.elapsed().ok())
+            .is_some_and(|age| age.as_secs() >= STALE_TMP_AGE_SECS);
+        if old_enough {
+            let _ = fs::remove_file(entry.path());
+        }
+    }
 }
 
 fn atomic_write(path: &Path, data: &str) -> std::io::Result<()> {
@@ -673,7 +720,13 @@ pub fn save_registry(rooms: &[RoomEntry]) {
     let dir = agora_dir();
     ensure_dir(&dir);
     let data = serde_json::to_string_pretty(rooms).unwrap();
+    REGISTRY_WRITES.fetch_add(1, Ordering::Relaxed);
     let _ = atomic_write(&dir.join("rooms.json"), &data);
+}
+
+/// How many times this process has written the registry.
+pub fn registry_write_count() -> u64 {
+    REGISTRY_WRITES.load(Ordering::Relaxed)
 }
 
 pub fn add_room(room_id: &str, secret: &str, label: &str, role: Role) -> RoomEntry {
@@ -854,22 +907,43 @@ pub fn is_admin(room_id: &str, agent_id: &str) -> bool {
 
 pub fn update_last_seen(room_id: &str, agent_id: &str) {
     let path = registry_path();
+    let now_ts = now();
+    let key = (path.display().to_string(), room_id.to_string(), agent_id.to_string());
+    let recent = |t: u64| now_ts.saturating_sub(t) < PRESENCE_WRITE_INTERVAL_SECS;
+    // This process wrote (or saw) this member's presence a moment ago: nothing to read, lock or write.
+    if PRESENCE_WRITTEN
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_ref()
+        .and_then(|seen| seen.get(&key))
+        .is_some_and(|t| recent(*t))
+    {
+        return;
+    }
+    let mut stamp = None;
     with_file_lock(&path, || {
         let mut rooms = load_registry();
         let mut changed = false;
         if let Some(room) = rooms.iter_mut().find(|r| r.room_id == room_id) {
             if let Some(member) = room.members.iter_mut().find(|m| m.agent_id == agent_id) {
-                member.last_seen = now();
-                changed = true;
+                if recent(member.last_seen) {
+                    // another process wrote it a moment ago: remember that, write nothing
+                    stamp = Some(member.last_seen);
+                } else {
+                    member.last_seen = now_ts;
+                    stamp = Some(now_ts);
+                    changed = true;
+                }
             } else {
                 // First time seeing this agent — add as member
                 room.members.push(RoomMember {
                     agent_id: agent_id.to_string(),
                     role: Role::Member,
-                    joined_at: now(),
+                    joined_at: now_ts,
                     nickname: None,
-                    last_seen: now(),
+                    last_seen: now_ts,
                 });
+                stamp = Some(now_ts);
                 changed = true;
             }
         }
@@ -877,6 +951,13 @@ pub fn update_last_seen(room_id: &str, agent_id: &str) {
             save_registry(&rooms);
         }
     });
+    if let Some(t) = stamp {
+        PRESENCE_WRITTEN
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get_or_insert_with(HashMap::new)
+            .insert(key, t);
+    }
 }
 
 pub fn set_member_role(room_id: &str, agent_id: &str, role: Role) {
@@ -1770,6 +1851,89 @@ mod tests {
         fs::create_dir_all(&agora).unwrap();
         let runtime = runtime::TestRuntime::new().home(&home).enter();
         (runtime, home, agora)
+    }
+
+    fn persisted_last_seen(agora: &Path, room_id: &str, agent: &str) -> u64 {
+        load_registry()
+            .iter()
+            .find(|r| r.room_id == room_id)
+            .and_then(|r| r.members.iter().find(|m| m.agent_id == agent))
+            .map(|m| m.last_seen)
+            .unwrap_or_else(|| panic!("no member {agent} in {}", agora.display()))
+    }
+
+    #[test]
+    fn presence_is_written_at_most_once_a_minute() {
+        let home = test_home("presence-throttle");
+        let agora = home.join(".agora");
+        let _ = fs::remove_dir_all(&home);
+        fs::create_dir_all(&agora).unwrap();
+        let room_id = {
+            let _runtime = runtime::TestRuntime::new().home(&home).now(1000).enter();
+            let room = add_room("presence-room", "secret", "presence", Role::Admin);
+            update_last_seen(&room.room_id, "agent-x"); // first sighting: a member is added
+            assert_eq!(persisted_last_seen(&agora, &room.room_id, "agent-x"), 1000);
+            room.room_id
+        };
+        {
+            let _runtime = runtime::TestRuntime::new().home(&home).now(1030).enter();
+            update_last_seen(&room_id, "agent-x"); // 30 s later: no rewrite
+            assert_eq!(persisted_last_seen(&agora, &room_id, "agent-x"), 1000, "rewritten inside the interval");
+        }
+        {
+            let _runtime = runtime::TestRuntime::new().home(&home).now(1100).enter();
+            update_last_seen(&room_id, "agent-x"); // a minute on: written
+            assert_eq!(persisted_last_seen(&agora, &room_id, "agent-x"), 1100);
+        }
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn another_process_having_just_written_presence_means_no_write_here() {
+        let home = test_home("presence-other-process");
+        let agora = home.join(".agora");
+        let _ = fs::remove_dir_all(&home);
+        fs::create_dir_all(&agora).unwrap();
+        let _runtime = runtime::TestRuntime::new().home(&home).now(5000).enter();
+        let room = add_room("presence-room-2", "secret", "presence2", Role::Admin);
+        update_last_seen(&room.room_id, "agent-y");
+        // a fresh timestamp written by someone else, while this process has no record of it
+        PRESENCE_WRITTEN.lock().unwrap().as_mut().unwrap().clear();
+        let mut rooms = load_registry();
+        let member = rooms.iter_mut().find(|r| r.room_id == room.room_id).unwrap().members.iter_mut().find(|m| m.agent_id == "agent-y").unwrap();
+        member.last_seen = 5000 - 10;
+        save_registry(&rooms);
+        update_last_seen(&room.room_id, "agent-y");
+        assert_eq!(persisted_last_seen(&agora, &room.room_id, "agent-y"), 4990, "a recent stamp must not be rewritten");
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn stale_registry_temp_files_are_swept_and_nothing_else() {
+        let dir = test_home("sweep-tmp");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let old = std::time::SystemTime::now() - std::time::Duration::from_secs(2 * STALE_TMP_AGE_SECS);
+        let make = |name: &str, aged: bool| {
+            let path = dir.join(name);
+            fs::write(&path, b"x").unwrap();
+            if aged {
+                fs::File::options().write(true).open(&path).unwrap().set_modified(old).unwrap();
+            }
+            path
+        };
+        let stale = make(".rooms.json.99999.1.tmp", true);
+        let fresh = make(".rooms.json.99999.2.tmp", false);
+        let own = make(&format!(".rooms.json.{}.7.tmp", std::process::id()), true);
+        let other_file = make(".seen.txt.99999.1.tmp", true);
+        let registry = make("rooms.json", true);
+        let not_tmp = make(".rooms.json.99999.3.bak", true);
+        sweep_stale_tmp(&dir, "rooms.json");
+        assert!(!stale.exists(), "an old leftover must go");
+        for kept in [&fresh, &own, &other_file, &registry, &not_tmp] {
+            assert!(kept.exists(), "{} must stay", kept.display());
+        }
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
