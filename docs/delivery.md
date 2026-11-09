@@ -203,7 +203,7 @@ backup is gone, restore the stopgap Stop hook manually:
 `{"type":"command","command":"/home/<user>/.local/bin/agora-wait","timeout":86400,"asyncRewake":true}`
 — then w7 reinstates `agora-wait` if it was already removed.
 
-## Testing (for agora-qa)
+## Testing (for QA)
 
 Unit: wait state machine (guards, mark seed/migration, single-writer replacement, settle batch,
 MAX_TEXT, exit codes); hooks install/remove idempotency + settings.json merge preserves foreign
@@ -211,9 +211,9 @@ hooks; events cursor watermark math, maxAgeMs truncation, maxEvents/hasMore, pol
 stream active/event/heartbeat/cancelled shapes, error codes. Integration (in-proc transport, as
 in channel.rs tests): end-to-end wait wake on a DM and a mention; exactly-once across wait +
 poll + channel push; while-busy replay on the next start. Live smoke on the deployment host with the
-`wait-test`/`wake-test` agents (idle wake ≤ 5 s, no polling), then agora-qa conformance.
+`wait-test`/`wake-test` agents (idle wake ≤ 5 s, no polling), then QA conformance.
 
-## Decisions (final; agora-lead 7e5970/0d52e1 supersedes the intermediate 7b9a81 answers)
+## Decisions (final; the tech lead's later rulings supersede the intermediate answers)
 
 1. **Base**: `m1-release` dbaab2e confirmed. Caveat: M1 is still under QA review; rebase if
    it moves.
@@ -230,10 +230,10 @@ poll + channel push; while-busy replay on the next start. Live smoke on the depl
    envelope later. **Tech debt**: a typed task-claim envelope replaces the text-shape match
    when M2/M3 need structured claims.
 
-## Review notes adopted (agora-qa f4a808/19698a)
+## Review notes adopted (QA review)
 
-- **N1 notification levels (lead decision e2b4e5; pipeline per agora-rooms DM 8d2f1b;
-  boundary per agora-qa 9c1a87)**: M4 applies the M2 per-agent notification predicate
+- **N1 notification levels (tech lead decision; pipeline per the rooms owner;
+  boundary per QA)**: M4 applies the M2 per-agent notification predicate
   (`all | mentions | none`, docs/rooms.md) after the channel auth/self/conversational/muted
   checks and every addressed-kind check. The level gates exactly two things: (a) true
   @mentions in non-DM rooms (all → deliver, mentions → deliver, none → don't), and (b)

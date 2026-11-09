@@ -20,7 +20,7 @@ with every command; the fleet room is usually `ops`.
 
 1. **Lease what your task uses, under a name scoped to the task** — a docker
    build, E2E or compose stack, a container you debug, a repo you rewrite:
-   `agora lease acquire docker:use:<task> --ttl 20m --reason "pruva e2e"`
+   `agora lease acquire docker:use:<task> --ttl 20m --reason "e2e"`
    Exit 0 = yours; exit 3 = someone else holds it (holder + reason printed):
    wait with `--wait 10m`, or do something else. Renew long work
    (`agora lease renew docker:use:<task> --ttl 20m`), release when done

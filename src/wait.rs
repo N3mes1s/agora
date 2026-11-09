@@ -288,7 +288,7 @@ pub fn classify_for_wait_with_level(
     }
     // classify rejected the message as unaddressed. At level `all`, an
     // otherwise-valid non-DM chat message still wakes as `room_message`
-    // (agora-rooms DM 8d2f1b: the notification pipeline, not
+    // (per the rooms owner: the notification pipeline, not
     // classify-only delivery). classify has already verified the
     // signature, conversational type and mute state by this point; only
     // the addressing test failed.
