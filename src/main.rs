@@ -941,6 +941,12 @@ enum HooksAction {
         /// of the same uid, else the exact commands are printed instead)
         #[arg(long)]
         systemd: bool,
+        /// Overwrite an installed adapter that differs from the packaged
+        /// one (lead 13c9b7: install prints the diff and refuses without
+        /// this, so a stale packaged copy can never silently regress a
+        /// newer installed bridge)
+        #[arg(long)]
+        force: bool,
     },
     /// Remove the agora wake adapter for a harness
     Remove {

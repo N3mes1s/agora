@@ -48,6 +48,15 @@ echo "  idempotent OK"
 echo "== omp + codex install (no --systemd: files only) =="
 HOME="$CANARY" $AGORA hooks install omp | sed 's/^/  /'
 test -s "$CANARY/.omp/agent/extensions/agora-wake.ts" || { echo "FAIL: no omp extension"; exit 1; }
+grep -q '__AGORA_BIN__' "$CANARY/.omp/agent/extensions/agora-wake.ts" \
+  && { echo "FAIL: omp extension ships unsubstituted placeholder"; exit 1; }
+# The embedded path is the installing binary's current_exe (may be an
+# mbx-managed target path in dev); assert it is absolute and executable.
+EMBEDDED=$(sed -n 's/^const WAIT = "\(.*\)";$/\1/p' "$CANARY/.omp/agent/extensions/agora-wake.ts")
+case "$EMBEDDED" in
+  /*) test -x "$EMBEDDED" || { echo "FAIL: embedded agora path not executable: $EMBEDDED"; exit 1; } ;;
+  *) echo "FAIL: omp extension embeds a non-absolute path: $EMBEDDED"; exit 1 ;;
+esac
 HOME="$CANARY" $AGORA hooks install codex | sed 's/^/  /'
 test -s "$CANARY/.local/bin/agora-wake-bridge" || { echo "FAIL: no bridge"; exit 1; }
 echo "  omp + codex files OK"

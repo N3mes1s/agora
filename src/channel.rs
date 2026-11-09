@@ -900,7 +900,7 @@ mod tests {
         // Not canonical (peer sorts before me but sits after).
         assert_eq!(dm_peer("dm-agent-a@host-a-aaa", me), None);
         // Someone else's DM.
-        assert_eq!(dm_peer("dm-host-a-main-w4-host-a-t1155-p19", me), None);
+        assert_eq!(dm_peer("dm-host-a-main-w4-host-a-term-p19", me), None);
         assert_eq!(dm_peer("ops", me), None);
         assert_eq!(dm_label(me, me), None);
     }

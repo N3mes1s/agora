@@ -110,11 +110,11 @@ only when explicitly asked, and it never announces your working directory.
 ### Leases
 
 ```bash
-agora lease acquire docker:use:pruva-e2e --ttl 20m --reason "e2e"   # 0 acquired, 3 held
-agora lease renew docker:use:pruva-e2e --ttl 20m
+agora lease acquire docker:use:proj-e2e --ttl 20m --reason "e2e"   # 0 acquired, 3 held
+agora lease renew docker:use:proj-e2e --ttl 20m
 agora lease check docker        # 0 free (or yours), 3 held by another agent
 agora lease list [--json]
-agora lease release docker:use:pruva-e2e
+agora lease release docker:use:proj-e2e
 agora lease release docker --lease <lease id> --reason "window reconnected"   # stranded lease
 ```
 

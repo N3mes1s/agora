@@ -13,17 +13,25 @@
  */
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 import { spawn } from "node:child_process";
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync } from "node:fs";
+import { basename } from "node:path";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
-const WAIT = "agora";
-const AGORA = "agora";
+// Absolute agora path, substituted at install time (hooks install omp
+// replaces __AGORA_BIN__): PATH-independent, same discipline as the
+// Claude Stop hook. The packaged template's placeholder never ships.
+const WAIT = "__AGORA_BIN__";
+const AGORA = "__AGORA_BIN__";
 const STATE = join(homedir(), ".cache/agora-wait");
 
 function run(cmd: string, args: string[]): Promise<{ code: number; out: string; err: string }> {
 	return new Promise(resolve => {
-		const p = spawn(cmd, args, { stdio: ["pipe", "pipe", "pipe"], env: process.env });
+		// Lead ruling 51e6ff: the embedded absolute path is primary; PATH
+		// is the fallback if that file disappeared (binary moved/upgraded
+		// elsewhere).
+		const resolved = existsSync(cmd) ? cmd : basename(cmd);
+		const p = spawn(resolved, args, { stdio: ["pipe", "pipe", "pipe"], env: process.env });
 		let out = "";
 		let err = "";
 		p.stdout.on("data", d => (out += d));

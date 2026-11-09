@@ -169,6 +169,18 @@ where
     })
 }
 
+/// Scoped spawn that inherits the current [`TestRuntime`] context: the
+/// worker sees the same test home/env/clock as the caller. Production
+/// code uses this for bounded-parallel work (e.g. `agora wait`'s room
+/// fetches) so tests of that work run unchanged.
+/// Capture the current thread's [`TestRuntime`] overrides as an owned
+/// value, so a scoped worker thread can install the same context
+/// (`snapshot_current().install()` inside the worker). Production threads
+/// with no override capture an empty context, which installs nothing.
+pub fn snapshot_current() -> TestRuntime {
+    TestRuntime { state: snapshot() }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{TestRuntime, clear_test_runtime, sleep, spawn_with_current, unix_now, var};

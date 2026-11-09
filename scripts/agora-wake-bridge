@@ -2,12 +2,12 @@
 """agora-wake-bridge: wake codex agents (and omp agents started before the agora-wake extension) when an
 agora message addressed to them arrives, by typing it into their tmux pane once the pane is idle.
 
-Claude Code agents are woken natively by the `agora wait` Stop hook, new omp sessions by the omp extension
+Claude Code agents are woken natively by the agora-wait Stop hook, new omp sessions by the omp extension
 ~/.omp/agent/extensions/agora-wake.ts (which writes ~/.cache/agora-wait/<id>.ext; such panes are skipped).
 
 Per pane: identity = AGORA_AGENT_ID found in the pane process environment, else the tmux-derived agora id
 <host>-<session>-w<index>; extra names from ~/.config/agora-wake/aliases.json {"main:5": ["worker-7f3a91c2"]}.
-A waiter `agora wait --for <id> --alias ... --parent <pane pid>` runs per pane; when it exits 2 the framed
+A waiter `agora-wait --for <id> --alias ... --parent <pane pid>` runs per pane; when it exits 2 the framed
 message is typed into the pane as one line + Enter, as soon as the pane is idle and its input box is empty
 (at most MAX_HOLD later it is typed anyway: codex and omp queue input during a turn), then the waiter re-arms.
 Runs as a systemd user service (agora-wake-bridge.service). Log: ~/.cache/agora-wait/bridge.log.
@@ -21,7 +21,7 @@ import sys
 import time
 
 HOME = os.path.expanduser("~")
-WAIT = "agora"
+WAIT = os.path.join(HOME, ".local/bin/agora-wait")
 STATE = os.path.join(HOME, ".cache/agora-wait")
 ALIASES = os.path.join(HOME, ".config/agora-wake/aliases.json")
 LOG = os.path.join(STATE, "bridge.log")
@@ -38,9 +38,26 @@ def log(msg):
         f.write(time.strftime("%Y-%m-%dT%H:%M:%SZ ", time.gmtime()) + msg + "\n")
 
 
-def tmux(*args):
-    r = subprocess.run(["tmux", *args], capture_output=True, text=True, timeout=15)
+def tmux(*args, sock=None):
+    cmd = ["tmux"] + (["-S", sock] if sock else []) + list(args)
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
     return r.stdout if r.returncode == 0 else ""
+
+
+def servers():
+    """Every reachable tmux server of this user: [(socket path, server pid)]. Includes recovered sockets of
+    orphaned servers (e.g. orphan-<pid>, re-created with SIGUSR1 after a newer server took "default")."""
+    d = f"/tmp/tmux-{os.getuid()}"
+    out = []
+    for name in sorted(os.listdir(d)) if os.path.isdir(d) else []:
+        path = os.path.join(d, name)
+        pid = tmux("display", "-p", "#{pid}", sock=path).strip()
+        if pid.isdigit():
+            out.append((path, int(pid)))
+    return out
 
 
 def env_id(pid):
@@ -72,8 +89,8 @@ def load_aliases():
         return {}
 
 
-def pane_idle(target, harness):
-    screen = tmux("capture-pane", "-p", "-t", target)
+def pane_idle(sock, pane, harness):
+    screen = tmux("capture-pane", "-p", "-t", pane, sock=sock)
     tail = "\n".join([ln for ln in screen.splitlines() if ln.strip()][-8:])
     if BUSY.search(tail):
         return False
@@ -82,12 +99,12 @@ def pane_idle(target, harness):
     return True
 
 
-def deliver(target, text):
+def deliver(sock, pane, text):
     line = " | ".join(x.strip() for x in text.strip().splitlines() if x.strip())
     line = "[agora wake] " + line
-    tmux("send-keys", "-t", target, "-l", line[:4000])
+    tmux("send-keys", "-t", pane, "-l", line[:4000], sock=sock)
     time.sleep(0.3)
-    tmux("send-keys", "-t", target, "Enter")
+    tmux("send-keys", "-t", pane, "Enter", sock=sock)
 
 
 def main():
@@ -98,18 +115,26 @@ def main():
     while True:
         aliases = load_aliases()
         seen_panes = set()
-        out = tmux("list-panes", "-a", "-F",
-                   "#{session_name}\t#{window_index}\t#{pane_id}\t#{pane_current_command}\t#{pane_pid}")
-        for ln in out.splitlines():
+        rows = []
+        for sock, spid in servers():
+            own = os.path.basename(sock) == "default"
+            out = tmux("list-panes", "-a", "-F",
+                       "#{session_name}\t#{window_index}\t#{pane_id}\t#{pane_current_command}\t#{pane_pid}", sock=sock)
+            for ln in out.splitlines():
+                rows.append((sock, spid, own, ln))
+        for sock, spid, own, ln in rows:
             try:
-                sess, win, pane, cmd, ppid = ln.split("\t")
+                sess, win, pane_id, cmd, ppid = ln.split("\t")
             except ValueError:
                 continue
             if cmd not in HARNESSES:
                 continue
             ppid = int(ppid)
-            target = f"{sess}:{win}"
-            aid = env_id(ppid) or f"{host}-{sess}-w{win}"
+            pane = f"{spid}{pane_id}"   # unique across servers
+            target = f"{sess}:{win}" if own else f"{os.path.basename(sock)}/{sess}:{win}"
+            # agora's own id for this pane: <host>-<session>-w<index> on the default server, and
+            # <host>-t<server pid>-p<pane number> on any other server (the fleet patch's orphan-pane id)
+            aid = env_id(ppid) or (f"{host}-{sess}-w{win}" if own else f"{host}-t{spid}-p{pane_id.lstrip('%')}")
             safe = re.sub(r"[^A-Za-z0-9@._-]", "_", aid)
             ext = os.path.join(STATE, f"{safe}.ext")
             try:
@@ -125,12 +150,13 @@ def main():
                 rc = w["proc"].returncode
                 err = w["proc"].stderr.read() if w["proc"].stderr else ""
                 if rc == 2 and err.strip():
-                    pending[pane] = {"text": err, "since": time.time(), "target": target, "harness": cmd}
+                    pending[pane] = {"text": err, "since": time.time(), "target": target, "harness": cmd,
+                                     "sock": sock, "pane_id": pane_id}
                     log(f"{target} {aid}: message pending ({len(err)} chars)")
                 waiters.pop(pane, None)
             if pane in pending:
                 continue  # re-arm after delivery
-            args = [WAIT, "wait", "--for", aid, "--parent", str(ppid)]
+            args = [WAIT, "--for", aid, "--parent", str(ppid)]
             for a in aliases.get(target, []) + aliases.get(aid, []):
                 args += ["--alias", a]
             proc = subprocess.Popen(args, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
@@ -141,8 +167,8 @@ def main():
             if pane not in seen_panes:
                 pending.pop(pane)
                 continue
-            if pane_idle(p["target"], p["harness"]) or time.time() - p["since"] > MAX_HOLD:
-                deliver(p["target"], p["text"])
+            if pane_idle(p["sock"], p["pane_id"], p["harness"]) or time.time() - p["since"] > MAX_HOLD:
+                deliver(p["sock"], p["pane_id"], p["text"])
                 log(f"{p['target']}: delivered")
                 pending.pop(pane)
         for pane in list(waiters):

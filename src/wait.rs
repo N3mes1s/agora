@@ -127,20 +127,11 @@ fn task_assigned_to_me(room: &store::RoomEntry, env: &Value, me: &str) -> bool {
 /// folded with the claim announcements in history, claims applied from the
 /// signed lease table (the same fold `agora tui` shows).
 fn my_claimed_tasks(room: &store::RoomEntry, me: &str) -> Vec<store::Task> {
+    // Local messages only (lead 55c521): the old code made a relay
+    // round-trip per task-announcement classification with since=now —
+    // fetching nothing but costing a fetch. The fold needs only the local
+    // store; the waiter's replay/stream paths ingest remote messages.
     let mut msgs = store::load_messages(&room.room_id, 7 * 86400);
-    let now = runtime::unix_now();
-    if let Ok(events) = transport::fetch_checked(&room.room_id, &now.to_string()) {
-        let key = crypto::derive_room_key(&room.secret, &room.room_id);
-        for (relay_ts, payload) in events {
-            if let Some(mut env) = chat::decrypt_payload(&payload, &key, &room.room_id) {
-                if env["ts"].as_u64().unwrap_or(0) == 0 {
-                    env["ts"] = json!(relay_ts);
-                }
-                env["_relay_ts"] = json!(relay_ts);
-                msgs.push(env);
-            }
-        }
-    }
     msgs.sort_by_key(board::relay_ts);
     let mut tasks = chat::fold_task_announcements(store::load_tasks(&room.room_id), &msgs);
     match lease::table(room) {
@@ -663,6 +654,7 @@ fn collect_aliases(me: &str, cli: &[String]) -> Vec<String> {
 }
 
 /// One message waiting for the settle window to close.
+#[derive(Clone)]
 struct Pending {
     room: store::RoomEntry,
     env: Value,
@@ -694,8 +686,12 @@ fn wait_and_deliver(
     if rooms.is_empty() {
         return Ok(false);
     }
-    let span = tracing::info_span!(target: "agora", "agora.wait.rooms", rooms = rooms.len());
-    let _entered = span.enter();
+    // Span semantics (lead 295962 audit note): agora.wait.rooms measures
+    // ONLY the scan (reader setup + backlog replay) so the number means
+    // something; the long poll itself runs under agora.wait (exempt from
+    // slow reporting — a long poll is the job).
+    let rooms_span = tracing::info_span!(target: "agora", "agora.wait.rooms", rooms = rooms.len());
+    let scan = rooms_span.enter();
 
     let (tx, rx) = mpsc::channel::<AddressedMsg>();
     let readers = spawn_readers(&rooms, since, tx.clone());
@@ -708,6 +704,7 @@ fn wait_and_deliver(
         .map(|t| Instant::now() + t)
         .unwrap_or_else(|| Instant::now() + MAX_LIFE);
     let mut pending: Vec<Pending> = replay_backlog(me, aliases, since, &rooms)?;
+    drop(scan); // the scan is over; the poll runs outside the rooms span
     let mut first_pending: Option<Instant> = if pending.is_empty() {
         None
     } else {
@@ -931,6 +928,11 @@ fn spawn_readers(
     readers
 }
 
+/// Test-visible fetch counter for the replay regression (lead 55c521
+/// tracing policy: count per-room calls across room counts).
+#[cfg(test)]
+static FETCH_CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
 /// While-busy backlog: fetch each watched room's history since `since`,
 /// classify, return the addressed messages. Delivery claims happen later, in
 /// the settle batch, together with live ones.
@@ -940,27 +942,94 @@ fn replay_backlog(
     since: u64,
     rooms: &[store::RoomEntry],
 ) -> Result<Vec<Pending>, String> {
+    // Wake latency is the product's core metric (lead 55c521: typical wake
+    // < 1 s at 20 rooms). Per-room fetches are independent; the sequential
+    // loop cost ~0.3 s per room (one FETCH_EXPIRES round-trip each). Fetch
+    // rooms in bounded-parallel chunks instead.
+    const PARALLEL_ROOM_FETCHES: usize = 8;
+    let span = tracing::info_span!(
+        target: "agora",
+        "agora.wait.replay",
+        rooms = rooms.len(),
+        fetch_calls = tracing::field::Empty,
+    );
+    let _entered = span.enter();
+    let mut fetch_calls = 0usize;
+
     let mut pending: Vec<Pending> = Vec::new();
-    for room in rooms {
-        let key = crypto::derive_room_key(&room.secret, &room.room_id);
-        let events = transport::fetch_checked(&room.room_id, &since.to_string())?;
-        for (relay_ts, payload) in events {
-            if let Some(mut env) = chat::decrypt_payload(&payload, &key, &room.room_id) {
-                if env["ts"].as_u64().unwrap_or(0) == 0 {
-                    env["ts"] = json!(relay_ts);
+    for chunk in rooms.chunks(PARALLEL_ROOM_FETCHES) {
+        type RoomResult = Result<(usize, Vec<Pending>), String>;
+        let results: std::sync::Mutex<Vec<RoomResult>> = std::sync::Mutex::new(Vec::new());
+        // Capture the caller's runtime context once per chunk: worker
+        // threads install it so they see the same home/env/clock (tests
+        // run unchanged; production threads have no override).
+        let rt = runtime::snapshot_current();
+        std::thread::scope(|scope| {
+            for (i, room) in chunk.iter().enumerate() {
+                let results = &results;
+                let rt = rt.clone();
+                scope.spawn(move || {
+                    rt.install();
+                    let key = crypto::derive_room_key(&room.secret, &room.room_id);
+                    let fetched = transport::fetch_checked(&room.room_id, &since.to_string())
+                        .map(|events| {
+                            let mut found = Vec::new();
+                            for (relay_ts, payload) in events {
+                                if let Some(mut env) =
+                                    chat::decrypt_payload(&payload, &key, &room.room_id)
+                                {
+                                    if env["ts"].as_u64().unwrap_or(0) == 0 {
+                                        env["ts"] = json!(relay_ts);
+                                    }
+                                    env["_relay_ts"] = json!(relay_ts);
+                                    if classify_for_wait(room, &env, me, aliases).is_ok() {
+                                        found.push(Pending {
+                                            room: room.clone(),
+                                            env,
+                                        });
+                                    }
+                                }
+                            }
+                            found
+                        });
+                    let entry = match fetched {
+                        Ok(found) => Ok((i, found)),
+                        Err(e) => Err(e),
+                    };
+                    results
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .push(entry);
+                });
+            }
+        });
+        fetch_calls += chunk.len();
+        #[cfg(test)]
+        FETCH_CALLS.fetch_add(chunk.len(), std::sync::atomic::Ordering::Relaxed);
+        let mut found_by_room: Vec<Vec<Pending>> = vec![Vec::new(); chunk.len()];
+        let mut first_err: Option<String> = None;
+        for r in results.into_inner().unwrap_or_else(|e| e.into_inner()) {
+            match r {
+                Ok((i, found)) => {
+                    found_by_room[i] = found;
                 }
-                env["_relay_ts"] = json!(relay_ts);
-                if classify_for_wait(room, &env, me, aliases).is_ok()
-                    && !pending.iter().any(|p| p.env["id"] == env["id"])
-                {
-                    pending.push(Pending {
-                        room: room.clone(),
-                        env,
-                    });
+                Err(e) => {
+                    first_err.get_or_insert(e);
+                }
+            }
+        }
+        if let Some(e) = first_err {
+            return Err(e);
+        }
+        for found in found_by_room {
+            for p in found {
+                if !pending.iter().any(|q| q.env["id"] == p.env["id"]) {
+                    pending.push(p);
                 }
             }
         }
     }
+    span.record("fetch_calls", fetch_calls);
     Ok(pending)
 }
 
@@ -1321,5 +1390,73 @@ mod tests {
         std::fs::create_dir_all(&agora).unwrap();
         let rt = runtime::TestRuntime::new().home(&home).enter();
         (rt, home, agora)
+    }
+
+    #[test]
+    fn replay_fetches_each_room_exactly_once_across_sizes() {
+        // Lead 55c521 regression (tracing policy: count the work across
+        // input sizes): 1/10/20 rooms must cost exactly one fetch per room
+        // — bounded parallelism never duplicates work — and deliver every
+        // addressed message.
+        for room_count in [1usize, 10, 20] {
+            let home = std::env::temp_dir().join(format!(
+                "agora-wait-replay-{room_count}-{}",
+                std::process::id()
+            ));
+            let _ = std::fs::remove_dir_all(&home);
+            std::fs::create_dir_all(home.join(".agora")).unwrap();
+            let me = "agent-a@host-a";
+            let _rt = runtime::TestRuntime::new()
+                .home(&home)
+                .var("AGORA_CONFIG", "/nonexistent/agora-test-config.toml")
+                .var("AGORA_RELAY_URL", format!("memory://{}", home.display()))
+                .unset_var("AGORA_IDENTITY_SEED")
+                .var("AGORA_AGENT_ID", me)
+                .now(1000)
+                .advance_sleep()
+                .enter();
+            // room_count ordinary rooms, one mentioning message in each
+            // from a peer.
+            let mut rooms = Vec::new();
+            for i in 0..room_count {
+                let label = format!("room-{i}");
+                chat::create_silent(&label).unwrap();
+                let room = store::find_room(&label).unwrap();
+                let _peer = runtime::TestRuntime::new()
+                    .home(&home)
+                    .var("AGORA_CONFIG", "/nonexistent/agora-test-config.toml")
+                    .var("AGORA_RELAY_URL", format!("memory://{}", home.display()))
+                    .unset_var("AGORA_IDENTITY_SEED")
+                    .var("AGORA_AGENT_ID", "agent-b@host-b")
+                    .now(1000 + i as u64)
+                    .advance_sleep()
+                    .enter();
+                chat::send(&format!("@{me} hello from room {i}"), None, Some(&label))
+                    .unwrap();
+                rooms.push(room);
+            }
+            let _rt = runtime::TestRuntime::new()
+                .home(&home)
+                .var("AGORA_CONFIG", "/nonexistent/agora-test-config.toml")
+                .var("AGORA_RELAY_URL", format!("memory://{}", home.display()))
+                .unset_var("AGORA_IDENTITY_SEED")
+                .var("AGORA_AGENT_ID", me)
+                .now(2000)
+                .advance_sleep()
+                .enter();
+            FETCH_CALLS.store(0, std::sync::atomic::Ordering::Relaxed);
+
+            let pending = replay_backlog(me, &[], 0, &rooms).unwrap();
+            let calls = FETCH_CALLS.load(std::sync::atomic::Ordering::Relaxed);
+            assert_eq!(
+                calls, room_count,
+                "one fetch per room at {room_count} rooms (got {calls})"
+            );
+            assert_eq!(
+                pending.len(),
+                room_count,
+                "every room's mention is pending at {room_count} rooms"
+            );
+        }
     }
 }

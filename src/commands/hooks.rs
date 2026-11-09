@@ -31,7 +31,7 @@ use crate::{Harness, HooksAction};
 
 pub fn run(action: HooksAction) -> Result<(), String> {
     match action {
-        HooksAction::Install { harness, systemd } => install(harness, systemd),
+        HooksAction::Install { harness, systemd, force } => install(harness, systemd, force),
         HooksAction::Remove { harness, systemd } => remove(harness, systemd),
         HooksAction::Status => status(),
     }
@@ -98,6 +98,80 @@ fn may_manage_systemd() -> bool {
     home_ok && runtime_ok
 }
 
+
+
+/// The one write gate for every hooks.rs filesystem mutation (lead ruling
+/// 2fcdce: structural, not discipline). Under cfg(test) it panics unless
+/// the target is inside std::env::temp_dir(), so no test can ever touch
+/// the real ~/.claude, ~/.local/bin or ~/.config; production runs are
+/// unaffected.
+fn write_gate(path: &Path) {
+    #[cfg(test)]
+    {
+        let temp = std::env::temp_dir();
+        let canonical = path
+            .parent()
+            .and_then(|p| p.canonicalize().ok())
+            .unwrap_or_default();
+        if !canonical.starts_with(&temp) && !path.starts_with(&temp) {
+            panic!(
+                "hooks test escape: write target {} is outside the test temp dir",
+                path.display()
+            );
+        }
+    }
+    #[cfg(not(test))]
+    {
+        let _ = path;
+    }
+}
+
+/// Gated write: panics in tests on real-home targets; returns the io result.
+fn hooks_write(path: &Path, contents: &str) -> std::io::Result<()> {
+    write_gate(path);
+    fs::write(path, contents)
+}
+
+/// Gated byte write (settings backups restore byte-exact contents).
+fn hooks_write_bytes(path: &Path, contents: &[u8]) -> std::io::Result<()> {
+    write_gate(path);
+    fs::write(path, contents)
+}
+
+/// Gated binary write (with mode) for the bridge and unit files.
+fn hooks_install_file(path: &Path, contents: &str, mode: u32) -> std::io::Result<()> {
+    write_gate(path);
+    fs::write(path, contents)?;
+    use std::os::unix::fs::PermissionsExt;
+    let _ = fs::set_permissions(path, fs::Permissions::from_mode(mode));
+    Ok(())
+}
+
+/// Gated remove.
+fn hooks_remove(path: &Path) -> std::io::Result<()> {
+    write_gate(path);
+    fs::remove_file(path)
+}
+
+/// Gated mkdir.
+/// Gated write for tests (io result; call sites unwrap).
+#[cfg(test)]
+fn hooks_write_ref(path: &Path, contents: &str) -> std::io::Result<()> {
+    write_gate(path);
+    fs::write(path, contents)
+}
+
+/// Gated recursive remove (test cleanup of temp homes).
+#[cfg(test)]
+fn hooks_rmdir(path: &Path) {
+    write_gate(path);
+    let _ = fs::remove_dir_all(path);
+}
+
+fn hooks_mkdir(path: &Path) -> std::io::Result<()> {
+    write_gate(path);
+    fs::create_dir_all(path)
+}
 
 fn claude_settings_path() -> PathBuf {
     home().join(".claude/settings.json")
@@ -256,16 +330,16 @@ fn install_claude() -> Result<(), String> {
     let text = serde_json::to_string_pretty(&settings)
         .map_err(|e| format!("serialize settings: {e}"))?;
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
+        hooks_mkdir(parent).map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
     }
-    fs::write(&path, text).map_err(|e| format!("write {}: {e}", path.display()))?;
+    hooks_write(&path, &text).map_err(|e| format!("write {}: {e}", path.display()))?;
     // Byte-exact backup of the pre-install file, so `remove` can restore
     // verbatim. Written only when absent: a second (idempotent) install
     // must not overwrite the good backup with the already-installed state.
     if let Some(bytes) = original
         && !settings_backup_path().exists()
     {
-        let _ = fs::write(settings_backup_path(), bytes);
+        let _ = hooks_write_bytes(&settings_backup_path(), &bytes);
     }
     match replaced {
         Some(old) if old.trim() != command => println!(
@@ -295,8 +369,8 @@ fn remove_claude() -> Result<(), String> {
         let pre_had_agora = remove_stop_hook(&mut pre_json);
         let cur_had_agora = remove_stop_hook(&mut cur_json);
         if cur_had_agora && cur_json == pre_json {
-            fs::write(&path, pre).map_err(|e| format!("restore {}: {e}", path.display()))?;
-            let _ = fs::remove_file(&backup);
+            hooks_write_bytes(&path, &pre).map_err(|e| format!("restore {}: {e}", path.display()))?;
+            let _ = hooks_remove(&backup);
             println!("  Claude Stop hook removed (settings restored byte-exact)");
             return Ok(());
         }
@@ -308,7 +382,7 @@ fn remove_claude() -> Result<(), String> {
     if remove_stop_hook(&mut settings) {
         let text = serde_json::to_string_pretty(&settings)
             .map_err(|e| format!("serialize settings: {e}"))?;
-        fs::write(&path, text).map_err(|e| format!("write {}: {e}", path.display()))?;
+        hooks_write(&path, &text).map_err(|e| format!("write {}: {e}", path.display()))?;
         println!("  Claude Stop hook removed");
     } else {
         println!("  Claude: no agora Stop hook found");
@@ -319,13 +393,16 @@ fn remove_claude() -> Result<(), String> {
 // ── omp ─────────────────────────────────────────────────────────
 
 fn install_omp() -> Result<(), String> {
-    let source = read_scripts("omp/agora-wake.ts")?;
+    // Absolute agora path at install time (w7 d2cd44: PATH resolution
+    // breaks for omp sessions without ~/.local/bin on PATH). The packaged
+    // template ships a placeholder that never installs as-is.
+    let source = read_scripts("omp/agora-wake.ts")?.replace("__AGORA_BIN__", &agora_bin());
     let path = omp_extension_path();
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
+        hooks_mkdir(parent).map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
     }
     let existed = path.exists();
-    fs::write(&path, &source).map_err(|e| format!("write {}: {e}", path.display()))?;
+    hooks_write(&path, &source).map_err(|e| format!("write {}: {e}", path.display()))?;
     println!(
         "  omp extension {} → {} (takes effect in new omp sessions)",
         if existed { "updated" } else { "installed" },
@@ -337,7 +414,7 @@ fn install_omp() -> Result<(), String> {
 fn remove_omp() -> Result<(), String> {
     let path = omp_extension_path();
     if path.exists() {
-        fs::remove_file(&path).map_err(|e| format!("remove {}: {e}", path.display()))?;
+        hooks_remove(&path).map_err(|e| format!("remove {}: {e}", path.display()))?;
         println!("  omp extension removed");
     } else {
         println!("  omp: nothing to remove");
@@ -347,7 +424,30 @@ fn remove_omp() -> Result<(), String> {
 
 // ── codex ───────────────────────────────────────────────────────
 
-fn install_codex(systemd: bool) -> Result<(), String> {
+
+/// Up to 20 differing lines between two small texts (a readable diff for
+/// the refuse-guard print; not a full unified diff).
+fn diff_lines(a: &str, b: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let (al, bl) = (a.lines().collect::<Vec<_>>(), b.lines().collect::<Vec<_>>());
+    for i in 0..al.len().max(bl.len()) {
+        let (x, y) = (al.get(i).copied().unwrap_or("<none>"), bl.get(i).copied().unwrap_or("<none>"));
+        if x != y {
+            out.push(format!("- {x}"));
+            out.push(format!("+ {y}"));
+        }
+        if out.len() >= 20 {
+            out.push("... (more)".into());
+            break;
+        }
+    }
+    if out.is_empty() {
+        out.push("(no line-level difference)".into());
+    }
+    out
+}
+
+fn install_codex(systemd: bool, force: bool) -> Result<(), String> {
     let bridge = read_scripts("agora-wake-bridge")?;
     // The unit template ships %h (systemd home) and a host placeholder;
     // the agent id is derived at install time from the real hostname so
@@ -358,21 +458,37 @@ fn install_codex(systemd: bool) -> Result<(), String> {
     let unit = read_scripts("systemd/agora-wake-bridge.service")?
         .replace("__AGORA_HOST__", &host);
     let (bin_path, unit_path, marker) = bridge_install_paths();
+    // Lead ruling 13c9b7: never silently overwrite a DIFFERENT installed
+    // bridge — print the diff and refuse unless --force (a stale packaged
+    // copy must not regress a newer installed one; that exact shape
+    // downgraded the deployed 185-line bridge to a 159-line one).
+    if let Ok(installed) = fs::read_to_string(&bin_path)
+        && installed != bridge
+    {
+        println!("  installed bridge differs from the packaged one:");
+        for l in diff_lines(&installed, &bridge) {
+            println!("  {l}");
+        }
+        if !force {
+            println!("  refusing to overwrite a different installed bridge (pass --force)");
+            return Ok(());
+        }
+        println!("  --force: overwriting");
+    }
     for (path, content, mode) in [
         (&bin_path, bridge.as_str(), 0o755u32),
         (&unit_path, unit.as_str(), 0o644),
     ] {
         if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
+            hooks_mkdir(parent).map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
         }
-        fs::write(path, content).map_err(|e| format!("write {}: {e}", path.display()))?;
-        use std::os::unix::fs::PermissionsExt;
-        let _ = fs::set_permissions(path, fs::Permissions::from_mode(mode));
+        hooks_install_file(path, content, mode)
+            .map_err(|e| format!("write {}: {e}", path.display()))?;
     }
     if let Some(parent) = marker.parent() {
-        let _ = fs::create_dir_all(parent);
+        let _ = hooks_mkdir(parent);
     }
-    let _ = fs::write(&marker, agora_bin());
+    let _ = hooks_write(&marker, &agora_bin());
     // Lead ruling a95539: service management ONLY with --systemd, and only
     // from the real user context. Never by default; from anywhere else,
     // print the exact commands for the operator. No env-var shortcuts.
@@ -427,7 +543,7 @@ fn remove_codex(systemd: bool) -> Result<(), String> {
     let mut removed = false;
     for path in [&bin_path, &unit_path, &marker] {
         if path.exists() {
-            let _ = fs::remove_file(path);
+            let _ = hooks_remove(path);
             removed = true;
         }
     }
@@ -471,9 +587,17 @@ fn status() -> Result<(), String> {
         });
     print_harness("claude", claude.is_some(), claude_settings_path());
     if let Some(old) = stopgap_installed() {
-        println!("    stopgap still present: {old} → `agora hooks install --harness claude` migrates it");
+        println!("    stopgap still present: {old} → `agora hooks install claude` migrates it");
     }
     print_harness("omp", omp_extension_path().exists(), omp_extension_path());
+    // Lead ruling 51e6ff: status shows the resolved absolute agora path
+    // the installed extension embeds (re-resolved by rerunning install).
+    if omp_extension_path().exists()
+        && let Ok(source) = fs::read_to_string(omp_extension_path())
+        && let Some(line) = source.lines().find(|l| l.starts_with("const WAIT = "))
+    {
+        println!("    embedded agora: {line}");
+    }
     let (bin_path, unit_path, _marker) = bridge_install_paths();
     print_harness(
         "codex",
@@ -494,11 +618,11 @@ fn print_harness(name: &str, installed: bool, path: PathBuf) {
 
 // ── dispatch ────────────────────────────────────────────────────
 
-fn install(harness: Harness, systemd: bool) -> Result<(), String> {
+fn install(harness: Harness, systemd: bool, force: bool) -> Result<(), String> {
     match harness {
         Harness::Claude => install_claude(),
         Harness::Omp => install_omp(),
-        Harness::Codex => install_codex(systemd),
+        Harness::Codex => install_codex(systemd, force),
     }
 }
 
@@ -516,8 +640,8 @@ mod tests {
 
     fn test_home(name: &str) -> (agora::runtime::TestRuntimeGuard, PathBuf) {
         let home = std::env::temp_dir().join(format!("agora-hooks-{name}-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&home);
-        fs::create_dir_all(&home).unwrap();
+        hooks_rmdir(&home);
+        hooks_mkdir(&home).unwrap();
         let rt = agora::runtime::TestRuntime::new().home(&home).enter();
         (rt, home)
     }
@@ -526,8 +650,8 @@ mod tests {
     fn merge_replaces_stopgap_and_preserves_foreign_hooks() {
         let (_rt, home) = test_home("merge");
         let path = home.join(".claude/settings.json");
-        fs::create_dir_all(path.parent().unwrap()).unwrap();
-        fs::write(
+        hooks_mkdir(path.parent().unwrap()).unwrap();
+        hooks_write_ref(
             &path,
             r#"{
   "model": "sonnet",
@@ -558,8 +682,8 @@ mod tests {
     fn merge_appends_when_no_stop_hook() {
         let (_rt, home) = test_home("append");
         let path = home.join(".claude/settings.json");
-        fs::create_dir_all(path.parent().unwrap()).unwrap();
-        fs::write(&path, r#"{ "model": "sonnet" }"#).unwrap();
+        hooks_mkdir(path.parent().unwrap()).unwrap();
+        hooks_write_ref(&path, r#"{ "model": "sonnet" }"#).unwrap();
         let mut settings = load_settings(&path);
         assert_eq!(merge_stop_hook(&mut settings, "agora wait"), None);
         assert_eq!(settings["hooks"]["Stop"].as_array().unwrap().len(), 1);
@@ -570,8 +694,8 @@ mod tests {
     fn remove_only_takes_ours() {
         let (_rt, home) = test_home("remove");
         let path = home.join(".claude/settings.json");
-        fs::create_dir_all(path.parent().unwrap()).unwrap();
-        fs::write(
+        hooks_mkdir(path.parent().unwrap()).unwrap();
+        hooks_write_ref(
             &path,
             r#"{
   "hooks": {
@@ -611,10 +735,10 @@ mod tests {
         // the child env is not needed: the flag path never spawns).
         let (_rt, home) = test_home("nosystemctl");
         let scripts = home.join("scripts");
-        fs::create_dir_all(scripts.join("systemd")).unwrap();
-        fs::write(scripts.join("agora-wake-bridge"), "#!/bin/sh\n").unwrap();
-        fs::write(
-            scripts.join("systemd/agora-wake-bridge.service"),
+        hooks_mkdir(&scripts.join("systemd")).unwrap();
+        hooks_write_ref(&scripts.join("agora-wake-bridge"), "#!/bin/sh\n").unwrap();
+        hooks_write_ref(
+            &scripts.join("systemd/agora-wake-bridge.service"),
             "ExecStart=%h/.local/bin/agora-wake-bridge\nEnvironment=AGORA_AGENT_ID=agora-wake-bridge@__AGORA_HOST__\n",
         )
         .unwrap();
@@ -624,7 +748,7 @@ mod tests {
             .home(&home)
             .var("AGORA_SCRIPTS_DIR", scripts.to_str().unwrap())
             .install();
-        install_codex(false).unwrap();
+        install_codex(false, false).unwrap();
         let unit = fs::read_to_string(
             home.join(".config/systemd/user/agora-wake-bridge.service"),
         )
@@ -638,6 +762,76 @@ mod tests {
         assert!(
             !home.join(".config/systemd/user/agora-wake-bridge.service").exists(),
             "unit removed"
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "hooks test escape")]
+    fn write_gate_panics_on_real_home_targets() {
+        // Lead ruling 2fcdce: the structural guard must fire on any real
+        // home path, proving no test can touch ~/.claude, ~/.local/bin or
+        // ~/.config even by accident of home resolution.
+        let real = real_home().unwrap_or_else(|| PathBuf::from("/home"));
+        let target = real.join(".local/bin/agora-wake-bridge");
+        write_gate(&target);
+    }
+
+    #[test]
+    fn packaged_bridge_is_the_full_deployed_version_with_orphan_support() {
+        // Lead ruling 13c9b7: the packaged bridge must be the deployed
+        // 185-line version WITH orphan-server support — the stale
+        // 159-line copy downgraded the working bridge once (13:10
+        // incident class). Reference content, not reference sha (the doc
+        // alias example is genericized).
+        // Read from the REPO's scripts dir (the crate source), not the
+        // binary-relative default.
+        let repo_scripts = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("scripts");
+        let bridge = std::fs::read_to_string(repo_scripts.join("agora-wake-bridge"))
+            .expect("packaged bridge script present in the repo");
+        let lines = bridge.lines().count();
+        assert!(lines >= 185, "packaged bridge has {lines} lines; the stale 159-line copy regressed once");
+        assert!(
+            bridge.contains("reachable tmux server"),
+            "orphan-server support: the bridge must enumerate every reachable tmux server"
+        );
+        assert!(
+            bridge.contains("-S"),
+            "per-server socket selection: panes on recovered/orphan servers are covered"
+        );
+    }
+
+    #[test]
+    fn omp_install_leaves_no_placeholder_and_resolves_a_real_binary() {
+        // Lead ruling 51e6ff: the installed extension embeds an absolute
+        // agora path resolved at install; no placeholder ships and the
+        // resolved file exists.
+        let (_rt, home) = test_home("omppath");
+        let scripts = home.join("scripts");
+        hooks_mkdir(&scripts.join("omp")).unwrap();
+        // Write the packaged template into the scratch scripts dir.
+        hooks_write_ref(
+            &scripts.join("omp/agora-wake.ts"),
+            "const WAIT = \"__AGORA_BIN__\";\n",
+        )
+        .unwrap();
+        agora::runtime::TestRuntime::new()
+            .home(&home)
+            .var("AGORA_SCRIPTS_DIR", scripts.to_str().unwrap())
+            .install();
+        install_omp().unwrap();
+        let installed = fs::read_to_string(home.join(".omp/agent/extensions/agora-wake.ts")).unwrap();
+        assert!(!installed.contains("__AGORA_BIN__"), "placeholder must not ship");
+        let path = installed
+            .lines()
+            .find(|l| l.starts_with("const WAIT = "))
+            .and_then(|l| l.trim_end_matches(';').split("= ").nth(1))
+            .map(str::to_string)
+            .unwrap();
+        let path = path.trim_matches('"');
+        assert!(path.starts_with('/'), "absolute path, got {path}");
+        assert!(
+            std::path::Path::new(path).exists(),
+            "resolved path exists: {path}"
         );
     }
 }

@@ -90,6 +90,15 @@ where
 
     fn on_close(&self, id: Id, ctx: Context<'_, S>) {
         let Some(span) = ctx.span(&id) else { return };
+        // Our spans only (lead 3263d1 audit: async-nats's internal spans,
+        // e.g. 'recreate ordered consumer' at 5001 ms, leak through this
+        // layer and spam stderr). Match either the explicit target or the
+        // agora-prefixed name (the crate's spans use both forms).
+        let ours = span.metadata().target() == "agora"
+            || span.name().starts_with("agora.");
+        if !ours {
+            return;
+        }
         let ext = span.extensions();
         let Some(Started(at)) = ext.get::<Started>() else { return };
         let took = at.elapsed();
