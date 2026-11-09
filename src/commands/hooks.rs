@@ -209,9 +209,31 @@ fn scripts_dir() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("scripts"))
 }
 
+/// Templates embedded at compile time — the deployed binary is
+/// self-contained (per a deploy finding: no agora-scripts directory ships
+/// with it, and the canary's AGORA_SCRIPTS_DIR masked the gap). Runtime dirs
+/// (env override, binary-relative) still win so tests and development
+/// layouts work unchanged.
 fn read_scripts(rel: &str) -> Result<String, String> {
     let path = scripts_dir().join(rel);
-    fs::read_to_string(&path).map_err(|e| format!("missing {}: {e}", path.display()))
+    match fs::read_to_string(&path) {
+        Ok(contents) => Ok(contents),
+        Err(_) => embedded_script(rel).map(str::to_string).ok_or_else(|| {
+            format!("missing template {} (neither {} nor the embedded copy exists)", rel, path.display())
+        }),
+    }
+}
+
+/// Compile-time-embedded adapter templates.
+fn embedded_script(rel: &str) -> Option<&'static str> {
+    match rel {
+        "omp/agora-wake.ts" => Some(include_str!("../../scripts/omp/agora-wake.ts")),
+        "agora-wake-bridge" => Some(include_str!("../../scripts/agora-wake-bridge")),
+        "systemd/agora-wake-bridge.service" => {
+            Some(include_str!("../../scripts/systemd/agora-wake-bridge.service"))
+        }
+        _ => None,
+    }
 }
 
 // ── claude ──────────────────────────────────────────────────────
@@ -833,5 +855,32 @@ mod tests {
             std::path::Path::new(path).exists(),
             "resolved path exists: {path}"
         );
+    }
+
+    #[test]
+    fn install_works_with_no_scripts_dir_and_no_env() {
+        // Lead 9be3e3: the deployed binary ships no agora-scripts
+        // directory, and every canary set AGORA_SCRIPTS_DIR — the
+        // untested-default class. The embedded templates must serve the
+        // install with no runtime dir at all. Proven here with the env
+        // explicitly absent and scripts_dir() resolving to a nonexistent
+        // path (the temp home has no agora-scripts).
+        let (_rt, home) = test_home("no-scripts-dir");
+        // No AGORA_SCRIPTS_DIR: scripts_dir() falls to binary-relative
+        // agora-scripts, which does not exist in the test context — the
+        // embedded copy must answer.
+        install_omp().unwrap();
+        let installed = fs::read_to_string(home.join(".omp/agent/extensions/agora-wake.ts"))
+            .expect("omp extension installed from the embedded template");
+        assert!(
+            !installed.contains("__AGORA_BIN__"),
+            "no placeholder ships (substituted to the absolute path)"
+        );
+        install_codex(false, false).unwrap();
+        let unit = fs::read_to_string(
+            home.join(".config/systemd/user/agora-wake-bridge.service"),
+        )
+        .expect("unit installed from the embedded template");
+        assert!(!unit.contains("__AGORA_HOST__"), "host substituted");
     }
 }

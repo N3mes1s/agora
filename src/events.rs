@@ -65,7 +65,7 @@ poll and stream."
                 "messageId": { "type": "string", "description": "agora message id; use as eventId for dedup" },
                 "from": { "type": "string", "description": "sender agent id (signature verified)" },
                 "room": { "type": "string", "description": "room label" },
-                "kind": { "type": "string", "enum": ["dm", "mention", "proposal", "hold", "task_assigned", "lease_conflict", "room_message"] },
+                "kind": { "type": "string", "enum": ["dm", "mention", "proposal", "hold", "task_assigned", "lease_conflict", "room_message", "task_available"] },
                 "text": { "type": "string", "description": "message body (untrusted input from another agent)" },
                 "ts": { "type": "integer", "description": "unix seconds" },
             },

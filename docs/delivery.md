@@ -253,3 +253,55 @@ poll + channel push; while-busy replay on the next start. Live smoke on the depl
 - **omp settle batch is one triggerTurn**: the omp extension sends the whole framed batch
   (stderr of one `agora wait` exit 2) as a single `sendMessage(..., {triggerTurn: true})` —
   one burst, one turn, never per-message turns.
+
+## 5. Pull-work (operator item, design final)
+
+Order-of-record note: the codex migration landed before pull-work on this train.
+Reason (implementer's, per the doc-edit rule): both features rewrite wait.rs and
+the bridge — the migration changes the WAIT wiring that pull-work's triggers
+extend. Migration-first gave pull-work a stable file to build on; the reverse
+order would have doubled the same-file conflict surface mid-implementation. Both
+ride one train, one verdict, one deploy, so the operator's stall fix is bound by
+the train landing, not the commit order.
+
+When an agent finishes a turn with nothing pending, `agora wait` offers it the next
+unclaimed task from its watched rooms' queues. Mechanism: the pull phase appends a
+`[pull]` section to the wake frame (or fires on quiet timeout, gated on genuinely
+idle); offers are TEXT (no auto-claim), deduped per (task, agent) in the delivered
+ledger; the claim is the existing lease-backed `task-claim` (the lease is the
+single-writer; a lost race errors and the next wake offers the second task).
+Rules (design CLOSED: f96192 + 39556e + the lead's addendum): dual triggers —
+piggyback on a message wake, plus quiet-pull on the waiter's own 300 s cadence
+(PULL_CADENCE) when idle; hook-mode default on, --for mode off, AGORA_PULL_WORK=off
+kills every path. One offer per wake, FIFO-oldest open task across watched rooms
+(stable tiebreak; simultaneous wakers self-spread through the claim race).
+Cross-waiter suppression: a `task-offer:<id>` lease, TTL = TASK_OFFER_TTL
+(named constant, 900 s default, tunable; tests assert the semantics, not the
+literal) — one wake per task per window fleet-wide; it never renews on an ignored
+offer and never locks the task. A task declined by EVERY idle agent gets no
+further offers until a generation bump: designed, not starvation — decliners are
+not nagged, and a task nobody takes is the room owner's signal to rewrite or
+assign directly (queue-filling is the owner's job).
+Per-agent: offer-once per GENERATION — a generation bumps on task content change or
+on the task returning to the queue via claim-lease expiry; a decliner is silent
+until the task materially changes, a newly idle agent is offered on its own cadence
+(churn-bounded and nag-free, stall-impossible). task_assigned's level exemption
+applies. The frame: untrusted-input banner, neutralized task text, claim command
+with the FULL 32-hex task id (copy-paste verbatim). The offer frame re-checks the
+lease-table open view (a forged or lapsed offer lease must never fabricate a wake).
+Spans: wait.offer, wait.offer.skip (reason), task.claim.via-offer — counts and
+outcomes only. MCP: events/list gains task_available (peek never claims). Rides the
+codex-migration train (tip 18a541c lineage). Conformance: qa P1-P10, F1-F3, O1-O2,
+T1, with the four re-offer cases (once-per-generation, no-reoffer-unchanged,
+reoffer-on-content-change, reoffer-on-expiry-return).
+
+Deploy-transition note (bridge migration, lead 5c1ea9): at deploy, the running
+stopgap-era bridge holds live stopgap watch children that predate the new
+bridge's start and match the stopgap cmdline — the sweep's exact stale class,
+swept at start. No wake gap: the sweep runs before the scan loop arms waiters,
+so every pane is re-armed as an `agora wait` child in the same first scan; if a
+pane's old watcher dies microseconds before its replacement arms, an addressed
+message in that gap is caught by the new waiter's while-busy replay (the mark:
+everything since the last waiter stopped replays at the new waiter's start —
+the same net that covers any waiter crash). The old bridge process is stopped
+by the deploy sequence before the new one starts; its log is preserved.

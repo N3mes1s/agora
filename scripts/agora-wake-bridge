@@ -2,12 +2,12 @@
 """agora-wake-bridge: wake codex agents (and omp agents started before the agora-wake extension) when an
 agora message addressed to them arrives, by typing it into their tmux pane once the pane is idle.
 
-Claude Code agents are woken natively by the agora-wait Stop hook, new omp sessions by the omp extension
+Claude Code agents are woken natively by the `agora wait` Stop hook, new omp sessions by the omp extension
 ~/.omp/agent/extensions/agora-wake.ts (which writes ~/.cache/agora-wait/<id>.ext; such panes are skipped).
 
 Per pane: identity = AGORA_AGENT_ID found in the pane process environment, else the tmux-derived agora id
 <host>-<session>-w<index>; extra names from ~/.config/agora-wake/aliases.json {"main:5": ["worker-7f3a91c2"]}.
-A waiter `agora-wait --for <id> --alias ... --parent <pane pid>` runs per pane; when it exits 2 the framed
+A waiter `agora wait --for <id> --alias ... --parent <pane pid>` (the M4 wake path) runs per pane; when it exits 2 the framed
 message is typed into the pane as one line + Enter, as soon as the pane is idle and its input box is empty
 (at most MAX_HOLD later it is typed anyway: codex and omp queue input during a turn), then the waiter re-arms.
 Runs as a systemd user service (agora-wake-bridge.service). Log: ~/.cache/agora-wait/bridge.log.
@@ -15,13 +15,19 @@ Runs as a systemd user service (agora-wake-bridge.service). Log: ~/.cache/agora-
 import json
 import os
 import re
+import signal
 import socket
 import subprocess
 import sys
 import time
 
 HOME = os.path.expanduser("~")
-WAIT = os.path.join(HOME, ".local/bin/agora-wait")
+# Migrated (next train): the bridge drives the agora binary's `agora wait`
+# subcommand — the M4 wake path with the delivered ledger and classify
+# pipeline — instead of the stopgap agora-wait script. The stopgap stays
+# installed as rollback until this proves out.
+AGORA = os.path.join(HOME, ".local/bin/agora")
+WAIT_ARGS = ["wait"]
 STATE = os.path.join(HOME, ".cache/agora-wait")
 ALIASES = os.path.join(HOME, ".config/agora-wake/aliases.json")
 LOG = os.path.join(STATE, "bridge.log")
@@ -107,7 +113,53 @@ def deliver(sock, pane, text):
     tmux("send-keys", "-t", pane, "Enter", sock=sock)
 
 
+
+def sweep_stale_watches():
+    """Kill stopgap `agora watch` processes left behind by a previous bridge
+    run: kill() by pid misses children re-parented when the bridge died; a
+    stale watcher held a silent subscription for 30h once. Only processes
+    whose cmdline matches the stopgap watch invocation AND whose start
+    predates this bridge's start are swept — never a fresh waiter's own
+    watch (this bridge's children are `agora wait`, a different command)."""
+    me = os.getpid()
+    swept = 0
+    for p in os.listdir("/proc"):
+        if not p.isdigit() or int(p) == me:
+            continue
+        try:
+            with open(f"/proc/{p}/cmdline", "rb") as f:
+                argv = [a.decode(errors="replace") for a in f.read().split(b"\0") if a]
+            with open(f"/proc/{p}/stat") as f:
+                after = f.read().rsplit(")", 1)[1].split()
+                start_ticks = int(after[19])
+        except (OSError, IndexError, ValueError):
+            continue
+        if not argv:
+            continue
+        bin = os.path.basename(argv[0])
+        # stopgap watch shape: <...>/agora-wait ... OR agora watch ...
+        # this bridge's waiters: <...>/agora wait --for ...
+        is_stopgap_watch = bin == "agora-wait" or (bin == "agora" and "watch" in argv[1:3])
+        if not is_stopgap_watch:
+            continue
+        # only older-than-me processes (start time comparison via /proc/self)
+        try:
+            with open("/proc/self/stat") as f:
+                my_start = int(f.read().rsplit(")", 1)[1].split()[19])
+        except (OSError, IndexError, ValueError):
+            return
+        if start_ticks >= my_start:
+            continue  # younger than this bridge: a live waiter's child, not stale
+        try:
+            os.kill(int(p), signal.SIGTERM)
+            swept += 1
+        except OSError:
+            pass
+    if swept:
+        log(f"swept {swept} stale watch process(es) from a previous bridge")
+
 def main():
+    sweep_stale_watches()
     host = socket.gethostname().split(".")[0]
     waiters = {}   # pane_id -> dict(proc, target, id, harness, started)
     pending = {}   # pane_id -> dict(text, since, target, harness)
@@ -156,7 +208,7 @@ def main():
                 waiters.pop(pane, None)
             if pane in pending:
                 continue  # re-arm after delivery
-            args = [WAIT, "--for", aid, "--parent", str(ppid)]
+            args = [AGORA] + WAIT_ARGS + ["--for", aid, "--parent", str(ppid)]
             for a in aliases.get(target, []) + aliases.get(aid, []):
                 args += ["--alias", a]
             proc = subprocess.Popen(args, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,

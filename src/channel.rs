@@ -114,6 +114,8 @@ pub enum Kind {
     TaskAssigned,
     /// M4: another agent took over the lease backing one of my task claims.
     LeaseConflict,
+    /// M4 pull-work: an open task offered to this idle agent (§5).
+    TaskAvailable,
     /// M4: an ordinary room message at notification level `all` (not
     /// addressed; the agent opted into every message in this room).
     RoomMessage,
@@ -128,6 +130,7 @@ impl Kind {
             Kind::Hold => "hold",
             Kind::TaskAssigned => "task_assigned",
             Kind::LeaseConflict => "lease_conflict",
+            Kind::TaskAvailable => "task_available",
             Kind::RoomMessage => "room_message",
         }
     }
@@ -139,6 +142,9 @@ pub fn addressed_kind(addressed: &crate::wait::Addressed) -> Kind {
         crate::wait::Addressed::Channel(kind) => kind.clone(),
         crate::wait::Addressed::Extra(extra) => match extra {
             crate::wait::ExtraKind::TaskAssigned => Kind::TaskAssigned,
+            // Pull-work offers surface on the channel as the task_available
+            // kind (events sibling; peek paths never claim).
+            crate::wait::ExtraKind::TaskAvailable => Kind::TaskAvailable,
             crate::wait::ExtraKind::LeaseConflict => Kind::LeaseConflict,
             crate::wait::ExtraKind::RoomMessage => Kind::RoomMessage,
         },
@@ -393,6 +399,7 @@ pub fn render(room: &store::RoomEntry, env: &Value, kind: &Kind) -> Value {
         ),
         Kind::Hold => format!("HOLD on your proposal in room {label}"),
         Kind::TaskAssigned => format!("Task assigned to you (announced in {label})"),
+        Kind::TaskAvailable => format!("Task offered to you from room {label} (pull-work)"),
         Kind::LeaseConflict => format!(
             "Another agent took over the lease of a task you claimed (room {label})"
         ),
@@ -913,6 +920,12 @@ mod tests {
         // Naming an agent is not addressing it.
         assert!(!mentions("to agent-a@host-a: ship it", me));
         assert!(!mentions("...not for agent-a@host-a.", me));
+        // Regression (a reported stopgap wake bug): a BARE id in text —
+        // an env dump, a tmux listing, any transcript — must not wake the
+        // agent; only @id does.
+        assert!(!mentions("env AGORA_AGENT_ID=agent-a@host-a codex resume", me));
+        assert!(!mentions("12: env AGORA_AGENT_ID=agent-a@host-a omp --resume 01a0b375", me));
+        assert!(!mentions("argv includes agent-a@host-a", me));
         assert!(mentions("ping @agent-a.", me));
         assert!(mentions("(@agent-a@host-a)", me));
         assert!(mentions("done, @agent-a@host-a.", me));
