@@ -20,7 +20,12 @@ fn temp_home(name: &str) -> std::path::PathBuf {
 
 /// `agora mcp` in a scrubbed environment; every span of 100 ms or more is logged at exit.
 fn spawn_mcp(home: &std::path::Path) -> Child {
-    Command::new(env!("CARGO_BIN_EXE_agora"))
+    spawn_mcp_with(home, true)
+}
+
+fn spawn_mcp_with(home: &std::path::Path, force_stderr: bool) -> Child {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_agora"));
+    command
         .arg("mcp")
         .env_clear()
         .env("PATH", std::env::var("PATH").unwrap_or_default())
@@ -30,9 +35,12 @@ fn spawn_mcp(home: &std::path::Path) -> Child {
         .env("AGORA_SLOW_SPAN_MS", "100")
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("spawn agora mcp")
+        .stderr(Stdio::piped());
+    if force_stderr {
+        // stderr is a pipe here, which would send the line to the log file: force the stderr path under test
+        command.env("AGORA_SLOW_SPAN_STDERR", "1");
+    }
+    command.spawn().expect("spawn agora mcp")
 }
 
 fn wait(child: &mut Child) -> std::process::ExitStatus {
@@ -59,6 +67,23 @@ fn the_exit_handler_writes_a_slow_span_line_for_a_long_command() {
     let status = wait(&mut child);
     assert!(status.success(), "agora mcp failed: {status:?}; stderr: {stderr}");
     assert!(stderr.contains("slow span"), "no slow-span line on stderr: {stderr}");
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+/// A hook's stderr is read by an agent: telemetry must stay out of it and go to the slow-span log file.
+#[test]
+fn slow_spans_stay_off_a_piped_stderr_and_go_to_the_log_file() {
+    let home = temp_home("log-file");
+    let mut child = spawn_mcp_with(&home, false);
+    std::thread::sleep(Duration::from_millis(600));
+    drop(child.stdin.take());
+    let mut stderr = String::new();
+    child.stderr.take().unwrap().read_to_string(&mut stderr).unwrap();
+    let status = wait(&mut child);
+    assert!(status.success(), "agora mcp failed: {status:?}");
+    assert!(!stderr.contains("slow span"), "telemetry leaked onto stderr: {stderr}");
+    let log = std::fs::read_to_string(home.join(".agora/slow-spans.log")).unwrap_or_default();
+    assert!(log.contains("slow span"), "no slow-span line in the log file: {log:?}");
     let _ = std::fs::remove_dir_all(&home);
 }
 

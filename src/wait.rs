@@ -908,11 +908,12 @@ fn spawn_readers(
                         }
                     },
                     |error, retry| match retry {
+                        // a reader retrying an idle stream is routine: log it, keep it out of the wake frame
                         Some(wait) => {
-                            crate::elog!(
+                            crate::telemetry::diag(&format!(
                                 "agora wait: reader {room_id}: {error}; retry in {}s",
                                 wait.as_secs()
-                            );
+                            ));
                         }
                         None => {
                             crate::elog!("agora wait: reader {room_id}: {error}; stopped");

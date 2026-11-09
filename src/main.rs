@@ -1462,7 +1462,23 @@ fn main() {
     let matches = Cli::command().get_matches();
     let cli = Cli::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
     // `agora tui` owns the terminal: its slow-span lines go to the log it already keeps.
-    agora::telemetry::init((matches.subcommand_name() == Some("tui")).then(|| store::agora_dir().join("tui.log")));
+    // Slow-span lines go to a log file, not stderr, unless stderr is a terminal: a hook's stderr (`agora wait`)
+    // is read by the agent, and a line of telemetry in it is noise in its context. `agora tui` owns the
+    // terminal, so it always logs to its own file. `AGORA_SLOW_SPAN_STDERR=1` forces stderr (tests, debugging).
+    let slow_log = {
+        use std::io::IsTerminal as _;
+        let command = matches.subcommand_name();
+        if command == Some("tui") {
+            Some(store::agora_dir().join("tui.log"))
+        } else if std::env::var_os("AGORA_SLOW_SPAN_STDERR").is_some() {
+            None
+        } else if command == Some("wait") || !std::io::stderr().is_terminal() {
+            Some(store::agora_dir().join("slow-spans.log"))
+        } else {
+            None
+        }
+    };
+    agora::telemetry::init(slow_log);
     // The subcommand's name only: its arguments may be message text.
     let span = CLI_SPAN.get_or_init(|| {
         tracing::info_span!(target: "agora", "agora.cli",

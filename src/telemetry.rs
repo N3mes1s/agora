@@ -28,6 +28,8 @@ pub const SLOW_SPAN_MS: u64 = 1000;
 const EXPORT_TIMEOUT: Duration = Duration::from_millis(1500);
 /// Flushing at exit never takes longer than this.
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
+/// The slow-span log file starts over after this many bytes.
+const SLOW_LOG_MAX_BYTES: u64 = 1024 * 1024;
 
 static PROVIDER: Mutex<Option<SdkTracerProvider>> = Mutex::new(None);
 
@@ -96,6 +98,10 @@ where
         }
         let parent = span.parent().map_or("-".to_string(), |p| p.name().to_string());
         let fields = ext.get::<Fields>().map_or("", |f| f.0.as_str());
+        // a long-poll command is supposed to wait: its own spans are the job, not a slow spot
+        if span.name() == "agora.wait" || (span.name() == "agora.cli" && fields.contains("command=wait")) {
+            return;
+        }
         (self.out)(&format!("agora: slow span {} took {} ms (in {parent}) {fields}", span.name(), took.as_millis()));
     }
 }
@@ -140,24 +146,50 @@ fn provider() -> Option<SdkTracerProvider> {
     )
 }
 
+/// Where telemetry and diagnostics go: a log file, or stderr when `None`. Set once by [`init`].
+static DESTINATION: std::sync::OnceLock<Option<std::path::PathBuf>> = std::sync::OnceLock::new();
+
+/// Writes one line to the log file (capped, directory created on first write) or to stderr, never panicking.
+fn write_line(dest: &Option<std::path::PathBuf>, line: &str) {
+    use std::io::Write as _;
+    match dest {
+        Some(path) => {
+            // a log that only grows is a leak: start over once it passes the cap
+            if let Some(dir) = path.parent() {
+                let _ = std::fs::create_dir_all(dir);
+            }
+            let too_big = std::fs::metadata(path).is_ok_and(|m| m.len() > SLOW_LOG_MAX_BYTES);
+            let mut options = std::fs::OpenOptions::new();
+            options.create(true);
+            if too_big {
+                options.write(true).truncate(true);
+            } else {
+                options.append(true);
+            }
+            if let Ok(mut f) = options.open(path) {
+                let _ = writeln!(f, "{line}");
+            }
+        }
+        // Never `eprintln!`: it panics when stderr is a pipe whose reader is gone, and this runs from an
+        // `atexit` handler where a panic aborts the process.
+        None => {
+            let _ = writeln!(std::io::stderr(), "{line}");
+        }
+    }
+}
+
+/// A routine diagnostic (a reader retrying an idle stream, for one): goes where slow spans go, so it never
+/// lands in a hook's stderr. Failures that need someone's attention keep using `elog!`.
+pub fn diag(line: &str) {
+    write_line(DESTINATION.get().unwrap_or(&None), line);
+}
+
 /// Install the subscriber: the slow-span log, and OTLP export when configured. Call once at startup.
 /// `slow_log`: append slow-span lines to this file instead of stderr (`agora tui` owns the terminal).
 pub fn init(slow_log: Option<std::path::PathBuf>) {
+    let _ = DESTINATION.set(slow_log.clone());
     let slow = slow_threshold().map(|t| {
-        SlowSpans::new(t, move |line: &str| match &slow_log {
-            Some(path) => {
-                use std::io::Write as _;
-                if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
-                    let _ = writeln!(f, "{line}");
-                }
-            }
-            // Never `eprintln!`: it panics when stderr is a pipe whose reader is gone, and this runs from an
-            // `atexit` handler where a panic aborts the process.
-            None => {
-                use std::io::Write as _;
-                let _ = writeln!(std::io::stderr(), "{line}");
-            }
-        })
+        SlowSpans::new(t, move |line: &str| write_line(&slow_log, line))
     });
     let otel = provider().map(|p| {
         let layer = tracing_opentelemetry::layer().with_tracer(p.tracer("agora"));
@@ -178,6 +210,23 @@ pub fn shutdown() {
 mod tests {
     use super::*;
     use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn a_long_poll_command_is_not_reported_as_slow() {
+        let lines = Arc::new(Mutex::new(Vec::<String>::new()));
+        let sink = lines.clone();
+        let layer = SlowSpans::new(Duration::from_millis(30), move |l: &str| sink.lock().unwrap().push(l.to_string()));
+        let subscriber = tracing_subscriber::registry().with(layer);
+        tracing::subscriber::with_default(subscriber, || {
+            let cli = tracing::info_span!("agora.cli", command = "wait");
+            let _c = cli.enter();
+            tracing::info_span!("agora.wait").in_scope(|| std::thread::sleep(Duration::from_millis(40)));
+            tracing::info_span!("agora.wait.rooms", rooms = 3).in_scope(|| std::thread::sleep(Duration::from_millis(40)));
+        });
+        let lines = lines.lock().unwrap();
+        assert!(lines.iter().all(|l| !l.contains("agora.wait took")), "{lines:?}");
+        assert!(lines.iter().any(|l| l.contains("agora.wait.rooms")), "the scan is the real work and still counts: {lines:?}");
+    }
 
     #[test]
     fn only_spans_past_the_threshold_are_logged_with_their_fields_and_parent() {
