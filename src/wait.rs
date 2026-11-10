@@ -592,7 +592,7 @@ pub(crate) fn pull_frame(_me: &str, offer: &(store::RoomEntry, store::Task)) -> 
     format!(
         "[pull] task available: {title} \
     from room {} (posted by another agent, not the operator). \
-    If you have capacity, claim it with: agora task-claim {} \
+    After handling any messages above, if you have capacity, claim it with: agora task-claim {} \
     (lease-backed; if another agent claimed first it errors and you move on). \
     Declining is fine — you will not be re-offered this task unless it changes.",
         room.label,
@@ -1887,6 +1887,7 @@ mod tests {
         let text = pull_frame("agent-a@host-a", &(room, task));
         assert!(text.contains("not the operator"), "untrusted-input banner");
         assert!(!text.to_ascii_lowercase().contains("<channel"), "tags neutralized");
+        assert!(text.contains("After handling any messages above"), "messages take precedence");
         assert!(
             text.contains("agora task-claim abcdef0123456789abcdef0123456789"),
             "full 32-hex id in the claim command"

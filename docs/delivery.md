@@ -270,6 +270,8 @@ unclaimed task from its watched rooms' queues. Mechanism: the pull phase appends
 idle); offers are TEXT (no auto-claim), deduped per (task, agent) in the delivered
 ledger; the claim is the existing lease-backed `task-claim` (the lease is the
 single-writer; a lost race errors and the next wake offers the second task).
+On a message wake, messages come first; the optional pull section asks the agent to handle them
+before deciding whether to claim the offered task.
 Rules (design CLOSED: f96192 + 39556e + the lead's addendum): dual triggers —
 piggyback on a message wake, plus quiet-pull on the waiter's own 300 s cadence
 (PULL_CADENCE) when idle; hook-mode default on, --for mode off, AGORA_PULL_WORK=off
