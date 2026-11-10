@@ -293,6 +293,22 @@ pub fn table(room: &store::RoomEntry) -> Result<BTreeMap<String, Lease>, String>
     Ok(fold(&parsed, runtime::unix_now()))
 }
 
+/// Fetch the lease table and verified acquire counts from the same fold window.
+/// Counts include expired and released leases, and fall when events age out.
+pub fn table_with_acquire_counts(
+    room: &store::RoomEntry,
+) -> Result<(BTreeMap<String, Lease>, BTreeMap<String, usize>), String> {
+    let events = chat::fetch_room_events(room, FOLD_WINDOW)?;
+    let parsed: Vec<LeaseEvent> = events.iter().filter_map(parse_event).collect();
+    let mut counts = BTreeMap::new();
+    for event in &parsed {
+        if event.action == Action::Acquire && event.resource.starts_with("task:") {
+            *counts.entry(event.resource.clone()).or_insert(0) += 1;
+        }
+    }
+    Ok((fold(&parsed, runtime::unix_now()), counts))
+}
+
 /// Lease operation failure: either someone else holds the resource, or
 /// something else went wrong (relay unreachable, bad input...).
 #[derive(Debug, Clone, PartialEq, Eq)]

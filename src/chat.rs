@@ -2316,6 +2316,12 @@ pub fn task_claim_as_ttl(
         .into_iter()
         .find(|t| t.id.starts_with(task_id))
         .ok_or_else(|| format!("No task matching '{task_id}'"))?;
+    let offered = store::load_delivered(&room.room_id, agent_id).iter().any(|entry| {
+        entry.strip_prefix("task-pull:")
+            .and_then(|entry| entry.split_once('|'))
+            .is_some_and(|(id, _)| id == task.id)
+    });
+    let _span = offered.then(|| tracing::info_span!(target: "agora", "task.claim.via-offer").entered());
     if task.status == "done" {
         return Err(format!("Task '{}' is already done.", task.id));
     }
@@ -2749,7 +2755,7 @@ pub fn apply_task_claims(
 
 /// Task view from local state + "[task]" announcements, without consulting
 /// leases. Reputation signals (stale claims) are computed from this view.
-fn task_list_unleased(room: &store::RoomEntry) -> Vec<store::Task> {
+pub(crate) fn task_list_unleased(room: &store::RoomEntry) -> Vec<store::Task> {
     // Also scan room messages for task announcements (for agents without local state)
     let msgs = store::load_messages(&room.room_id, 604800);
     fold_task_announcements(store::load_tasks(&room.room_id), &msgs)

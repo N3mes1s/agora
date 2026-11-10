@@ -600,20 +600,19 @@ fn pull_frame(_me: &str, offer: &(store::RoomEntry, store::Task)) -> String {
     )
 }
 
-
-/// The generation fingerprint (§5): task content + its updated_at (which
-/// bumps on content change AND on the lease-expiry return cycle through the
-/// task store's claim updates). Two tasks with the same fingerprint are the
-/// same generation.
-fn pull_fingerprint(task: &store::Task) -> String {
-    format!("{}:{}", task.title, task.updated_at)
+/// Content and the number of claim acquires identify a task's open epoch.
+fn pull_fingerprint(task: &store::Task, acquire_count: usize) -> String {
+    let hash = ring::digest::digest(&ring::digest::SHA256, task.title.as_bytes());
+    format!("{}:{acquire_count}", hex::encode(hash.as_ref()))
 }
 
 fn pull_offer(me: &str, rooms: &[store::RoomEntry]) -> Option<(store::RoomEntry, store::Task)> {
     // Genuinely idle: no pending, and the agent holds no un-done claim of
     // its own (the lease table view — a mid-task agent gets nothing).
     for room in rooms {
-        if let Ok(tasks) = chat::task_list(Some(&room.room_id)) {
+        if let Ok((table, counts)) = lease::table_with_acquire_counts(room) {
+            let mut tasks = chat::task_list_unleased(room);
+            chat::apply_task_claims(&mut tasks, &table);
             // FIFO-oldest open task (lease-table view: expired claim = open).
             if let Some(task) = tasks
                 .iter()
@@ -621,34 +620,16 @@ fn pull_offer(me: &str, rooms: &[store::RoomEntry]) -> Option<(store::RoomEntry,
                 .filter(|t| t.created_by != me)
                 .min_by_key(|t| t.created_at)
             {
-                // Forged-lease guard + offer-lease acquisition: the task
-                // must still be open per the lease table, and the
-                // task-offer lease must be acquirable (cross-waiter
-                // suppression within the TTL window).
-                // Per-agent generation dedup (§5): the (task, agent) ledger
-                // entry IS the generation state. A generation bumps on task
-                // content change or claim-lease expiry returning the task;
-                // the fingerprint captures both (content + open-epoch: the
-                // relay time of the lease-expiry return is stamped by
-                // re-offer, so unchanged-and-unclaimed tasks never re-fire).
-                let fingerprint = pull_fingerprint(task);
-                if let Some(seen) = store::load_delivered(&room.room_id, me)
-                    .iter()
-                    .find_map(|k| k.strip_prefix("task-pull:"))
-                    .filter(|k| k.starts_with(&task.id))
-                {
-                    // Ledger entry exists: same generation seen -> skip;
-                    // different fingerprint -> new generation -> offer.
-                    let seen_fp = seen.split('|').nth(1).unwrap_or("");
-                    if seen_fp == fingerprint {
-                        tracing::info_span!(
-                            target: "agora",
-                            "agora.wait.pull",
-                            offered = 0,
-                            reason = "same-generation",
-                        );
-                        continue; // already offered THIS generation
-                    }
+                let acquire_count = counts.get(&chat::task_resource(&task.id)).copied().unwrap_or(0);
+                let fingerprint = pull_fingerprint(task, acquire_count);
+                let ledger_key = format!("task-pull:{}|{fingerprint}", task.id);
+                if store::load_delivered(&room.room_id, me).contains(&ledger_key) {
+                    let _span = tracing::info_span!(
+                        target: "agora",
+                        "wait.offer.skip",
+                        reason = "same-generation",
+                    ).entered();
+                    continue;
                 }
                 match lease::acquire_as(
                     me,
@@ -659,32 +640,23 @@ fn pull_offer(me: &str, rooms: &[store::RoomEntry]) -> Option<(store::RoomEntry,
                     Some(&room.room_id),
                 ) {
                     Ok(lease::Acquire::Acquired(_)) => {
-                        // Record the generation in the ledger (the claim
-                        // machinery stays untouched: this is the OFFER
-                        // record, not a message-claim).
-                        store::claim_delivered(
-                            &room.room_id,
-                            me,
-                            &[format!("task-pull:{}|{fingerprint}", task.id)],
-                        );
-                        tracing::info_span!(
+                        store::claim_delivered(&room.room_id, me, &[ledger_key]);
+                        let _span = tracing::info_span!(
                             target: "agora",
-                            "agora.wait.pull",
+                            "wait.offer",
                             offered = 1,
-                            task_len = task.title.len(),
-                        );
+                        ).entered();
                         return Some((room.clone(), task.clone()));
                     }
                     // Held by another waiter's offer this window: skip
                     // with the reason on the span (counts and outcomes
                     // only, no content).
                     _ => {
-                        tracing::info_span!(
+                        let _span = tracing::info_span!(
                             target: "agora",
-                            "agora.wait.pull",
-                            offered = 0,
+                            "wait.offer.skip",
                             reason = "offer-lease-held",
-                        );
+                        ).entered();
                         continue;
                     }
                 }
@@ -1716,6 +1688,48 @@ mod tests {
                 assert_ne!(o.1.created_by, me, "own task never offered");
             }
         }
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn pull_reoffers_once_after_claim_expiry() {
+        let home = std::env::temp_dir().join(format!("agora-pull-expiry-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        let me = "agent-a@host-a";
+        let context = |now| runtime::TestRuntime::new()
+            .home(&home)
+            .var("AGORA_CONFIG", "/nonexistent/agora-test-config.toml")
+            .var("AGORA_RELAY_URL", format!("memory://{}", home.display()))
+            .unset_var("AGORA_IDENTITY_SEED")
+            .var("AGORA_AGENT_ID", me)
+            .now(now)
+            .advance_sleep();
+        let _rt = context(1000).enter();
+        chat::create_silent("ops").unwrap();
+        let room = store::find_room("ops").unwrap();
+        let task = store::Task {
+            id: "11111111111111111111111111111111".to_string(),
+            title: "returning task".to_string(),
+            status: "open".to_string(),
+            created_by: "agent-b@host-b".to_string(),
+            claimed_by: None,
+            created_at: 100,
+            updated_at: 100,
+            notes: None,
+            resume: None,
+        };
+        store::save_tasks(&room.room_id, &[task.clone()]);
+        let rooms = vec![room.clone()];
+        assert_eq!(pull_offer(me, &rooms).unwrap().1.id, task.id);
+        assert!(pull_offer(me, &rooms).is_none());
+        assert!(matches!(
+            lease::acquire_as(me, &chat::task_resource(&task.id), 5, None, 3, Some(&room.room_id)).unwrap(),
+            lease::Acquire::Acquired(_)
+        ));
+        assert!(pull_offer(me, &rooms).is_none(), "live claim is not offered");
+        let _later = context(2000).enter();
+        assert_eq!(pull_offer(me, &rooms).unwrap().1.id, task.id, "expired claim returns");
+        assert!(pull_offer(me, &rooms).is_none(), "returned epoch is offered only once");
         let _ = std::fs::remove_dir_all(&home);
     }
 

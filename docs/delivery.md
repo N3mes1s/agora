@@ -294,6 +294,10 @@ outcomes only. MCP: events/list gains task_available (peek never claims). Rides 
 codex-migration train (tip 18a541c lineage). Conformance: qa P1-P10, F1-F3, O1-O2,
 T1, with the four re-offer cases (once-per-generation, no-reoffer-unchanged,
 reoffer-on-content-change, reoffer-on-expiry-return).
+The fingerprint combines task title with the count of verified `task:<id6>` acquire events in
+the 25-hour lease fold window. Expiry or release returns the task with a new epoch without
+writing a timestamp on reads. Counts can decrease when acquires age out of that window, so
+generation stability is bounded by the fold window.
 
 Deploy-transition note (bridge migration, lead 5c1ea9): at deploy, the running
 stopgap-era bridge holds live stopgap watch children that predate the new
