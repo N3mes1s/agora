@@ -282,6 +282,10 @@ offer and never locks the task. A task declined by EVERY idle agent gets no
 further offers until a generation bump: designed, not starvation — decliners are
 not nagged, and a task nobody takes is the room owner's signal to rewrite or
 assign directly (queue-filling is the owner's job).
+Selection orders eligible tasks across all watched rooms by creation time, room ID, then task ID;
+a previously offered generation or a held offer lease is skipped so later tasks can be offered.
+An agent with a live unfinished task claim in any watched room receives no offer; checkpoint
+renewals keep it busy until expiry. If a watched room's lease state is unavailable, pull fails closed.
 Per-agent: offer-once per GENERATION — a generation bumps on task content change or
 on the task returning to the queue via claim-lease expiry; a decliner is silent
 until the task materially changes, a newly idle agent is offered on its own cadence
@@ -294,6 +298,9 @@ outcomes only. MCP: events/list gains task_available (peek never claims). Rides 
 codex-migration train (tip 18a541c lineage). Conformance: qa P1-P10, F1-F3, O1-O2,
 T1, with the four re-offer cases (once-per-generation, no-reoffer-unchanged,
 reoffer-on-content-change, reoffer-on-expiry-return).
+MCP poll and stream synthesize `task_available` from the same eligible task view and generation
+key as wait. Consuming delivery acquires the offer lease and records the generation; `peek`
+observes without acquiring a lease or recording delivery. Streams check on the pull cadence.
 The fingerprint combines task title with the count of verified `task:<id6>` acquire events in
 the 25-hour lease fold window. Expiry or release returns the task with a new epoch without
 writing a timestamp on reads. Counts can decrease when acquires age out of that window, so

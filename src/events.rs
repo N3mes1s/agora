@@ -126,6 +126,27 @@ fn iso(unix: u64) -> String {
         .to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
 }
 
+/// A synthetic occurrence shares wait's offer lease and generation ledger.
+fn task_offer(me: &str, peek: bool) -> Option<Occurrence> {
+    let rooms = channel::watched_rooms(&store::load_registry(), me);
+    let (room, task, event_id) = wait::pull_event_offer(me, &rooms, peek)?;
+    let offer = (room, task);
+    let text = wait::pull_frame(me, &offer);
+    let now = runtime::unix_now();
+    let env = json!({
+        "id": event_id,
+        "from": offer.1.created_by,
+        "text": text,
+        "ts": now,
+        "_relay_ts": now,
+    });
+    Some(Occurrence {
+        room: offer.0,
+        env,
+        kind: wait::Addressed::Extra(wait::ExtraKind::TaskAvailable),
+    })
+}
+
 /// Watched rooms and the wait-side classifier, shared by poll and push.
 fn collect(me: &str, aliases: &[String], since: u64) -> Result<(Vec<Occurrence>, u64), String> {
     let rooms = channel::watched_rooms(&store::load_registry(), me);
@@ -255,6 +276,11 @@ pub fn poll(params: &Value, limiter: &PollLimiter) -> Result<Value, (i64, String
             continue; // already delivered by another path
         }
         events.push(o.to_json());
+    }
+    if events.len() < max_events && !has_more {
+        if let Some(offer) = task_offer(&me, !claim) {
+            events.push(offer.to_json());
+        }
     }
     Ok(json!({
         "events": events,
@@ -424,12 +450,19 @@ impl Stream {
         drop(tx);
         let mut delivered: Vec<String> = Vec::new();
         let mut last_beat = Instant::now();
+        let mut next_offer = Instant::now();
         loop {
             if self.is_cancelled() {
                 for r in readers {
                     let _ = r;
                 }
                 return;
+            }
+            if Instant::now() >= next_offer {
+                if let Some(offer) = task_offer(&self.me, self.peek) {
+                    self.event(&offer);
+                }
+                next_offer = Instant::now() + wait::PULL_CADENCE;
             }
             match rx.recv_timeout(HEARTBEAT) {
                 Ok((room, payload, relay_ts)) => {
@@ -552,6 +585,53 @@ mod tests {
         assert!(kinds.contains(&json!("room_message")));
         let l = list();
         assert_eq!(l["events"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn pull_poll_peek_then_consume_shares_offer_ledger() {
+        let home = std::env::temp_dir().join(format!("agora-event-pull-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        let _rt = runtime::TestRuntime::new()
+            .home(&home)
+            .var("AGORA_CONFIG", "/nonexistent/agora-test-config.toml")
+            .var("AGORA_RELAY_URL", format!("memory://{}", home.display()))
+            .unset_var("AGORA_IDENTITY_SEED")
+            .var("AGORA_AGENT_ID", "agent-a@host-a")
+            .now(1000)
+            .advance_sleep()
+            .enter();
+        crate::chat::create_silent("ops").unwrap();
+        let room = store::find_room("ops").unwrap();
+        let task = store::Task {
+            id: "11111111111111111111111111111111".to_string(),
+            title: "open work".to_string(),
+            status: "open".to_string(),
+            created_by: "agent-b@host-b".to_string(),
+            claimed_by: None,
+            created_at: 100,
+            updated_at: 100,
+            notes: None,
+            resume: None,
+        };
+        store::save_tasks(&room.room_id, &[task.clone()]);
+        let request = |peek| json!({
+            "name": EVENT_NAME,
+            "cursor": "1:1",
+            "maxAgeMs": 2_000_000,
+            "arguments": { "peek": peek },
+        });
+        let peek = poll(&request(true), &PollLimiter::default()).unwrap();
+        let offer = peek["events"].as_array().unwrap().iter()
+            .find(|event| event["data"]["kind"] == "task_available").unwrap();
+        assert!(offer["data"]["text"].as_str().unwrap().contains(&task.id));
+        assert!(crate::lease::table(&room).unwrap().keys().all(|key| !key.starts_with("task-offer:")));
+        let consumed = poll(&request(false), &PollLimiter::default()).unwrap();
+        assert!(consumed["events"].as_array().unwrap().iter()
+            .any(|event| event["eventId"] == offer["eventId"]));
+        let again = poll(&request(false), &PollLimiter::default()).unwrap();
+        assert!(!again["events"].as_array().unwrap().iter()
+            .any(|event| event["data"]["kind"] == "task_available"));
+        let _ = std::fs::remove_dir_all(&home);
     }
 
     #[test]

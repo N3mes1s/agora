@@ -586,7 +586,7 @@ pub fn frame(me: &str, msgs: &[(store::RoomEntry, Value)]) -> String {
 /// The `[pull]` section (§5): TaskAvailable framing with the untrusted-input
 /// banner, neutralized task text, and the claim command with the FULL
 /// 32-hex id (copy-paste verbatim).
-fn pull_frame(_me: &str, offer: &(store::RoomEntry, store::Task)) -> String {
+pub(crate) fn pull_frame(_me: &str, offer: &(store::RoomEntry, store::Task)) -> String {
     let (room, task) = offer;
     let title = channel::neutralize_channel_tags(&task.title);
     format!(
@@ -607,59 +607,103 @@ fn pull_fingerprint(task: &store::Task, acquire_count: usize) -> String {
 }
 
 fn pull_offer(me: &str, rooms: &[store::RoomEntry]) -> Option<(store::RoomEntry, store::Task)> {
-    // Genuinely idle: no pending, and the agent holds no un-done claim of
-    // its own (the lease table view — a mid-task agent gets nothing).
+    pull_offer_inner(me, rooms, false).map(|(room, task, _)| (room, task))
+}
+
+/// MCP uses the same selection and generation ledger as wait. Peeking is read-only.
+pub(crate) fn pull_event_offer(
+    me: &str,
+    rooms: &[store::RoomEntry],
+    peek: bool,
+) -> Option<(store::RoomEntry, store::Task, String)> {
+    if !pull_enabled(None) {
+        return None;
+    }
+    pull_offer_inner(me, rooms, peek)
+}
+
+fn pull_offer_inner(
+    me: &str,
+    rooms: &[store::RoomEntry],
+    peek: bool,
+) -> Option<(store::RoomEntry, store::Task, String)> {
+    // Order all offerable tasks across rooms, not just the oldest in each room.
+    let mut candidates = Vec::new();
     for room in rooms {
-        if let Ok((table, counts)) = lease::table_with_acquire_counts(room) {
-            let mut tasks = chat::task_list_unleased(room);
-            chat::apply_task_claims(&mut tasks, &table);
-            // FIFO-oldest open task (lease-table view: expired claim = open).
-            if let Some(task) = tasks
-                .iter()
-                .filter(|t| t.status == "open")
-                .filter(|t| t.created_by != me)
-                .min_by_key(|t| t.created_at)
+        let Ok((table, counts)) = lease::table_with_acquire_counts(room) else {
+            // An unreadable room may contain our claim: fail closed.
+            return None;
+        };
+        let mut tasks = chat::task_list_unleased(room);
+        if table.iter().any(|(resource, lease)| {
+            let Some(id) = resource.strip_prefix("task:") else {
+                return false;
+            };
+            if lease.holder != me {
+                return false;
+            }
+            // Unknown task leases are conservatively treated as active.
+            !tasks.iter().any(|task| task.id.starts_with(id) && task.status == "done")
+        }) {
+            let _span = tracing::info_span!(
+                target: "agora",
+                "wait.offer.skip",
+                reason = "active-claim",
+            ).entered();
+            return None;
+        }
+        chat::apply_task_claims(&mut tasks, &table);
+        let delivered = store::load_delivered(&room.room_id, me);
+        for task in tasks.into_iter().filter(|t| t.status == "open" && t.created_by != me) {
+            let acquire_count = counts.get(&chat::task_resource(&task.id)).copied().unwrap_or(0);
+            let fingerprint = pull_fingerprint(&task, acquire_count);
+            let ledger_key = format!("task-pull:{}|{fingerprint}", task.id);
+            if !peek && delivered.contains(&ledger_key) {
+                let _span = tracing::info_span!(
+                    target: "agora",
+                    "wait.offer.skip",
+                    reason = "same-generation",
+                ).entered();
+                continue;
+            }
+            if peek && table.get(&format!("task-offer:{}", &task.id[..6.min(task.id.len())]))
+                .is_some_and(|offer| offer.holder != me)
             {
-                let acquire_count = counts.get(&chat::task_resource(&task.id)).copied().unwrap_or(0);
-                let fingerprint = pull_fingerprint(task, acquire_count);
-                let ledger_key = format!("task-pull:{}|{fingerprint}", task.id);
-                if store::load_delivered(&room.room_id, me).contains(&ledger_key) {
-                    let _span = tracing::info_span!(
-                        target: "agora",
-                        "wait.offer.skip",
-                        reason = "same-generation",
-                    ).entered();
-                    continue;
-                }
-                match lease::acquire_as(
-                    me,
-                    &format!("task-offer:{}", &task.id[..6.min(task.id.len())]),
-                    TASK_OFFER_TTL,
-                    Some("pull-work offer"),
-                    lease::SKEW_WINDOW_SECS + 1,
-                    Some(&room.room_id),
-                ) {
-                    Ok(lease::Acquire::Acquired(_)) => {
-                        store::claim_delivered(&room.room_id, me, &[ledger_key]);
-                        let _span = tracing::info_span!(
-                            target: "agora",
-                            "wait.offer",
-                            offered = 1,
-                        ).entered();
-                        return Some((room.clone(), task.clone()));
-                    }
-                    // Held by another waiter's offer this window: skip
-                    // with the reason on the span (counts and outcomes
-                    // only, no content).
-                    _ => {
-                        let _span = tracing::info_span!(
-                            target: "agora",
-                            "wait.offer.skip",
-                            reason = "offer-lease-held",
-                        ).entered();
-                        continue;
-                    }
-                }
+                continue;
+            }
+            candidates.push((room, task, ledger_key));
+        }
+    }
+    candidates.sort_unstable_by(|(room_a, a, _), (room_b, b, _)| {
+        (a.created_at, &room_a.room_id, &a.id).cmp(&(b.created_at, &room_b.room_id, &b.id))
+    });
+    for (room, task, ledger_key) in candidates {
+        if peek {
+            return Some((room.clone(), task, ledger_key));
+        }
+        match lease::acquire_as(
+            me,
+            &format!("task-offer:{}", &task.id[..6.min(task.id.len())]),
+            TASK_OFFER_TTL,
+            Some("pull-work offer"),
+            lease::SKEW_WINDOW_SECS + 1,
+            Some(&room.room_id),
+        ) {
+            Ok(lease::Acquire::Acquired(_)) => {
+                store::claim_delivered(&room.room_id, me, &[ledger_key.clone()]);
+                let _span = tracing::info_span!(
+                    target: "agora",
+                    "wait.offer",
+                    offered = 1,
+                ).entered();
+                return Some((room.clone(), task, ledger_key));
+            }
+            _ => {
+                let _span = tracing::info_span!(
+                    target: "agora",
+                    "wait.offer.skip",
+                    reason = "offer-lease-held",
+                ).entered();
             }
         }
     }
@@ -1650,12 +1694,9 @@ mod tests {
         let offer = pull_offer(me, &rooms).expect("oldest task offered");
         assert_eq!(offer.1.id, older.id, "FIFO-oldest first");
 
-        // Same generation: a second pull finds nothing for this agent
-        // (ledger entry with the same fingerprint).
-        assert!(
-            pull_offer(me, &rooms).is_none(),
-            "no re-offer within the same generation"
-        );
+        // The declined oldest task must not prevent the next task being offered.
+        assert_eq!(pull_offer(me, &rooms).unwrap().1.id, newer.id);
+        assert!(pull_offer(me, &rooms).is_none(), "neither unchanged task is re-offered");
 
         // Generation bump (content change): the task updates -> re-offerable.
         let mut changed = older.clone();
@@ -1679,15 +1720,101 @@ mod tests {
             resume: None,
         };
         store::save_tasks(&room.room_id, &[changed, newer.clone(), mine]);
-        // offer for the new generation of 'changed' was consumed above;
-        // the next pull must NOT pick 'mine' even though it is oldest.
-        let _ = pull_offer(me, &rooms); // may offer 'changed' or 'newer' — both fine
-        // Assert the invariant directly: own tasks never appear.
-        for _ in 0..3 {
-            if let Some(o) = pull_offer(me, &rooms) {
-                assert_ne!(o.1.created_by, me, "own task never offered");
-            }
-        }
+        assert!(pull_offer(me, &rooms).is_none(), "own task is never offered");
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn pull_skips_held_offer_and_orders_across_rooms() {
+        let home = std::env::temp_dir().join(format!("agora-pull-rooms-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        let me = "agent-a@host-a";
+        let peer = "agent-b@host-b";
+        let _rt = runtime::TestRuntime::new()
+            .home(&home)
+            .var("AGORA_CONFIG", "/nonexistent/agora-test-config.toml")
+            .var("AGORA_RELAY_URL", format!("memory://{}", home.display()))
+            .unset_var("AGORA_IDENTITY_SEED")
+            .var("AGORA_AGENT_ID", me)
+            .now(1000)
+            .advance_sleep()
+            .enter();
+        chat::create_silent("first").unwrap();
+        chat::create_silent("second").unwrap();
+        let first = store::find_room("first").unwrap();
+        let second = store::find_room("second").unwrap();
+        let task = |id: &str, created_at| store::Task {
+            id: id.to_string(),
+            title: format!("task {id}"),
+            status: "open".to_string(),
+            created_by: peer.to_string(),
+            claimed_by: None,
+            created_at,
+            updated_at: created_at,
+            notes: None,
+            resume: None,
+        };
+        let oldest = task("11111111111111111111111111111111", 100);
+        let middle = task("22222222222222222222222222222222", 200);
+        let newest = task("33333333333333333333333333333333", 300);
+        store::save_tasks(&first.room_id, &[newest.clone()]);
+        store::save_tasks(&second.room_id, &[oldest.clone(), middle.clone()]);
+        let resource = "task-offer:111111";
+        assert!(matches!(
+            lease::acquire_as(peer, resource, TASK_OFFER_TTL, None, 3, Some(&second.room_id)).unwrap(),
+            lease::Acquire::Acquired(_)
+        ));
+        let rooms = vec![first, second.clone()];
+        assert_eq!(pull_offer(me, &rooms).unwrap().1.id, middle.id, "held oldest is skipped; next oldest wins across rooms");
+        lease::release_as(peer, resource, Some(&second.room_id)).unwrap();
+        // Distinguish release and next acquire at the relay's one-second resolution.
+        runtime::sleep(Duration::from_secs(1));
+        assert_eq!(pull_offer(me, &rooms).unwrap().1.id, oldest.id, "released oldest wins across rooms");
+        assert_eq!(pull_offer(me, &rooms).unwrap().1.id, newest.id);
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn pull_waits_for_cross_room_claim_and_checkpoint_expiry() {
+        let home = std::env::temp_dir().join(format!("agora-pull-busy-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        let me = "agent-a@host-a";
+        let context = |now| runtime::TestRuntime::new()
+            .home(&home)
+            .var("AGORA_CONFIG", "/nonexistent/agora-test-config.toml")
+            .var("AGORA_RELAY_URL", format!("memory://{}", home.display()))
+            .unset_var("AGORA_IDENTITY_SEED")
+            .var("AGORA_AGENT_ID", me)
+            .now(now)
+            .advance_sleep();
+        let _rt = context(1000).enter();
+        chat::create_silent("offers").unwrap();
+        chat::create_silent("claims").unwrap();
+        let offers = store::find_room("offers").unwrap();
+        let claims = store::find_room("claims").unwrap();
+        let task = |id: &str, creator: &str| store::Task {
+            id: id.to_string(),
+            title: format!("task {id}"),
+            status: "open".to_string(),
+            created_by: creator.to_string(),
+            claimed_by: None,
+            created_at: 100,
+            updated_at: 100,
+            notes: None,
+            resume: None,
+        };
+        let offer = task("11111111111111111111111111111111", "agent-b@host-b");
+        let claimed = task("22222222222222222222222222222222", me);
+        store::save_tasks(&offers.room_id, &[offer.clone()]);
+        store::save_tasks(&claims.room_id, &[claimed.clone()]);
+        chat::task_claim_as_ttl(me, &claimed.id, 5, Some(&claims.room_id)).unwrap();
+        let rooms = vec![offers, claims.clone()];
+        assert!(pull_offer(me, &rooms).is_none(), "live claim blocks another offer");
+        chat::task_checkpoint_as(me, &claimed.id, None, Some(&claims.room_id)).unwrap();
+        let _after_original_expiry = context(1010).enter();
+        assert!(pull_offer(me, &rooms).is_none(), "checkpoint renewal still blocks");
+        let _after_renewal_expiry = context(8300).enter();
+        assert_eq!(pull_offer(me, &rooms).unwrap().1.id, offer.id, "expired renewal allows offer");
         let _ = std::fs::remove_dir_all(&home);
     }
 
