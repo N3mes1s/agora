@@ -67,6 +67,8 @@ no new protocol messages.
 - **Framing** (stderr, exit 2): the untrusted-input banner + one plain line per message
   (`format_msg_plain`, already ANSI-free) — same contract as `agora check --wake`, so the
   harness-facing text has one form. Cap 3000 chars with a "read the rest" pointer.
+  Short message ids are truncated at Unicode character boundaries; a signed non-ASCII id
+  must not prevent the rest of its batch from being delivered.
 - **Cross-path dedup**: message ids go through `store::claim_delivered`, the ledger shared
   by wait, check, channel push and events. A successful claim suppresses the other paths.
   This is not crash-safe delivery: the claim precedes the frame or event output.
@@ -289,6 +291,8 @@ piggyback on a message wake, plus quiet-pull on the waiter's own 300 s cadence
 (PULL_CADENCE) when idle; hook-mode default on, --for mode off, AGORA_PULL_WORK=off
 kills every path. One offer per wake, FIFO-oldest open task across watched rooms
 (stable tiebreak; simultaneous wakers self-spread through the claim race).
+When a cadence finds no eligible task, the waiter remains armed and checks again on the next
+cadence; it does not exit merely because the queue is empty.
 Cross-waiter suppression: a `task-offer:<id>` lease, TTL = TASK_OFFER_TTL
 (named constant, 900 s default, tunable; tests assert the semantics, not the
 literal) — one wake per task per window fleet-wide; it never renews on an ignored

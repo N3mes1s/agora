@@ -140,7 +140,7 @@ fn task_assigned_to_me(room: &store::RoomEntry, env: &Value, me: &str) -> bool {
     // The announcement must concern one of my claimed tasks: its title (the
     // claim announcement carries the title verbatim) or its 6-char id.
     my_claims.iter().any(|t| {
-        let short = &t.id[..6.min(t.id.len())];
+        let short = short_id(&t.id);
         text.contains(&t.title) || text.contains(short)
     })
 }
@@ -527,13 +527,19 @@ fn is_ephemeral_id(id: &str) -> bool {
     id.len() == 16 && id.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
+/// First six Unicode scalar values, without slicing inside an untrusted UTF-8 id.
+fn short_id(id: &str) -> &str {
+    let end = id.char_indices().nth(6).map_or(id.len(), |(index, _)| index);
+    &id[..end]
+}
+
 // ── Framing ─────────────────────────────────────────────────────
 
 /// One framed plain line per message: `[room] [hh:mm:ss] [id] sender: text`,
 /// ANSI-free and `<channel`-neutralized (models read this).
 fn frame_line(room: &store::RoomEntry, env: &Value) -> Option<String> {
     let id = env["id"].as_str().unwrap_or("?");
-    let mid = &id[..6.min(id.len())];
+    let mid = short_id(id);
     let sender = env["from"].as_str().unwrap_or("?");
     let text = env["text"].as_str().unwrap_or("");
     let ts = env["ts"].as_u64().unwrap_or(0);
@@ -665,7 +671,7 @@ fn pull_offer_inner(
                 ).entered();
                 continue;
             }
-            if peek && table.get(&format!("task-offer:{}", &task.id[..6.min(task.id.len())]))
+            if peek && table.get(&format!("task-offer:{}", short_id(&task.id)))
                 .is_some_and(|offer| offer.holder != me)
             {
                 continue;
@@ -682,7 +688,7 @@ fn pull_offer_inner(
         }
         match lease::acquire_as(
             me,
-            &format!("task-offer:{}", &task.id[..6.min(task.id.len())]),
+            &format!("task-offer:{}", short_id(&task.id)),
             TASK_OFFER_TTL,
             Some("pull-work offer"),
             lease::SKEW_WINDOW_SECS + 1,
@@ -707,6 +713,16 @@ fn pull_offer_inner(
         }
     }
     None
+}
+
+fn deliver_quiet_pull(me: &str) -> bool {
+    let rooms = channel::watched_rooms(&store::load_registry(), me);
+    let Some(offer) = pull_offer(me, &rooms) else {
+        return false;
+    };
+    let _span = tracing::info_span!(target: "agora", "agora.wait.pull", offered = 1).entered();
+    crate::elog!("{}", pull_frame(me, &offer));
+    true
 }
 
 // ── Waiter ──────────────────────────────────────────────────────
@@ -773,16 +789,10 @@ pub fn run(args: WaitArgs) -> i32 {
     // offer frame is a first-class wake: exit 2.
     if outcome == Ok(false)
         && pull_enabled(args.for_id.as_deref())
+        && deliver_quiet_pull(&me)
     {
-        let rooms = channel::watched_rooms(&store::load_registry(), &me);
-        if let Some(offer) = pull_offer(&me, &rooms) {
-            let pull_span =
-                tracing::info_span!(target: "agora", "agora.wait.pull", offered = 1);
-            let _entered = pull_span.enter();
-            crate::elog!("{}", pull_frame(&me, &offer));
-            span.record("outcome", "pull-offered");
-            return EXIT_DELIVERED;
-        }
+        span.record("outcome", "pull-offered");
+        return EXIT_DELIVERED;
     }
     span.record(
         "outcome",
@@ -851,6 +861,23 @@ struct AddressedMsg {
     env: Value,
 }
 
+fn drain_ready_messages(
+    rx: &mpsc::Receiver<AddressedMsg>,
+    me: &str,
+    aliases: &[String],
+    pending: &mut Vec<Pending>,
+    first_pending: &mut Option<Instant>,
+) {
+    while let Ok(msg) = rx.try_recv() {
+        if !pending.iter().any(|p| p.env["id"] == msg.env["id"])
+            && classify_for_wait(&msg.room, &msg.env, me, aliases).is_ok()
+        {
+            pending.push(Pending { room: msg.room, env: msg.env });
+            first_pending.get_or_insert_with(Instant::now);
+        }
+    }
+}
+
 /// Stream every watched room, classify, settle, deliver. Ok(true) = a batch
 /// was delivered (exit 2).
 fn wait_and_deliver(
@@ -858,6 +885,16 @@ fn wait_and_deliver(
     aliases: &[String],
     since: u64,
     args: &WaitArgs,
+) -> Result<bool, String> {
+    wait_and_deliver_with_cadence(me, aliases, since, args, PULL_CADENCE)
+}
+
+fn wait_and_deliver_with_cadence(
+    me: &str,
+    aliases: &[String],
+    since: u64,
+    args: &WaitArgs,
+    pull_cadence: Duration,
 ) -> Result<bool, String> {
     let rooms = channel::watched_rooms(&store::load_registry(), me);
     if rooms.is_empty() {
@@ -895,6 +932,8 @@ fn wait_and_deliver(
         rooms.iter().map(|r| r.room_id.clone()).collect();
     let mut readers = readers;
     let mut last_rescan = Instant::now();
+    let mut next_pull = pull_enabled(args.for_id.as_deref())
+        .then(|| Instant::now() + pull_cadence);
 
     let mut outcome = loop {
         if let Some(pid) = args.parent
@@ -905,6 +944,13 @@ fn wait_and_deliver(
         let now = Instant::now();
         if now >= deadline {
             break Ok(false);
+        }
+        if pending.is_empty() && next_pull.is_some_and(|at| now >= at) {
+            next_pull = Some(now + pull_cadence);
+            drain_ready_messages(&rx, me, aliases, &mut pending, &mut first_pending);
+            if pending.is_empty() && deliver_quiet_pull(me) {
+                return Ok(true);
+            }
         }
         if now.duration_since(last_rescan) >= RESCAN {
             last_rescan = now;
@@ -979,6 +1025,13 @@ fn wait_and_deliver(
             let now = Instant::now();
             if now >= deadline {
                 break Ok(false);
+            }
+            if pending.is_empty() && next_pull.is_some_and(|at| now >= at) {
+                next_pull = Some(now + pull_cadence);
+                drain_ready_messages(&rx, me, aliases, &mut pending, &mut first_pending);
+                if pending.is_empty() && deliver_quiet_pull(me) {
+                    return Ok(true);
+                }
             }
             if let Some(first) = first_pending
                 && now.duration_since(first) >= SETTLE
@@ -1055,12 +1108,14 @@ fn spawn_readers(
         let tx = tx.clone();
         let room_id = room.room_id.clone();
         let since = since.to_string();
+        let rt = runtime::snapshot_current();
         let spawned = std::thread::Builder::new()
             .name(format!(
                 "agora-wait-{}",
                 &room_id[..12.min(room_id.len())]
             ))
             .spawn(move || {
+                rt.install();
                 let key = crypto::derive_room_key(&room.secret, &room.room_id);
                 let config = transport::StreamConfig {
                     reconnect: true,
@@ -1438,6 +1493,44 @@ mod tests {
         injected["id"] = json!("abcdef0123");
         let text = frame(me, &[(r, injected)]);
         assert!(!text.contains("<channel"), "channel tags neutralized");
+    }
+
+    #[test]
+    fn signed_unicode_id_does_not_lose_healthy_batch() {
+        let home = std::env::temp_dir().join(format!("agora-unicode-batch-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        let me = "agent-a@host-a";
+        let _rt = runtime::TestRuntime::new()
+            .home(&home)
+            .var("AGORA_CONFIG", "/nonexistent/agora-test-config.toml")
+            .var("AGORA_RELAY_URL", format!("memory://{}", home.display()))
+            .unset_var("AGORA_IDENTITY_SEED")
+            .var("AGORA_AGENT_ID", me)
+            .now(1000)
+            .advance_sleep()
+            .enter();
+        chat::create_silent("ops").unwrap();
+        let room = store::find_room("ops").unwrap();
+        let key = crypto::derive_room_key(&room.secret, &room.room_id);
+        let mut unicode = env("agent-b@host-b", "@agent-a@host-a unicode message");
+        unicode["id"] = json!("abcdeé");
+        let mut healthy = env("agent-b@host-b", "@agent-a@host-a healthy message");
+        healthy["id"] = json!("healthy-id");
+        let mut verified = Vec::new();
+        for message in [unicode, healthy] {
+            let wire = chat::encrypt_envelope(&message, &key, &room.room_id);
+            let decoded = chat::decrypt_payload(&wire, &key, &room.room_id).unwrap();
+            assert_eq!(decoded["_auth"], "verified");
+            transport::publish_checked(&room.room_id, &wire).unwrap();
+            verified.push((room.clone(), decoded));
+        }
+        let args = WaitArgs { for_id: Some(me.to_string()), aliases: vec![], parent: None, timeout: Some(Duration::from_secs(5)) };
+        assert_eq!(wait_and_deliver(me, &[], 0, &args), Ok(true));
+        let delivered = store::load_delivered(&room.room_id, me);
+        assert!(delivered.contains("abcdeé") && delivered.contains("healthy-id"));
+        let output = frame(me, &verified);
+        assert!(output.contains("unicode message") && output.contains("healthy message"));
+        let _ = std::fs::remove_dir_all(&home);
     }
 
     #[test]
@@ -1891,6 +1984,84 @@ mod tests {
             "full 32-hex id in the claim command"
         );
         assert!(text.contains("Declining is fine"), "no-nag note");
+    }
+
+    #[test]
+    fn quiet_pull_rechecks_for_work_after_an_empty_cadence() {
+        let home = std::env::temp_dir().join(format!("agora-cadence-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        let me = "agent-a@host-a";
+        let _rt = runtime::TestRuntime::new()
+            .home(&home)
+            .var("AGORA_CONFIG", "/nonexistent/agora-test-config.toml")
+            .var("AGORA_RELAY_URL", format!("memory://{}", home.display()))
+            .unset_var("AGORA_IDENTITY_SEED")
+            .unset_var("AGORA_PULL_WORK")
+            .var("AGORA_AGENT_ID", me)
+            .now(1000)
+            .advance_sleep()
+            .enter();
+        chat::create_silent("ops").unwrap();
+        let room = store::find_room("ops").unwrap();
+        let room_id = room.room_id.clone();
+        let writer = runtime::spawn_with_current(move || {
+            std::thread::sleep(Duration::from_millis(700));
+            store::save_tasks(&room_id, &[store::Task {
+                id: "11111111111111111111111111111111".to_string(),
+                title: "new work".to_string(),
+                status: "open".to_string(),
+                created_by: "agent-b@host-b".to_string(),
+                claimed_by: None,
+                created_at: 100,
+                updated_at: 100,
+                notes: None,
+                resume: None,
+            }]);
+        });
+        let args = WaitArgs { for_id: None, aliases: vec![], parent: None, timeout: Some(Duration::from_secs(3)) };
+        let started = Instant::now();
+        let result = wait_and_deliver_with_cadence(me, &[], 0, &args, Duration::from_millis(50));
+        writer.join().unwrap();
+        assert_eq!(result, Ok(true), "later work wakes the still-running waiter");
+        assert!(started.elapsed() >= Duration::from_millis(700));
+        assert!(store::load_delivered(&room.room_id, me).iter().any(|id| id.starts_with("task-pull:111111")));
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn quiet_pull_cadence_respects_for_mode_and_kill_switch() {
+        let home = std::env::temp_dir().join(format!("agora-cadence-off-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        let me = "agent-a@host-a";
+        let base = runtime::TestRuntime::new()
+            .home(&home)
+            .var("AGORA_CONFIG", "/nonexistent/agora-test-config.toml")
+            .var("AGORA_RELAY_URL", format!("memory://{}", home.display()))
+            .unset_var("AGORA_IDENTITY_SEED")
+            .unset_var("AGORA_PULL_WORK")
+            .var("AGORA_AGENT_ID", me)
+            .now(1000)
+            .advance_sleep();
+        let _rt = base.clone().enter();
+        chat::create_silent("ops").unwrap();
+        let room = store::find_room("ops").unwrap();
+        store::save_tasks(&room.room_id, &[store::Task {
+            id: "11111111111111111111111111111111".to_string(),
+            title: "available work".to_string(),
+            status: "open".to_string(),
+            created_by: "agent-b@host-b".to_string(),
+            claimed_by: None,
+            created_at: 100,
+            updated_at: 100,
+            notes: None,
+            resume: None,
+        }]);
+        let args = |for_id| WaitArgs { for_id, aliases: vec![], parent: None, timeout: Some(Duration::from_millis(600)) };
+        assert_eq!(wait_and_deliver_with_cadence(me, &[], 0, &args(Some(me.to_string())), Duration::from_millis(10)), Ok(false));
+        let _off = base.var("AGORA_PULL_WORK", "off").enter();
+        assert_eq!(wait_and_deliver_with_cadence(me, &[], 0, &args(None), Duration::from_millis(10)), Ok(false));
+        assert!(store::load_delivered(&room.room_id, me).is_empty());
+        let _ = std::fs::remove_dir_all(&home);
     }
 
     #[test]
