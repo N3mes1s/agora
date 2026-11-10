@@ -8,10 +8,9 @@
 //! rooms. Rooms watched are [`channel::watched_rooms`]: every non-DM room
 //! plus the canonical DM rooms that have this agent on one side.
 //!
-//! Delivery claims the per-agent delivered ledger
-//! ([`store::claim_delivered`]), so a message reaches the session once by
-//! whichever path delivers it first (this waiter, channel push, or an events
-//! poll).
+//! Delivery claims the per-agent delivered ledger ([`store::claim_delivered`])
+//! before output, suppressing other delivery paths. A crash after the claim
+//! can lose a message before the session sees it.
 //!
 //! Messages that arrived while the agent was busy (no waiter running) are
 //! replayed on the next start from the per-agent mark
@@ -950,9 +949,8 @@ fn wait_and_deliver(
         return outcome;
     }
 
-    // Claim through the delivered ledger: exactly-once with channel push and
-    // `agora check --wake`. Whatever was already delivered elsewhere drops
-    // out here.
+    // Claim through the shared ledger to suppress other paths. A crash
+    // after this claim and before output can lose the wake.
     let mut delivered: Vec<(store::RoomEntry, Value)> = Vec::new();
     for p in &pending {
         let id = p.id();

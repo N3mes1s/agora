@@ -53,8 +53,8 @@ or a takeover of one of its task-claim leases. Same classification as the agora 
                     "default": false,
                     "description": "Do not record the returned events as delivered to this \
 agent's session (observer mode: the wake hook and channel push still deliver them later). Default \
-false: poll claims the delivered ledger, so exactly-once holds across wait, check, channel push, \
-poll and stream."
+false: poll claims the delivered ledger before output, suppressing repeat delivery across wait, \
+check, channel push, poll and stream. A crash after the claim can lose the event."
                 }
             },
             "additionalProperties": false,
@@ -204,11 +204,9 @@ impl PollLimiter {
     }
 }
 
-/// Handle `events/poll`. Claims the delivered ledger for the returned events
-/// by default (the polling client is the agent's own session; the wake hook
-/// and channel push then stay quiet for them — exactly-once across all five
-/// delivery paths). With `arguments.peek: true` nothing is recorded: a pure
-/// observer read, replayable by cursor.
+/// Handle `events/poll`. By default, a pre-output ledger claim suppresses
+/// other delivery paths, but a crash after the claim can lose the event.
+/// With `arguments.peek: true` nothing is recorded: a pure observer read.
 pub fn poll(params: &Value, limiter: &PollLimiter) -> Result<Value, (i64, String, Value)> {
     let name = params["name"].as_str().unwrap_or("");
     if name != EVENT_NAME {
@@ -486,8 +484,9 @@ impl Stream {
                             wait::classify_for_wait(&room, &env, &self.me, &self.aliases)
                         {
                             let o = Occurrence { room, env, kind };
-                            // Claim, then emit: once per session across
-                            // paths. peek mode emits without claiming (an
+                            // Claim, then emit: suppress other paths, but a
+                            // crash after the claim can lose the event.
+                            // Peek mode emits without claiming (an
                             // observer stream does not consume delivery).
                             if !self.peek && !id.is_empty() && id != "?" {
                                 if store::claim_delivered(

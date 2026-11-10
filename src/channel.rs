@@ -21,9 +21,9 @@
 //! agent, says it is not the user, and neutralizes `<channel` tags in the
 //! body. The server never declares `claude/channel/permission`.
 //!
-//! Delivered ids go to a per-agent ledger ([`store::claim_delivered`]) that
-//! the `agora check --wake` hook shares, so a message reaches the session
-//! once, by whichever path claims it first.
+//! Delivered ids go to the per-agent ledger ([`store::claim_delivered`]) shared
+//! with the wake hook. A claim suppresses other paths, but a crash after the
+//! claim and before output can lose the message.
 
 use crate::{chat, crypto, lease, proposal, runtime, store, transport};
 use serde_json::{Value, json};

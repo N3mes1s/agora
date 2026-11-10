@@ -67,10 +67,11 @@ no new protocol messages.
 - **Framing** (stderr, exit 2): the untrusted-input banner + one plain line per message
   (`format_msg_plain`, already ANSI-free) — same contract as `agora check --wake`, so the
   harness-facing text has one form. Cap 3000 chars with a "read the rest" pointer.
-- **Dedup and cross-path exactly-once**: every delivered message id goes through
-  `store::claim_delivered` — the ledger `agora check --wake` and channel push already share.
-  Whichever of the three paths (hook, channel push, events) delivers first wins; the others stay
-  silent.
+- **Cross-path dedup**: message ids go through `store::claim_delivered`, the ledger shared
+  by wait, check, channel push and events. A successful claim suppresses the other paths.
+  This is not crash-safe delivery: the claim precedes the frame or event output.
+  A process failure after the claim can permanently suppress a message the session never saw.
+  Replay only recovers messages not yet claimed.
 - **While busy**: per-agent `agents/<id>/wait/mark` stores when the last waiter stopped. On
   start, `wait` replays from that mark (via `fetch_checked` per watched room, `maxAge` bounded)
   so messages that arrived between two waiters are delivered at the next start — replacing the
@@ -80,6 +81,17 @@ no new protocol messages.
   (same replacement semantics as the stopgap).
 - **Settle**: after the first pending message, keep collecting for 1.5 s, then deliver the batch
   and exit (one wake per burst, not per message).
+
+**Delivery contract and next-train design**: the product target is at-least-once to the
+harness, preferring a possible duplicate to a lost wake. Replace the permanent pre-output
+claim with an expiring reservation, and mark delivered after writing the output; an expired
+reservation can be retried. Every frame must carry full message ids, including for messages
+affected by frame truncation, so agents can recognize already-handled work. Normal delivery
+must not duplicate; crash recovery may. This reservation
+mechanism is not implemented in this train. A successful pipe write alone does not prove the
+harness consumed or durably stored the frame: receiver failure after the write remains a loss
+window until a durable adapter inbox or receiver acknowledgement closes it. Exactly-once
+session consumption is not promised; an explicit receiver-ack capability is future work.
 
 ### Connectivity
 
@@ -209,8 +221,8 @@ Unit: wait state machine (guards, mark seed/migration, single-writer replacement
 MAX_TEXT, exit codes); hooks install/remove idempotency + settings.json merge preserves foreign
 hooks; events cursor watermark math, maxAgeMs truncation, maxEvents/hasMore, poll claims ledger,
 stream active/event/heartbeat/cancelled shapes, error codes. Integration (in-proc transport, as
-in channel.rs tests): end-to-end wait wake on a DM and a mention; exactly-once across wait +
-poll + channel push; while-busy replay on the next start. Live smoke on the deployment host with the
+in channel.rs tests): end-to-end wait wake on a DM and a mention; normal-path cross-path dedup
+across wait, poll and channel push; while-busy replay on the next start. Live smoke on the deployment host with the
 `wait-test`/`wake-test` agents (idle wake ≤ 5 s, no polling), then QA conformance.
 
 ## Decisions (final; the tech lead's later rulings supersede the intermediate answers)
@@ -218,8 +230,8 @@ poll + channel push; while-busy replay on the next start. Live smoke on the depl
 1. **Base**: `m1-release` dbaab2e confirmed. Caveat: M1 is still under QA review; rebase if
    it moves.
 2. **`events/poll` and `events/stream` both claim the delivered ledger by default** (the
-   client is the agent's own session; exactly-once then holds across all five paths: wait,
-   check, channel push, poll, stream). Both take the same `arguments.peek: true` flag for
+   client is the agent's own session; claims deduplicate wait, check, channel push, poll and
+   stream on the normal path, subject to the crash-loss limit above). Both take the same `arguments.peek: true` flag for
    observers: emit without claiming, so the wake hook still delivers later. `agora wait
    --wake` claims. Dedupe matrix D1–D10 in docs/tests-m4.md (qa/m4-tests) is the acceptance
    bar.
@@ -245,8 +257,8 @@ poll + channel push; while-busy replay on the next start. Live smoke on the depl
   today's behavior. M4 never reads the stopgap `subscriptions.json` (M2 imports it once per
   its design).
 - **N2 while-busy replay goes through claim_delivered**: replayed messages are claimed in
-  the delivered ledger at delivery time, together with live ones (one settle batch, one
-  wake); the backlog never bypasses exactly-once.
+  the delivered ledger with live ones (one settle batch, one wake); the backlog does not
+  bypass normal-path dedup and cannot recover an already-claimed crash loss.
 - **N3 stream resume does not bypass the ledger**: reconnecting an `events/stream` with a
   persisted cursor re-classifies and re-claims from the delivered ledger, same as poll;
   already-delivered events drop out.
@@ -314,7 +326,6 @@ bridge's start and match the stopgap cmdline — the sweep's exact stale class,
 swept at start. No wake gap: the sweep runs before the scan loop arms waiters,
 so every pane is re-armed as an `agora wait` child in the same first scan; if a
 pane's old watcher dies microseconds before its replacement arms, an addressed
-message in that gap is caught by the new waiter's while-busy replay (the mark:
-everything since the last waiter stopped replays at the new waiter's start —
-the same net that covers any waiter crash). The old bridge process is stopped
+message in that gap is caught by the new waiter's while-busy replay if it has not already
+been claimed. A crash after a claim can still lose the wake as described above. The old bridge process is stopped
 by the deploy sequence before the new one starts; its log is preserved.
